@@ -104,6 +104,11 @@ struct MemoryCandidate {
     confidence: f64,
 }
 
+struct StartupIndicator {
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
 impl Drop for WorkspaceContextGuard {
     fn drop(&mut self) {
         if let Some(original) = &self.original {
@@ -114,10 +119,59 @@ impl Drop for WorkspaceContextGuard {
     }
 }
 
+impl StartupIndicator {
+    fn start(message: &'static str) -> Self {
+        if !std::io::stderr().is_terminal() {
+            return Self {
+                stop: Arc::new(AtomicBool::new(true)),
+                handle: None,
+            };
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let mut index = 0_usize;
+            while !thread_stop.load(Ordering::SeqCst) {
+                eprint!("\r\x1b[2K{} {}", frames[index % frames.len()], message);
+                let _ = std::io::stderr().flush();
+                index += 1;
+                thread::sleep(std::time::Duration::from_millis(90));
+            }
+            eprint!("\r\x1b[2K");
+            let _ = std::io::stderr().flush();
+        });
+
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn stop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 #[derive(Debug)]
 enum StreamMessage {
     Chunk { kind: StreamKind, bytes: Vec<u8> },
     Closed { kind: StreamKind },
+}
+
+#[derive(Default)]
+struct PendingTranscript {
+    stdin: Option<PathBuf>,
+    stdout: Option<PathBuf>,
+}
+
+enum TranscriptStream {
+    Stdin,
+    Stdout,
 }
 
 impl RuntimeEngine {
@@ -128,6 +182,8 @@ impl RuntimeEngine {
             ));
         }
 
+        let mut startup_indicator =
+            StartupIndicator::start("Contynu is restoring continuity for this run...");
         let state = StatePaths::new(&config.state_dir);
         state.ensure_layout()?;
         let store = MetadataStore::open(state.sqlite_db())?;
@@ -148,6 +204,7 @@ impl RuntimeEngine {
         };
         let turn_id = TurnId::new();
         let journal = Journal::open(state.journal_path_for_session(&session_id))?;
+        Self::reconcile_pending_transcripts(&state, &journal, &store, &session_id)?;
         let adapter = AdapterSpec::detect(&config.command[0].to_string_lossy(), &config_file);
         let transport = resolve_transport(&adapter);
         if continuing_session {
@@ -274,6 +331,7 @@ impl RuntimeEngine {
         } else {
             None
         };
+        startup_indicator.stop();
 
         let interrupted = Arc::new(AtomicBool::new(false));
         let capture = Self::execute_launch_plan(
@@ -382,6 +440,99 @@ impl RuntimeEngine {
     fn persist(journal: &Journal, store: &MetadataStore, draft: EventDraft) -> Result<()> {
         let (event, append) = journal.append(draft)?;
         store.record_event(&event, &journal.path().display().to_string(), append)?;
+        Ok(())
+    }
+
+    fn reconcile_pending_transcripts(
+        state: &StatePaths,
+        journal: &Journal,
+        store: &MetadataStore,
+        session_id: &SessionId,
+    ) -> Result<()> {
+        let runtime_dir = state.project_runtime_dir(session_id);
+        if !runtime_dir.exists() {
+            return Ok(());
+        }
+
+        let mut pending = std::collections::BTreeMap::<TurnId, PendingTranscript>::new();
+        for entry in std::fs::read_dir(&runtime_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if let Some((turn_id, stream)) = parse_transcript_log_name(session_id, name) {
+                let transcript = pending.entry(turn_id).or_default();
+                match stream {
+                    TranscriptStream::Stdin => transcript.stdin = Some(path),
+                    TranscriptStream::Stdout => transcript.stdout = Some(path),
+                }
+            }
+        }
+
+        for (turn_id, transcript) in pending {
+            let events = store.list_events_for_turn(session_id, &turn_id)?;
+            let has_stdin = events
+                .iter()
+                .any(|event| event.event_type == "stdin_captured");
+            let has_stdout = events
+                .iter()
+                .any(|event| event.event_type == "stdout_captured");
+
+            if let Some(path) = transcript.stdin.as_ref() {
+                if !has_stdin {
+                    let bytes = std::fs::read(path).unwrap_or_default();
+                    if !bytes.is_empty() {
+                        Self::persist(
+                            journal,
+                            store,
+                            EventDraft::new(
+                                session_id.clone(),
+                                Some(turn_id.clone()),
+                                Actor::Runtime,
+                                EventType::StdinCaptured,
+                                json!({
+                                    "text": String::from_utf8_lossy(&bytes).into_owned(),
+                                    "stream": "stdin",
+                                    "bytes": bytes.len(),
+                                    "recovered": true,
+                                }),
+                            ),
+                        )?;
+                    }
+                }
+                let _ = std::fs::remove_file(path);
+            }
+
+            if let Some(path) = transcript.stdout.as_ref() {
+                if !has_stdout {
+                    let bytes = std::fs::read(path).unwrap_or_default();
+                    if !bytes.is_empty() {
+                        Self::persist(
+                            journal,
+                            store,
+                            EventDraft::new(
+                                session_id.clone(),
+                                Some(turn_id.clone()),
+                                Actor::Runtime,
+                                EventType::StdoutCaptured,
+                                json!({
+                                    "text": String::from_utf8_lossy(&bytes).into_owned(),
+                                    "stream": "stdout",
+                                    "bytes": bytes.len(),
+                                    "recovered": true,
+                                }),
+                            ),
+                        )?;
+                    }
+                }
+                let _ = std::fs::remove_file(path);
+            }
+        }
+
         Ok(())
     }
 
@@ -619,8 +770,16 @@ impl RuntimeEngine {
     ) -> Result<ProcessCapture> {
         let runtime_dir = state.project_runtime_dir(session_id);
         std::fs::create_dir_all(&runtime_dir)?;
-        let stdin_log = runtime_dir.join(format!("{}-stdin.log", turn_id.as_str()));
-        let stdout_log = runtime_dir.join(format!("{}-stdout.log", turn_id.as_str()));
+        let stdin_log = runtime_dir.join(format!(
+            "{}--{}--stdin.log",
+            session_id.as_str(),
+            turn_id.as_str()
+        ));
+        let stdout_log = runtime_dir.join(format!(
+            "{}--{}--stdout.log",
+            session_id.as_str(),
+            turn_id.as_str()
+        ));
 
         let command_text = shell_command_text(&launch_plan.executable, &launch_plan.args);
         let mut command = Command::new("script");
@@ -686,6 +845,8 @@ impl RuntimeEngine {
                 ),
             )?;
         }
+        let _ = std::fs::remove_file(&stdin_log);
+        let _ = std::fs::remove_file(&stdout_log);
 
         Ok(ProcessCapture {
             stdin_bytes,
@@ -1119,6 +1280,40 @@ fn shell_command_text(executable: &OsString, args: &[OsString]) -> String {
 #[cfg(unix)]
 fn shell_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn parse_transcript_log_name(
+    session_id: &SessionId,
+    name: &str,
+) -> Option<(TurnId, TranscriptStream)> {
+    let prefix = format!("{}--", session_id.as_str());
+    let suffix = if name.ends_with("--stdin.log") {
+        TranscriptStream::Stdin
+    } else if name.ends_with("--stdout.log") {
+        TranscriptStream::Stdout
+    } else if name.ends_with("-stdin.log") {
+        TranscriptStream::Stdin
+    } else if name.ends_with("-stdout.log") {
+        TranscriptStream::Stdout
+    } else {
+        return None;
+    };
+
+    if let Some(rest) = name.strip_prefix(&prefix) {
+        let turn_text = rest
+            .strip_suffix("--stdin.log")
+            .or_else(|| rest.strip_suffix("--stdout.log"))?;
+        return TurnId::parse(turn_text.to_string())
+            .ok()
+            .map(|turn_id| (turn_id, suffix));
+    }
+
+    let turn_text = name
+        .strip_suffix("-stdin.log")
+        .or_else(|| name.strip_suffix("-stdout.log"))?;
+    TurnId::parse(turn_text.to_string())
+        .ok()
+        .map(|turn_id| (turn_id, suffix))
 }
 
 fn derive_structured_candidates(
