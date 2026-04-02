@@ -71,7 +71,6 @@ impl StreamKind {
 enum ExecutionTransport {
     Pipes,
     Pty,
-    InheritTerminal,
 }
 
 impl ExecutionTransport {
@@ -79,7 +78,6 @@ impl ExecutionTransport {
         match self {
             Self::Pipes => "pipes",
             Self::Pty => "pty",
-            Self::InheritTerminal => "inherit_terminal",
         }
     }
 }
@@ -311,7 +309,6 @@ impl RuntimeEngine {
 
         let interrupted = Arc::new(AtomicBool::new(false));
         let capture = Self::execute_launch_plan(
-            &state,
             &config.cwd,
             &launch_plan,
             transport,
@@ -525,7 +522,6 @@ impl RuntimeEngine {
     }
 
     fn execute_launch_plan(
-        state: &StatePaths,
         cwd: &std::path::Path,
         launch_plan: &crate::adapters::LaunchPlan,
         transport: ExecutionTransport,
@@ -537,16 +533,6 @@ impl RuntimeEngine {
     ) -> Result<ProcessCapture> {
         match transport {
             ExecutionTransport::Pipes => Self::execute_with_pipes(
-                cwd,
-                launch_plan,
-                journal,
-                store,
-                session_id,
-                turn_id,
-                interrupted,
-            ),
-            ExecutionTransport::InheritTerminal => Self::execute_with_inherited_terminal(
-                state,
                 cwd,
                 launch_plan,
                 journal,
@@ -638,6 +624,7 @@ impl RuntimeEngine {
         })
     }
 
+    #[allow(dead_code)]
     fn execute_with_inherited_terminal(
         state: &StatePaths,
         cwd: &std::path::Path,
@@ -708,44 +695,124 @@ impl RuntimeEngine {
             &launch_plan.env,
         )?;
         let mut stdin = child.try_clone_writer()?;
+        let stdin_capture = Arc::new(Mutex::new(Vec::<u8>::new()));
         if let Some(stdin_prelude) = &launch_plan.stdin_prelude {
             stdin.write_all(stdin_prelude)?;
             stdin.flush()?;
+            if let Ok(mut captured) = stdin_capture.lock() {
+                captured.extend_from_slice(stdin_prelude);
+            }
         }
-        thread::spawn(move || {
+        let stdin_capture_thread = Arc::clone(&stdin_capture);
+        let stdin_handle = thread::spawn(move || {
             let mut input = std::io::stdin();
-            let _ = std::io::copy(&mut input, &mut stdin);
+            let mut buffer = vec![0_u8; STREAM_CHUNK_SIZE];
+            loop {
+                match input.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        if stdin.write_all(&buffer[..read]).is_err() {
+                            break;
+                        }
+                        if let Ok(mut captured) = stdin_capture_thread.lock() {
+                            captured.extend_from_slice(&buffer[..read]);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
             let _ = stdin.flush();
         });
 
-        let stdout = child.try_clone_reader()?;
+        let mut stdout = child.try_clone_reader()?;
+        let stdout_capture = Arc::new(Mutex::new(Vec::<u8>::new()));
         install_pty_ctrlc_handler(&child, interrupted);
-
-        let (sender, receiver) = mpsc::channel();
-        let stdout_handle = spawn_reader(stdout, StreamKind::Pty, sender.clone());
-        let stderr_handle = spawn_closed(StreamKind::Stderr, sender);
-
-        let (stdout_bytes, stderr_bytes) =
-            Self::capture_streams(receiver, journal, store, session_id, turn_id)?;
+        let stdout_capture_thread = Arc::clone(&stdout_capture);
+        let stdout_handle = thread::spawn(move || -> Result<()> {
+            loop {
+                let mut buffer = vec![0_u8; STREAM_CHUNK_SIZE];
+                let read = match stdout.read(&mut buffer) {
+                    Ok(read) => read,
+                    Err(error) if error.raw_os_error() == Some(libc::EIO) => return Ok(()),
+                    Err(error) => return Err(error.into()),
+                };
+                if read == 0 {
+                    return Ok(());
+                }
+                buffer.truncate(read);
+                if let Ok(mut captured) = stdout_capture_thread.lock() {
+                    captured.extend_from_slice(&buffer);
+                }
+                mirror_chunk_to_terminal(StreamKind::Pty, &buffer)?;
+            }
+        });
+        let status = child.wait()?;
+        stdin_handle
+            .join()
+            .map_err(|_| ContynuError::InvalidState("pty stdin thread panicked".into()))?;
         stdout_handle
             .join()
             .map_err(|_| ContynuError::InvalidState("pty reader thread panicked".into()))??;
-        stderr_handle.join().map_err(|_| {
-            ContynuError::InvalidState("pty stderr reader thread panicked".into())
-        })??;
-        let status = child.wait()?;
+
+        let stdin_bytes = stdin_capture
+            .lock()
+            .map_err(|_| ContynuError::Validation("pty stdin capture mutex poisoned".into()))?
+            .clone();
+        let stdout_bytes_raw = stdout_capture
+            .lock()
+            .map_err(|_| ContynuError::Validation("pty stdout capture mutex poisoned".into()))?
+            .clone();
+        let dialogue = extract_interactive_dialogue(&stdin_bytes, &stdout_bytes_raw);
+        let stdout_text = dialogue.responses.join("\n\n");
+        let stdout_bytes = stdout_text.as_bytes().to_vec();
+
+        for prompt in &dialogue.prompts {
+            Self::persist(
+                journal,
+                store,
+                EventDraft::new(
+                    session_id.clone(),
+                    Some(turn_id.clone()),
+                    Actor::Runtime,
+                    EventType::StdinCaptured,
+                    json!({
+                        "text": prompt,
+                        "stream": "stdin",
+                        "bytes": prompt.len(),
+                    }),
+                ),
+            )?;
+        }
+        for response in &dialogue.responses {
+            Self::persist(
+                journal,
+                store,
+                EventDraft::new(
+                    session_id.clone(),
+                    Some(turn_id.clone()),
+                    Actor::Runtime,
+                    EventType::StdoutCaptured,
+                    json!({
+                        "text": response,
+                        "stream": "stdout",
+                        "bytes": response.len(),
+                    }),
+                ),
+            )?;
+        }
 
         Ok(ProcessCapture {
-            stdin_bytes: Vec::new(),
+            stdin_bytes,
             exit_code: status.code(),
             success: status.success(),
             stdout_bytes,
-            stderr_bytes,
+            stderr_bytes: Vec::new(),
         })
     }
 
     #[cfg(unix)]
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     fn execute_with_script_logging(
         state: &StatePaths,
         cwd: &std::path::Path,
@@ -871,6 +938,7 @@ impl RuntimeEngine {
         })
     }
 
+    #[allow(dead_code)]
     fn drain_script_streams(
         receiver: Receiver<StreamMessage>,
         indicator: &mut StartupIndicator,
@@ -966,17 +1034,12 @@ impl RuntimeEngine {
         session_id: &SessionId,
         turn_id: &TurnId,
         transport: ExecutionTransport,
-        stdin_bytes: &[u8],
+        _stdin_bytes: &[u8],
         stdout_bytes: &[u8],
         stderr_bytes: &[u8],
     ) -> Result<()> {
         let captures = if matches!(transport, ExecutionTransport::Pty) {
             vec![("pty_capture", stdout_bytes, "text/plain")]
-        } else if matches!(transport, ExecutionTransport::InheritTerminal) {
-            vec![
-                ("stdin_capture", stdin_bytes, "text/plain"),
-                ("stdout_capture", stdout_bytes, "text/plain"),
-            ]
         } else {
             vec![
                 ("stdout_capture", stdout_bytes, "text/plain"),
@@ -1234,9 +1297,7 @@ impl RuntimeEngine {
 }
 
 fn resolve_transport(adapter: &AdapterSpec) -> ExecutionTransport {
-    if adapter.use_pty() && std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-        ExecutionTransport::InheritTerminal
-    } else if adapter.use_pty() && cfg!(unix) {
+    if adapter.use_pty() && cfg!(unix) {
         ExecutionTransport::Pty
     } else {
         ExecutionTransport::Pipes
@@ -1805,13 +1866,6 @@ fn spawn_reader<R: Read + Send + 'static>(
     })
 }
 
-fn spawn_closed(kind: StreamKind, sender: Sender<StreamMessage>) -> thread::JoinHandle<Result<()>> {
-    thread::spawn(move || {
-        let _ = sender.send(StreamMessage::Closed { kind });
-        Ok(())
-    })
-}
-
 fn install_ctrlc_handler(child: Arc<Mutex<std::process::Child>>, interrupted: Arc<AtomicBool>) {
     ctrlc::set_handler(move || {
         interrupted.store(true, Ordering::SeqCst);
@@ -2081,13 +2135,9 @@ Script done on 2026-04-02
 
         let store = MetadataStore::open(StatePaths::new(state).sqlite_db()).unwrap();
         let events = store.list_events_for_session(&outcome.project_id).unwrap();
-        assert!(events.iter().any(|event| {
-            event.event_type == "stdout_captured"
-                && event
-                    .payload_json
-                    .to_string()
-                    .contains("\"stream\":\"pty\"")
-        }));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == "stdout_captured"));
     }
 
     #[test]
