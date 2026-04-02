@@ -234,7 +234,6 @@ fn start_project(state: &StatePaths, cwd: &PathBuf) -> Result<()> {
 }
 
 fn run(state: &StatePaths, cwd: &PathBuf, command: RunCommand) -> Result<()> {
-    ensure_state(state)?;
     let outcome = RuntimeEngine::run(RunConfig {
         state_dir: state.root().to_path_buf(),
         cwd: cwd.clone(),
@@ -253,7 +252,6 @@ fn launch_llm(
     executable: &str,
     command: LlmCommand,
 ) -> Result<()> {
-    ensure_state(state)?;
     let mut argv = vec![executable.to_string()];
     argv.extend(command.args);
     let outcome = RuntimeEngine::run(RunConfig {
@@ -269,7 +267,6 @@ fn launch_llm(
 }
 
 fn passthrough(state: &StatePaths, cwd: &PathBuf, command: Vec<OsString>) -> Result<()> {
-    ensure_state(state)?;
     let outcome = RuntimeEngine::run(RunConfig {
         state_dir: state.root().to_path_buf(),
         cwd: cwd.clone(),
