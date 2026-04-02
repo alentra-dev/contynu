@@ -25,8 +25,8 @@ use crate::journal::Journal;
 use crate::pty::PtyChild;
 use crate::state::StatePaths;
 use crate::store::{
-    ArtifactRecord, FileRecord, MemoryObject, MemoryObjectKind, MetadataStore, SessionRecord,
-    TurnRecord,
+    ArtifactRecord, EventRecord, FileRecord, MemoryObject, MemoryObjectKind, MetadataStore,
+    SessionRecord, TurnRecord,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +94,12 @@ struct ProcessCapture {
 struct WorkspaceContextGuard {
     path: PathBuf,
     original: Option<Vec<u8>>,
+}
+
+struct MemoryCandidate {
+    kind: MemoryObjectKind,
+    text: String,
+    confidence: f64,
 }
 
 impl Drop for WorkspaceContextGuard {
@@ -813,10 +819,10 @@ impl RuntimeEngine {
         changes: &[FileChange],
         change_event_ids: &[crate::ids::EventId],
     ) -> Result<()> {
-        let mut source_event_ids = store
-            .list_events_for_turn(session_id, turn_id)?
-            .into_iter()
-            .map(|event| event.event_id)
+        let source_events = store.list_events_for_turn(session_id, turn_id)?;
+        let mut source_event_ids = source_events
+            .iter()
+            .map(|event| event.event_id.clone())
             .collect::<Vec<_>>();
         source_event_ids.extend(change_event_ids.iter().cloned());
         source_event_ids.sort();
@@ -903,6 +909,19 @@ impl RuntimeEngine {
                 MemoryObjectKind::FileNote,
                 note,
                 Some(0.7),
+                false,
+                source_event_ids.clone(),
+            )?;
+        }
+        for candidate in derive_structured_candidates(&source_events, exit_code) {
+            Self::insert_memory_object(
+                journal,
+                store,
+                session_id,
+                turn_id,
+                candidate.kind,
+                candidate.text,
+                Some(candidate.confidence),
                 false,
                 source_event_ids.clone(),
             )?;
@@ -1084,6 +1103,118 @@ fn merge_workspace_context(original: Option<&[u8]>, prompt_text: &str) -> String
     merged
 }
 
+fn derive_structured_candidates(
+    events: &[EventRecord],
+    exit_code: Option<i32>,
+) -> Vec<MemoryCandidate> {
+    let mut candidates = Vec::new();
+    for event in events {
+        if let Some(text) = extract_event_text(event) {
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if let Some(value) = strip_prefix_case_insensitive(line, "fact:") {
+                    candidates.push(MemoryCandidate {
+                        kind: MemoryObjectKind::Fact,
+                        text: value.to_string(),
+                        confidence: 0.92,
+                    });
+                } else if let Some(value) = strip_prefix_case_insensitive(line, "constraint:") {
+                    candidates.push(MemoryCandidate {
+                        kind: MemoryObjectKind::Constraint,
+                        text: value.to_string(),
+                        confidence: 0.95,
+                    });
+                } else if let Some(value) = strip_prefix_case_insensitive(line, "decision:") {
+                    candidates.push(MemoryCandidate {
+                        kind: MemoryObjectKind::Decision,
+                        text: value.to_string(),
+                        confidence: 0.95,
+                    });
+                } else if let Some(value) = strip_prefix_case_insensitive(line, "todo:") {
+                    candidates.push(MemoryCandidate {
+                        kind: MemoryObjectKind::Todo,
+                        text: value.to_string(),
+                        confidence: 0.9,
+                    });
+                }
+            }
+        }
+    }
+
+    if exit_code.unwrap_or_default() != 0 {
+        for event in events.iter().rev() {
+            if event.event_type == "stderr_captured" || event.event_type == "stdout_captured" {
+                if let Some(text) = event
+                    .payload_json
+                    .get("text")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                {
+                    candidates.push(MemoryCandidate {
+                        kind: MemoryObjectKind::Fact,
+                        text: format!(
+                            "Last failure output: {}",
+                            text.lines().next().unwrap_or(text)
+                        ),
+                        confidence: 0.75,
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
+    dedupe_candidates(candidates)
+}
+
+fn extract_event_text(event: &EventRecord) -> Option<String> {
+    match event.event_type.as_str() {
+        "stdout_captured" | "stderr_captured" | "stdin_captured" => event
+            .payload_json
+            .get("text")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+        "message_input" | "message_output" | "message_chunk" => event
+            .payload_json
+            .get("content")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.get("text").and_then(|value| value.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .filter(|value| !value.is_empty()),
+        _ => None,
+    }
+}
+
+fn strip_prefix_case_insensitive<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    let lower = value.to_ascii_lowercase();
+    if lower.starts_with(prefix) {
+        Some(value[prefix.len()..].trim())
+    } else {
+        None
+    }
+}
+
+fn dedupe_candidates(candidates: Vec<MemoryCandidate>) -> Vec<MemoryCandidate> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut deduped = Vec::new();
+    for candidate in candidates {
+        let key = format!("{}:{}", candidate.kind.as_str(), candidate.text);
+        if seen.insert(key) {
+            deduped.push(candidate);
+        }
+    }
+    deduped
+}
+
 fn spawn_reader<R: Read + Send + 'static>(
     mut reader: R,
     kind: StreamKind,
@@ -1149,10 +1280,13 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    use chrono::Utc;
+    use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{RunConfig, RuntimeEngine};
-    use crate::{Journal, MemoryObjectKind, MetadataStore, StatePaths};
+    use super::{derive_structured_candidates, RunConfig, RuntimeEngine};
+    use crate::store::EventRecord;
+    use crate::{EventId, Journal, MemoryObjectKind, MetadataStore, ProjectId, StatePaths, TurnId};
 
     #[test]
     fn runtime_run_captures_process_and_files() {
@@ -1362,5 +1496,41 @@ mod tests {
                     .to_string()
                     .contains("\"stream\":\"pty\"")
         }));
+    }
+
+    #[test]
+    fn structured_candidates_extract_marked_memory() {
+        let event = EventRecord {
+            event_id: EventId::new(),
+            session_id: ProjectId::new(),
+            turn_id: Some(TurnId::new()),
+            seq: 1,
+            ts: Utc::now(),
+            actor: "assistant".into(),
+            event_type: "message_output".into(),
+            payload_json: json!({
+                "content": [
+                    {"text": "Fact: sqlite is canonical metadata\nConstraint: keep journal append-only\nDecision: use project-first continuity\nTodo: improve signal handling"}
+                ]
+            }),
+            checksum: "sha256:test".into(),
+            journal_path: "journal".into(),
+            journal_byte_offset: 0,
+            journal_line: 1,
+        };
+
+        let candidates = derive_structured_candidates(&[event], Some(0));
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.kind == MemoryObjectKind::Fact));
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.kind == MemoryObjectKind::Constraint));
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.kind == MemoryObjectKind::Decision));
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.kind == MemoryObjectKind::Todo));
     }
 }
