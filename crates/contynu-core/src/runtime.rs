@@ -787,8 +787,8 @@ impl RuntimeEngine {
         let mut command = Command::new("script");
         command.current_dir(cwd);
         command.stdin(Stdio::inherit());
-        command.stdout(Stdio::inherit());
-        command.stderr(Stdio::inherit());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
         command.envs(launch_plan.env.iter().map(|(key, value)| (key, value)));
         command.arg("-qef");
         command.arg("--log-in");
@@ -798,12 +798,34 @@ impl RuntimeEngine {
         command.arg("--command");
         command.arg(command_text);
 
-        let child = command
+        let mut child = command
             .spawn()
             .map_err(|error| ContynuError::CommandStart(error.to_string()))?;
 
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ContynuError::InvalidState("missing script stdout pipe".into()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| ContynuError::InvalidState("missing script stderr pipe".into()))?;
+
         let child = Arc::new(Mutex::new(child));
         install_ctrlc_handler(Arc::clone(&child), interrupted);
+        let (sender, receiver) = mpsc::channel();
+        let stdout_handle = spawn_reader(stdout, StreamKind::Stdout, sender.clone());
+        let stderr_handle = spawn_reader(stderr, StreamKind::Stderr, sender);
+        let mut handoff_indicator =
+            StartupIndicator::start("Contynu is handing control to your launcher...");
+        Self::drain_script_streams(receiver, &mut handoff_indicator)?;
+        stdout_handle.join().map_err(|_| {
+            ContynuError::InvalidState("script stdout reader thread panicked".into())
+        })??;
+        stderr_handle.join().map_err(|_| {
+            ContynuError::InvalidState("script stderr reader thread panicked".into())
+        })??;
+        handoff_indicator.stop();
         let status = child
             .lock()
             .map_err(|_| ContynuError::Validation("child process mutex poisoned".into()))?
@@ -860,6 +882,36 @@ impl RuntimeEngine {
             stdout_bytes,
             stderr_bytes: Vec::new(),
         })
+    }
+
+    fn drain_script_streams(
+        receiver: Receiver<StreamMessage>,
+        indicator: &mut StartupIndicator,
+    ) -> Result<()> {
+        let mut stdout_closed = false;
+        let mut stderr_closed = false;
+        let mut saw_output = false;
+
+        while !(stdout_closed && stderr_closed) {
+            match receiver
+                .recv()
+                .map_err(|_| ContynuError::InvalidState("script capture channel closed".into()))?
+            {
+                StreamMessage::Chunk { kind, bytes } => {
+                    if !saw_output {
+                        indicator.stop();
+                        saw_output = true;
+                    }
+                    mirror_chunk_to_terminal(kind, &bytes)?;
+                }
+                StreamMessage::Closed { kind } => match kind {
+                    StreamKind::Stdout | StreamKind::Pty => stdout_closed = true,
+                    StreamKind::Stderr => stderr_closed = true,
+                },
+            }
+        }
+
+        Ok(())
     }
 
     fn capture_streams(
