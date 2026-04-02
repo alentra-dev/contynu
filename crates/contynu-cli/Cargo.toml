@@ -12,6 +12,11 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 clap.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 contynu-core = { path = "../contynu-core" }
+
+[dev-dependencies]
+tempfile.workspace = true

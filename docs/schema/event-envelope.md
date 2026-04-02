@@ -15,16 +15,16 @@ Every raw journal record in Contynu is represented as a single canonical event e
 ```json
 {
   "schema_version": 1,
-  "event_id": "evt_018f4fe0d6e24d85a7c718b9698cdb51",
-  "session_id": "ses_6f65b6d487e145e2a043f0f7f7f0fdd9",
-  "turn_id": "trn_6b10f6b9c8ab4d8b9b7223de8cb193d8",
+  "event_id": "evt_0195f21f5f6c7fb8a5d8d3f618575dfd",
+  "session_id": "ses_0195f21f5f6c7f72be2ba0341d7df6a0",
+  "turn_id": "trn_0195f21f5f6c7f98939801885df38776",
   "seq": 42,
   "ts": "2026-04-02T05:30:00Z",
   "actor": "assistant",
   "event_type": "message_output",
-  "parent_event_id": "evt_018f4fe0d6e24d85a7c718b9698cdb50",
+  "payload_version": 1,
   "payload": {},
-  "payload_sha256": "…"
+  "checksum": "sha256:4e2f..."
 }
 ```
 
@@ -39,11 +39,15 @@ Every raw journal record in Contynu is represented as a single canonical event e
 - `actor`: one of `user`, `assistant`, `tool`, `system`, `runtime`
 - `event_type`: normalized event category
 - `payload`: event-specific body
-- `payload_sha256`: SHA-256 digest of the canonical JSON serialization of `payload`
+- `payload_version`: payload schema contract version for the specific event type
+- `checksum`: SHA-256 digest of the canonical JSON serialization of the envelope excluding the `checksum` field itself
 
 ## Optional fields
 
-- `parent_event_id`: direct causal predecessor for chained events
+- `parent_event_id`: direct structural parent for chained events
+- `correlation_id`: shared logical operation identifier
+- `causation_id`: direct causal predecessor event
+- `tags`: optional freeform indexing tags
 
 ## Event types
 
@@ -67,28 +71,22 @@ Minimum supported event classes:
 
 ## Event ID strategy
 
-IDs are prefixed by object class and use UUID v4 without dashes by default.
+IDs are prefixed by object class and use UUIDv7 without dashes.
 
 Examples:
 - `evt_018f4fe0d6e24d85a7c718b9698cdb51`
 - `ses_6f65b6d487e145e2a043f0f7f7f0fdd9`
 - `trn_6b10f6b9c8ab4d8b9b7223de8cb193d8`
 
-This keeps IDs:
-- locally generatable
-- stable
-- URL-safe
-- easy to classify in logs and indexes
+This keeps IDs locally generatable, URL-safe, prefix-classified, and more naturally time-ordered than random UUIDv4 identifiers.
 
 ## Payload canonicalization
 
-The payload hash is computed from a deterministic serialization of the payload object:
+The event checksum is computed from a deterministic serialization of the envelope object:
 
 - UTF-8 JSON
 - stable key ordering
 - no insignificant whitespace
-
-The envelope itself is not hashed as the canonical integrity target; the payload is. Journal tamper detection can additionally be layered through record chaining in future versions.
 
 ## Compatibility rules
 

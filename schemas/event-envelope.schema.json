@@ -11,8 +11,9 @@
     "ts",
     "actor",
     "event_type",
+    "payload_version",
     "payload",
-    "payload_sha256"
+    "checksum"
   ],
   "properties": {
     "schema_version": { "type": "integer", "minimum": 1 },
@@ -23,12 +24,19 @@
     "ts": { "type": "string", "format": "date-time" },
     "actor": {
       "type": "string",
-      "enum": ["user", "assistant", "tool", "system", "runtime"]
+      "enum": ["user", "assistant", "tool", "system", "runtime", "filesystem", "adapter"]
     },
     "event_type": { "type": "string", "minLength": 1 },
+    "payload_version": { "type": "integer", "minimum": 1 },
     "parent_event_id": { "type": ["string", "null"], "pattern": "^evt_[a-f0-9]{32}$" },
+    "correlation_id": { "type": ["string", "null"] },
+    "causation_id": { "type": ["string", "null"], "pattern": "^evt_[a-f0-9]{32}$" },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
     "payload": { "type": "object" },
-    "payload_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+    "checksum": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
   },
   "additionalProperties": false
 }
