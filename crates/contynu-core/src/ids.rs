@@ -72,7 +72,7 @@ macro_rules! typed_id {
     };
 }
 
-typed_id!(SessionId, "ses");
+typed_id!(ProjectId, "prj");
 typed_id!(TurnId, "trn");
 typed_id!(EventId, "evt");
 typed_id!(ArtifactId, "art");
@@ -80,20 +80,22 @@ typed_id!(CheckpointId, "chk");
 typed_id!(FileId, "fil");
 typed_id!(MemoryId, "mem");
 
+pub type SessionId = ProjectId;
+
 #[cfg(test)]
 mod tests {
-    use super::{EventId, SessionId};
+    use super::{EventId, ProjectId};
 
     #[test]
     fn ids_are_prefixed_and_parseable() {
-        let session = SessionId::new();
+        let project = ProjectId::new();
         let event = EventId::new();
 
-        assert!(session.as_str().starts_with("ses_"));
+        assert!(project.as_str().starts_with("prj_"));
         assert!(event.as_str().starts_with("evt_"));
         assert_eq!(
-            SessionId::parse(session.as_str()).unwrap().as_str(),
-            session.as_str()
+            ProjectId::parse(project.as_str()).unwrap().as_str(),
+            project.as_str()
         );
     }
 }

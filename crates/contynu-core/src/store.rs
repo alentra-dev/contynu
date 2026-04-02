@@ -29,6 +29,8 @@ pub struct SessionRecord {
     pub ended_at: Option<DateTime<Utc>>,
 }
 
+pub type ProjectRecord = SessionRecord;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnRecord {
     pub turn_id: TurnId,
@@ -136,6 +138,8 @@ pub struct MetadataStore {
     conn: Connection,
 }
 
+const PRIMARY_PROJECT_KEY: &str = "primary_project_id";
+
 impl MetadataStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         if let Some(parent) = path.as_ref().parent() {
@@ -213,6 +217,81 @@ impl MetadataStore {
         Ok(())
     }
 
+    pub fn primary_project_id(&self) -> Result<Option<SessionId>> {
+        let value = self
+            .conn
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = ?1",
+                params![PRIMARY_PROJECT_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        value.map(SessionId::parse).transpose()
+    }
+
+    pub fn set_primary_project_id(&self, session_id: &SessionId) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO schema_meta (key, value, updated_at) VALUES (?1, ?2, ?3)",
+            params![
+                PRIMARY_PROJECT_KEY,
+                session_id.as_str(),
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_session(&self, session_id: &SessionId) -> Result<Option<SessionRecord>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT session_id, project_id, status, cli_name, cli_version, model_name, cwd,
+                   repo_root, host_fingerprint, started_at, ended_at
+            FROM sessions
+            WHERE session_id = ?1
+            "#,
+        )?;
+        let session = stmt
+            .query_row(params![session_id.as_str()], |row| {
+                Ok(SessionRecord {
+                    session_id: SessionId::parse(row.get::<_, String>(0)?)
+                        .map_err(into_sql_error)?,
+                    project_id: row.get(1)?,
+                    status: row.get(2)?,
+                    cli_name: row.get(3)?,
+                    cli_version: row.get(4)?,
+                    model_name: row.get(5)?,
+                    cwd: row.get(6)?,
+                    repo_root: row.get(7)?,
+                    host_fingerprint: row.get(8)?,
+                    started_at: parse_rfc3339(&row.get::<_, String>(9)?).map_err(into_sql_error)?,
+                    ended_at: row
+                        .get::<_, Option<String>>(10)?
+                        .map(|value| parse_rfc3339(&value))
+                        .transpose()
+                        .map_err(into_sql_error)?,
+                })
+            })
+            .optional()?;
+        Ok(session)
+    }
+
+    pub fn update_session_status(
+        &self,
+        session_id: &SessionId,
+        status: &str,
+        ended_at: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET status = ?2, ended_at = ?3 WHERE session_id = ?1",
+            params![
+                session_id.as_str(),
+                status,
+                ended_at.map(|value| value.to_rfc3339())
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn register_turn(&self, turn: &TurnRecord) -> Result<()> {
         self.conn.execute(
             r#"
@@ -227,6 +306,23 @@ impl MetadataStore {
                 turn.started_at.to_rfc3339(),
                 turn.completed_at.map(|value| value.to_rfc3339()),
                 turn.summary_memory_id.clone().map(String::from)
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_turn_status(
+        &self,
+        turn_id: &TurnId,
+        status: &str,
+        completed_at: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE turns SET status = ?2, completed_at = ?3 WHERE turn_id = ?1",
+            params![
+                turn_id.as_str(),
+                status,
+                completed_at.map(|value| value.to_rfc3339())
             ],
         )?;
         Ok(())

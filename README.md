@@ -19,13 +19,13 @@ The implementation in this repository is intentionally explicit and inspectable.
 ```text
 .contynu/
   journal/
-    ses_<id>.jsonl
+    prj_<id>.jsonl
   sqlite/
     contynu.db
   blobs/
     sha256/ab/cd/<digest>
   checkpoints/
-    ses_<id>/
+    prj_<id>/
       chk_<id>/
         manifest.json
         rehydration.json
@@ -50,23 +50,26 @@ contynu run -- cargo test
 ### Create or inspect recovery state
 
 ```bash
-contynu checkpoint --session ses_<id>
-contynu resume --session ses_<id>
-contynu handoff --session ses_<id> --target-model gpt-5.4
-contynu replay --session ses_<id>
+contynu start-project
+contynu checkpoint
+contynu resume
+contynu handoff --target-model gpt-5.4
+contynu replay
 ```
 
 ### Inspect and repair
 
 ```bash
-contynu inspect session ses_<id>
+contynu inspect project
 contynu inspect event evt_<id>
 contynu search exact journal
 contynu search memory decision
 contynu artifacts list
 contynu doctor
-contynu repair --session ses_<id>
+contynu repair
 ```
+
+Contynu now defaults to a single continuous project memory per state directory. A raw `project_id` still exists for exact targeting and scripting, but normal commands resolve the primary project automatically.
 
 ## Developer Setup
 

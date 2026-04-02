@@ -8,23 +8,24 @@
 - content-addressed blob store with deduplication and integrity verification
 - checkpoint manager with manifest and rehydration packet generation
 - generic subprocess runtime wrapper with adapter detection, real-time stdout/stderr capture, and file diff capture
+- one primary continuous project memory per state directory by default
 
 ## Commands Available
 
 - `contynu init`
 - `contynu run -- <command...>`
-- `contynu start-session`
-- `contynu checkpoint --session <id>`
-- `contynu resume --session <id>`
-- `contynu handoff --session <id> --target-model <name>`
-- `contynu replay --session <id>`
-- `contynu inspect session <id>`
+- `contynu start-project`
+- `contynu checkpoint [--project <id>]`
+- `contynu resume [--project <id>]`
+- `contynu handoff [--project <id>] --target-model <name>`
+- `contynu replay [--project <id>]`
+- `contynu inspect project [id]`
 - `contynu inspect event <id>`
 - `contynu search exact <query>`
 - `contynu search memory <query>`
 - `contynu artifacts list`
 - `contynu doctor`
-- `contynu repair --session <id>`
+- `contynu repair [--project <id>]`
 
 ## Known Limitations
 
@@ -32,6 +33,7 @@
 - interruption handling is best-effort rather than full signal choreography
 - structured memory derivation is manual/API-driven; automatic memory extraction is not yet implemented
 - checkpoint packets are deterministic but still heuristic in how mission and recent context are selected
+- automatic rehydration injection into target LLM CLIs is not implemented yet
 - exact search is implemented; semantic retrieval remains intentionally deferred
 
 ## Next Best Steps

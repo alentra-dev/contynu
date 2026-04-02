@@ -8,7 +8,7 @@ use serde_json::json;
 use crate::blobs::BlobStore;
 use crate::error::Result;
 use crate::event::{Actor, EventDraft, EventType};
-use crate::ids::{CheckpointId, SessionId};
+use crate::ids::{CheckpointId, ProjectId, SessionId};
 use crate::journal::Journal;
 use crate::state::StatePaths;
 use crate::store::{CheckpointRecord, MemoryObjectKind, MetadataStore};
@@ -23,7 +23,7 @@ pub struct RehydrationArtifact {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RehydrationPacket {
     pub schema_version: u32,
-    pub session_id: SessionId,
+    pub project_id: ProjectId,
     pub target_model: Option<String>,
     pub mission: String,
     pub stable_facts: Vec<String>,
@@ -40,7 +40,7 @@ pub struct RehydrationPacket {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckpointManifest {
     pub checkpoint_id: CheckpointId,
-    pub session_id: SessionId,
+    pub project_id: ProjectId,
     pub created_at: DateTime<Utc>,
     pub reason: String,
     pub last_seq: u64,
@@ -93,7 +93,7 @@ impl<'a> CheckpointManager<'a> {
             .unwrap_or(0);
         let manifest = CheckpointManifest {
             checkpoint_id: checkpoint_id.clone(),
-            session_id: session_id.clone(),
+            project_id: session_id.clone(),
             created_at: Utc::now(),
             reason: reason.to_string(),
             last_seq,
@@ -121,7 +121,7 @@ impl<'a> CheckpointManager<'a> {
         self.store.register_checkpoint(
             &CheckpointRecord {
                 checkpoint_id: manifest.checkpoint_id.clone(),
-                session_id: manifest.session_id.clone(),
+                session_id: manifest.project_id.clone(),
                 source_event_id: event.event_id.clone(),
                 reason: manifest.reason.clone(),
                 last_seq: manifest.last_seq,
@@ -215,7 +215,7 @@ impl<'a> CheckpointManager<'a> {
 
         Ok(RehydrationPacket {
             schema_version: 1,
-            session_id: session_id.clone(),
+            project_id: session_id.clone(),
             target_model,
             mission,
             stable_facts,
@@ -324,7 +324,7 @@ mod tests {
             .create_checkpoint(&journal, &session_id, "test", None)
             .unwrap();
 
-        assert_eq!(manifest.session_id, session_id);
+        assert_eq!(manifest.project_id, session_id);
         assert!(packet.mission.contains("Fix the journal"));
     }
 }

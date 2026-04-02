@@ -18,11 +18,11 @@ pub use checkpoint::{
 pub use error::{ContynuError, Result};
 pub use event::{Actor, EventDraft, EventEnvelope, EventType};
 pub use files::{FileChange, FileChangeKind, FileTracker};
-pub use ids::{ArtifactId, CheckpointId, EventId, FileId, MemoryId, SessionId, TurnId};
+pub use ids::{ArtifactId, CheckpointId, EventId, FileId, MemoryId, ProjectId, SessionId, TurnId};
 pub use journal::{Journal, JournalAppend, JournalRepair, JournalReplay};
 pub use runtime::{RunConfig, RunOutcome, RuntimeEngine};
 pub use state::StatePaths;
 pub use store::{
     ArtifactRecord, CheckpointRecord, EventRecord, FileRecord, MemoryObject, MemoryObjectKind,
-    MetadataStore, SessionRecord, TurnRecord,
+    MetadataStore, ProjectRecord, SessionRecord, TurnRecord,
 };

@@ -19,7 +19,7 @@ use crate::checkpoint::CheckpointManager;
 use crate::error::{ContynuError, Result};
 use crate::event::{Actor, EventDraft, EventType};
 use crate::files::{FileChangeKind, FileTracker};
-use crate::ids::{ArtifactId, FileId, SessionId, TurnId};
+use crate::ids::{ArtifactId, FileId, ProjectId, SessionId, TurnId};
 use crate::journal::Journal;
 use crate::state::StatePaths;
 use crate::store::{ArtifactRecord, FileRecord, MetadataStore, SessionRecord, TurnRecord};
@@ -31,11 +31,12 @@ pub struct RunConfig {
     pub command: Vec<OsString>,
     pub ignore_patterns: Vec<String>,
     pub checkpoint_on_exit: bool,
+    pub project_id: Option<ProjectId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunOutcome {
-    pub session_id: SessionId,
+    pub project_id: ProjectId,
     pub turn_id: TurnId,
     pub exit_code: Option<i32>,
     pub interrupted: bool,
@@ -69,26 +70,43 @@ impl RuntimeEngine {
         state.ensure_layout()?;
         let store = MetadataStore::open(state.sqlite_db())?;
         let blob_store = BlobStore::new(state.blobs_root());
-        let session_id = SessionId::new();
+        let resolved_project = config.project_id.clone().or(store.primary_project_id()?);
+        let continuing_session = resolved_project.is_some();
+        let session_id = match resolved_project {
+            Some(project_id) => {
+                if !store.session_exists(&project_id)? {
+                    return Err(ContynuError::Validation(format!(
+                        "project `{project_id}` does not exist"
+                    )));
+                }
+                project_id
+            }
+            None => ProjectId::new(),
+        };
         let turn_id = TurnId::new();
         let journal = Journal::open(state.journal_path_for_session(&session_id))?;
         let adapter = AdapterKind::detect(&config.command[0].to_string_lossy());
         let tracker = FileTracker::new(&config.cwd, &config.ignore_patterns)?;
         let before = tracker.snapshot()?;
 
-        store.register_session(&SessionRecord {
-            session_id: session_id.clone(),
-            project_id: None,
-            status: "started".into(),
-            cli_name: Some(adapter.as_str().into()),
-            cli_version: None,
-            model_name: None,
-            cwd: Some(config.cwd.display().to_string()),
-            repo_root: Some(config.cwd.display().to_string()),
-            host_fingerprint: None,
-            started_at: Utc::now(),
-            ended_at: None,
-        })?;
+        if continuing_session {
+            store.update_session_status(&session_id, "active", None)?;
+        } else {
+            store.register_session(&SessionRecord {
+                session_id: session_id.clone(),
+                project_id: Some(session_id.to_string()),
+                status: "active".into(),
+                cli_name: Some(adapter.as_str().into()),
+                cli_version: None,
+                model_name: None,
+                cwd: Some(config.cwd.display().to_string()),
+                repo_root: Some(config.cwd.display().to_string()),
+                host_fingerprint: None,
+                started_at: Utc::now(),
+                ended_at: None,
+            })?;
+            store.set_primary_project_id(&session_id)?;
+        }
         store.register_turn(&TurnRecord {
             turn_id: turn_id.clone(),
             session_id: session_id.clone(),
@@ -119,10 +137,15 @@ impl RuntimeEngine {
                 session_id.clone(),
                 None,
                 Actor::System,
-                EventType::SessionStarted,
+                if continuing_session {
+                    EventType::SessionResumed
+                } else {
+                    EventType::SessionStarted
+                },
                 json!({
                     "cwd": config.cwd.display().to_string(),
                     "adapter_kind": adapter.as_str(),
+                    "continued": continuing_session,
                 }),
             ),
         )?;
@@ -318,6 +341,16 @@ impl RuntimeEngine {
                 json!({"exit_code": status.code()}),
             ),
         )?;
+        store.update_turn_status(&turn_id, "completed", Some(Utc::now()))?;
+        store.update_session_status(
+            &session_id,
+            if interrupted.load(Ordering::SeqCst) {
+                "interrupted"
+            } else {
+                "active"
+            },
+            None,
+        )?;
 
         if config.checkpoint_on_exit {
             let manager = CheckpointManager::new(&state, &store, &blob_store);
@@ -325,7 +358,7 @@ impl RuntimeEngine {
         }
 
         Ok(RunOutcome {
-            session_id,
+            project_id: session_id,
             turn_id,
             exit_code: status.code(),
             interrupted: interrupted.load(Ordering::SeqCst),
@@ -493,13 +526,14 @@ mod tests {
             ],
             ignore_patterns: Vec::new(),
             checkpoint_on_exit: true,
+            project_id: None,
         })
         .unwrap();
 
         assert_eq!(outcome.exit_code, Some(0));
         let paths = StatePaths::new(state);
         let store = MetadataStore::open(paths.sqlite_db()).unwrap();
-        let events = store.list_events_for_session(&outcome.session_id).unwrap();
+        let events = store.list_events_for_session(&outcome.project_id).unwrap();
         assert!(events
             .iter()
             .any(|event| event.event_type == "process_started"));
@@ -532,6 +566,7 @@ mod tests {
                 ],
                 ignore_patterns: Vec::new(),
                 checkpoint_on_exit: false,
+                project_id: None,
             })
             .unwrap()
         });
@@ -554,5 +589,42 @@ mod tests {
 
         let outcome = handle.join().unwrap();
         assert_eq!(outcome.exit_code, Some(0));
+    }
+
+    #[test]
+    fn runtime_can_continue_existing_session_with_new_turn() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state = dir.path().join(".contynu");
+
+        let first = RuntimeEngine::run(RunConfig {
+            state_dir: state.clone(),
+            cwd: workspace.clone(),
+            command: vec!["bash".into(), "-lc".into(), "printf first".into()],
+            ignore_patterns: Vec::new(),
+            checkpoint_on_exit: false,
+            project_id: None,
+        })
+        .unwrap();
+
+        let second = RuntimeEngine::run(RunConfig {
+            state_dir: state.clone(),
+            cwd: workspace,
+            command: vec!["bash".into(), "-lc".into(), "printf second".into()],
+            ignore_patterns: Vec::new(),
+            checkpoint_on_exit: false,
+            project_id: Some(first.project_id.clone()),
+        })
+        .unwrap();
+
+        assert_eq!(first.project_id, second.project_id);
+        assert_ne!(first.turn_id, second.turn_id);
+
+        let store = MetadataStore::open(StatePaths::new(state).sqlite_db()).unwrap();
+        let events = store.list_events_for_session(&first.project_id).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == "session_resumed"));
     }
 }

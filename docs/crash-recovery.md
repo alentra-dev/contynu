@@ -17,7 +17,7 @@ This makes truncated-tail crashes recoverable without rewriting valid history.
 
 ## SQLite Reconciliation
 
-SQLite is treated as derived structured state. If SQLite is incomplete or stale relative to the journal:
+SQLite is treated as derived structured state. If SQLite is incomplete or stale relative to the project journal:
 
 1. repair or verify the journal
 2. replay canonical events

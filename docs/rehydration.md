@@ -1,6 +1,6 @@
 # Rehydration Semantics
 
-Contynu does not treat raw transcript dumping as resume logic. Resume and handoff use a deterministic rehydration packet derived from canonical and structured state.
+Contynu does not treat raw transcript dumping as resume logic. Resume and handoff use a deterministic rehydration packet derived from canonical and structured project state.
 
 ## Packet Sections
 
@@ -23,7 +23,7 @@ Contynu does not treat raw transcript dumping as resume logic. Resume and handof
 
 ## Modes
 
-- `resume`: same-session continuation
+- `resume`: same-project continuation
 - `handoff`: target-model annotated continuation
 
 ## Current Behavior

@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
 use contynu_core::{
-    BlobStore, CheckpointManager, EventId, Journal, MetadataStore, RunConfig, RuntimeEngine,
-    SessionId, StatePaths,
+    BlobStore, CheckpointManager, EventDraft, EventId, EventType, Journal, MetadataStore,
+    ProjectId, RunConfig, RuntimeEngine, StatePaths,
 };
 use serde::Serialize;
 
@@ -26,26 +26,27 @@ struct Cli {
 enum Command {
     Init,
     Run(RunCommand),
-    StartSession,
+    #[command(name = "start-project", visible_alias = "start-session")]
+    StartProject,
     Checkpoint {
-        #[arg(long)]
-        session: String,
+        #[arg(long, alias = "session")]
+        project: Option<String>,
         #[arg(long, default_value = "manual")]
         reason: String,
     },
     Resume {
-        #[arg(long)]
-        session: String,
+        #[arg(long, alias = "session")]
+        project: Option<String>,
     },
     Handoff {
-        #[arg(long)]
-        session: String,
+        #[arg(long, alias = "session")]
+        project: Option<String>,
         #[arg(long)]
         target_model: String,
     },
     Replay {
-        #[arg(long)]
-        session: String,
+        #[arg(long, alias = "session")]
+        project: Option<String>,
     },
     Inspect {
         #[command(subcommand)]
@@ -61,13 +62,16 @@ enum Command {
     },
     Doctor,
     Repair {
-        #[arg(long)]
-        session: Option<String>,
+        #[arg(long, alias = "session")]
+        project: Option<String>,
     },
 }
 
 #[derive(Debug, Args)]
 struct RunCommand {
+    #[arg(long, alias = "session")]
+    project: Option<String>,
+
     #[arg(long)]
     no_checkpoint: bool,
 
@@ -80,8 +84,13 @@ struct RunCommand {
 
 #[derive(Debug, Subcommand)]
 enum InspectCommand {
-    Session { id: String },
-    Event { id: String },
+    #[command(name = "project", visible_alias = "session")]
+    Project {
+        id: Option<String>,
+    },
+    Event {
+        id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -93,8 +102,8 @@ enum SearchCommand {
 #[derive(Debug, Subcommand)]
 enum ArtifactsCommand {
     List {
-        #[arg(long)]
-        session: Option<String>,
+        #[arg(long, alias = "session")]
+        project: Option<String>,
     },
 }
 
@@ -105,38 +114,48 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Init => init(&state),
         Command::Run(command) => run(&state, &cli.cwd, command),
-        Command::StartSession => start_session(&state, &cli.cwd),
-        Command::Checkpoint { session, reason } => checkpoint(&state, &session, &reason),
-        Command::Resume { session } => resume(&state, &session, None),
+        Command::StartProject => start_project(&state, &cli.cwd),
+        Command::Checkpoint { project, reason } => checkpoint(&state, project.as_deref(), &reason),
+        Command::Resume { project } => resume(&state, project.as_deref(), None),
         Command::Handoff {
-            session,
+            project,
             target_model,
-        } => resume(&state, &session, Some(target_model)),
-        Command::Replay { session } => replay(&state, &session),
+        } => resume(&state, project.as_deref(), Some(target_model)),
+        Command::Replay { project } => replay(&state, project.as_deref()),
         Command::Inspect { command } => inspect(&state, command),
         Command::Search { command } => search(&state, command),
         Command::Artifacts { command } => artifacts(&state, command),
         Command::Doctor => doctor(&state),
-        Command::Repair { session } => repair(&state, session.as_deref()),
+        Command::Repair { project } => repair(&state, project.as_deref()),
     }
 }
 
 fn init(state: &StatePaths) -> Result<()> {
-    state.ensure_layout()?;
-    let _ = MetadataStore::open(state.sqlite_db())?;
-    let _ = BlobStore::new(state.blobs_root());
+    ensure_state(state)?;
     println!("initialized {}", state.root().display());
     Ok(())
 }
 
-fn start_session(state: &StatePaths, cwd: &PathBuf) -> Result<()> {
-    init(state)?;
-    let session_id = SessionId::new();
+fn ensure_state(state: &StatePaths) -> Result<()> {
+    state.ensure_layout()?;
+    let _ = MetadataStore::open(state.sqlite_db())?;
+    let _ = BlobStore::new(state.blobs_root());
+    Ok(())
+}
+
+fn start_project(state: &StatePaths, cwd: &PathBuf) -> Result<()> {
+    ensure_state(state)?;
     let store = MetadataStore::open(state.sqlite_db())?;
+    if let Some(project_id) = store.primary_project_id()? {
+        println!("{project_id}");
+        return Ok(());
+    }
+
+    let project_id = ProjectId::new();
     store.register_session(&contynu_core::SessionRecord {
-        session_id: session_id.clone(),
-        project_id: None,
-        status: "started".into(),
+        session_id: project_id.clone(),
+        project_id: Some(project_id.to_string()),
+        status: "active".into(),
         cli_name: Some("manual".into()),
         cli_version: None,
         model_name: None,
@@ -146,46 +165,61 @@ fn start_session(state: &StatePaths, cwd: &PathBuf) -> Result<()> {
         started_at: chrono::Utc::now(),
         ended_at: None,
     })?;
-    println!("{session_id}");
+    store.set_primary_project_id(&project_id)?;
+    let journal = Journal::open(state.journal_path_for_project(&project_id))?;
+    let (event, append) = journal.append(EventDraft::new(
+        project_id.clone(),
+        None,
+        contynu_core::Actor::System,
+        EventType::SessionStarted,
+        serde_json::json!({
+            "cwd": cwd.display().to_string(),
+            "adapter_kind": "manual",
+            "continued": false,
+        }),
+    ))?;
+    store.record_event(&event, &journal.path().display().to_string(), append)?;
+    println!("{project_id}");
     Ok(())
 }
 
 fn run(state: &StatePaths, cwd: &PathBuf, command: RunCommand) -> Result<()> {
-    init(state)?;
+    ensure_state(state)?;
     let outcome = RuntimeEngine::run(RunConfig {
         state_dir: state.root().to_path_buf(),
         cwd: cwd.clone(),
         command: command.command.into_iter().map(Into::into).collect(),
         ignore_patterns: command.ignore_patterns,
         checkpoint_on_exit: !command.no_checkpoint,
+        project_id: command.project.map(ProjectId::parse).transpose()?,
     })?;
     print_json(&outcome)
 }
 
-fn checkpoint(state: &StatePaths, session: &str, reason: &str) -> Result<()> {
-    init(state)?;
-    let session_id = SessionId::parse(session.to_string())?;
-    let journal = Journal::open(state.journal_path_for_session(&session_id))?;
+fn checkpoint(state: &StatePaths, project: Option<&str>, reason: &str) -> Result<()> {
+    ensure_state(state)?;
+    let project_id = resolve_project_id(state, project)?;
+    let journal = Journal::open(state.journal_path_for_project(&project_id))?;
     let store = MetadataStore::open(state.sqlite_db())?;
     let blobs = BlobStore::new(state.blobs_root());
     let manager = CheckpointManager::new(state, &store, &blobs);
-    let (manifest, packet) = manager.create_checkpoint(&journal, &session_id, reason, None)?;
+    let (manifest, packet) = manager.create_checkpoint(&journal, &project_id, reason, None)?;
     print_json(&(manifest, packet))
 }
 
-fn resume(state: &StatePaths, session: &str, target_model: Option<String>) -> Result<()> {
-    init(state)?;
-    let session_id = SessionId::parse(session.to_string())?;
+fn resume(state: &StatePaths, project: Option<&str>, target_model: Option<String>) -> Result<()> {
+    ensure_state(state)?;
+    let project_id = resolve_project_id(state, project)?;
     let store = MetadataStore::open(state.sqlite_db())?;
     let blobs = BlobStore::new(state.blobs_root());
     let manager = CheckpointManager::new(state, &store, &blobs);
-    let packet = manager.build_packet(&session_id, target_model)?;
+    let packet = manager.build_packet(&project_id, target_model)?;
     print_json(&packet)
 }
 
-fn replay(state: &StatePaths, session: &str) -> Result<()> {
-    let session_id = SessionId::parse(session.to_string())?;
-    let journal = Journal::open(state.journal_path_for_session(&session_id))?;
+fn replay(state: &StatePaths, project: Option<&str>) -> Result<()> {
+    let project_id = resolve_project_id(state, project)?;
+    let journal = Journal::open(state.journal_path_for_project(&project_id))?;
     let replay = journal.replay()?;
     print_json(&replay)
 }
@@ -193,9 +227,12 @@ fn replay(state: &StatePaths, session: &str) -> Result<()> {
 fn inspect(state: &StatePaths, command: InspectCommand) -> Result<()> {
     let store = MetadataStore::open(state.sqlite_db())?;
     match command {
-        InspectCommand::Session { id } => {
-            let session_id = SessionId::parse(id)?;
-            print_json(&store.list_events_for_session(&session_id)?)
+        InspectCommand::Project { id } => {
+            let project_id = match id {
+                Some(id) => ProjectId::parse(id)?,
+                None => resolve_primary_project(&store)?,
+            };
+            print_json(&store.list_events_for_session(&project_id)?)
         }
         InspectCommand::Event { id } => {
             let event_id = EventId::parse(id)?;
@@ -218,15 +255,15 @@ fn search(state: &StatePaths, command: SearchCommand) -> Result<()> {
 fn artifacts(state: &StatePaths, command: ArtifactsCommand) -> Result<()> {
     let store = MetadataStore::open(state.sqlite_db())?;
     match command {
-        ArtifactsCommand::List { session } => {
-            let session = session.map(SessionId::parse).transpose()?;
-            print_json(&store.list_artifacts(session.as_ref())?)
+        ArtifactsCommand::List { project } => {
+            let project = project.map(ProjectId::parse).transpose()?;
+            print_json(&store.list_artifacts(project.as_ref())?)
         }
     }
 }
 
 fn doctor(state: &StatePaths) -> Result<()> {
-    init(state)?;
+    ensure_state(state)?;
     let store = MetadataStore::open(state.sqlite_db())?;
     let report = serde_json::json!({
         "state_root": state.root().display().to_string(),
@@ -237,25 +274,42 @@ fn doctor(state: &StatePaths) -> Result<()> {
     print_json(&report)
 }
 
-fn repair(state: &StatePaths, session: Option<&str>) -> Result<()> {
-    init(state)?;
-    match session {
-        Some(session) => {
-            let session_id = SessionId::parse(session.to_string())?;
-            let journal = Journal::open(state.journal_path_for_session(&session_id))?;
+fn repair(state: &StatePaths, project: Option<&str>) -> Result<()> {
+    ensure_state(state)?;
+    match project {
+        Some(project) => {
+            let project_id = ProjectId::parse(project.to_string())?;
+            let journal = Journal::open(state.journal_path_for_project(&project_id))?;
             let repair = journal.repair_truncated_tail()?;
             let store = MetadataStore::open(state.sqlite_db())?;
-            store.reconcile_session(&journal, &session_id)?;
+            store.reconcile_session(&journal, &project_id)?;
             print_json(&repair)
         }
         None => {
-            let report = serde_json::json!({
-                "status": "no-op",
-                "detail": "pass --session to repair a specific journal"
-            });
-            print_json(&report)
+            let project_id = resolve_project_id(state, None)?;
+            let journal = Journal::open(state.journal_path_for_project(&project_id))?;
+            let repair = journal.repair_truncated_tail()?;
+            let store = MetadataStore::open(state.sqlite_db())?;
+            store.reconcile_session(&journal, &project_id)?;
+            print_json(&repair)
         }
     }
+}
+
+fn resolve_project_id(state: &StatePaths, explicit: Option<&str>) -> Result<ProjectId> {
+    if let Some(id) = explicit {
+        return Ok(ProjectId::parse(id.to_string())?);
+    }
+    let store = MetadataStore::open(state.sqlite_db())?;
+    resolve_primary_project(&store)
+}
+
+fn resolve_primary_project(store: &MetadataStore) -> Result<ProjectId> {
+    store.primary_project_id()?.ok_or_else(|| {
+        anyhow!(
+            "no primary project found; run `contynu start-project` or `contynu run -- ...` first"
+        )
+    })
 }
 
 fn print_json<T: Serialize>(value: &T) -> Result<()> {

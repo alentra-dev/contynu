@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::ids::{CheckpointId, SessionId};
+use crate::ids::{CheckpointId, ProjectId, SessionId};
 
 #[derive(Debug, Clone)]
 pub struct StatePaths {
@@ -49,9 +49,21 @@ impl StatePaths {
         self.journal_root().join(format!("{session_id}.jsonl"))
     }
 
+    pub fn journal_path_for_project(&self, project_id: &ProjectId) -> PathBuf {
+        self.journal_path_for_session(project_id)
+    }
+
     pub fn checkpoint_dir(&self, session_id: &SessionId, checkpoint_id: &CheckpointId) -> PathBuf {
         self.checkpoints_root()
             .join(session_id.as_str())
             .join(checkpoint_id.as_str())
+    }
+
+    pub fn project_checkpoint_dir(
+        &self,
+        project_id: &ProjectId,
+        checkpoint_id: &CheckpointId,
+    ) -> PathBuf {
+        self.checkpoint_dir(project_id, checkpoint_id)
     }
 }
