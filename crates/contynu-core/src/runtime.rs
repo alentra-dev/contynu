@@ -13,9 +13,10 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::adapters::{AdapterKind, HydrationContext};
+use crate::adapters::{AdapterSpec, HydrationContext};
 use crate::blobs::BlobStore;
 use crate::checkpoint::CheckpointManager;
+use crate::config::ContynuConfig;
 use crate::error::{ContynuError, Result};
 use crate::event::{Actor, EventDraft, EventType};
 use crate::files::{FileChangeKind, FileTracker};
@@ -69,6 +70,7 @@ impl RuntimeEngine {
         let state = StatePaths::new(&config.state_dir);
         state.ensure_layout()?;
         let store = MetadataStore::open(state.sqlite_db())?;
+        let config_file = ContynuConfig::load(&state.config_path())?;
         let blob_store = BlobStore::new(state.blobs_root());
         let resolved_project = config.project_id.clone().or(store.primary_project_id()?);
         let continuing_session = resolved_project.is_some();
@@ -85,7 +87,7 @@ impl RuntimeEngine {
         };
         let turn_id = TurnId::new();
         let journal = Journal::open(state.journal_path_for_session(&session_id))?;
-        let adapter = AdapterKind::detect(&config.command[0].to_string_lossy());
+        let adapter = AdapterSpec::detect(&config.command[0].to_string_lossy(), &config_file);
         let tracker = FileTracker::new(&config.cwd, &config.ignore_patterns)?;
         let before = tracker.snapshot()?;
 
@@ -126,6 +128,7 @@ impl RuntimeEngine {
                 EventType::AdapterAttached,
                 json!({
                     "adapter_kind": adapter.as_str(),
+                    "adapter_type": format!("{:?}", adapter.kind()).to_lowercase(),
                     "program": config.command[0].to_string_lossy(),
                 }),
             ),
@@ -139,7 +142,7 @@ impl RuntimeEngine {
                 &journal,
                 &session_id,
                 &turn_id,
-                adapter,
+                adapter.as_str(),
             )?)
         } else {
             None
@@ -515,7 +518,7 @@ impl RuntimeEngine {
         journal: &Journal,
         project_id: &ProjectId,
         turn_id: &TurnId,
-        adapter: AdapterKind,
+        adapter_name: &str,
     ) -> Result<HydrationContext> {
         let manager = CheckpointManager::new(state, store, blob_store);
         let packet = manager.build_packet(project_id, None)?;
@@ -526,8 +529,7 @@ impl RuntimeEngine {
         let packet_json = serde_json::to_string_pretty(&packet)?;
         let prompt = format!(
             "Project continuity context for {}.\nUse the JSON packet as authoritative state.\n{}",
-            adapter.as_str(),
-            packet_json
+            adapter_name, packet_json
         );
         std::fs::write(&packet_path, &packet_json)?;
         std::fs::write(&prompt_path, &prompt)?;
@@ -542,7 +544,7 @@ impl RuntimeEngine {
             Actor::System,
             EventType::RehydrationPacketCreated,
             json!({
-                "adapter_kind": adapter.as_str(),
+                "adapter_kind": adapter_name,
                 "packet_sha256": packet_blob.sha256,
                 "prompt_sha256": prompt_blob.sha256,
                 "packet_path": packet_path.display().to_string(),

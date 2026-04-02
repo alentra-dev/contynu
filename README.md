@@ -44,6 +44,8 @@ contynu gemini
 Known LLM launcher commands automatically attach to the current project memory and use the same durable capture path as `run`.
 When a known LLM launcher is continuing an existing project, Contynu now materializes a rehydration packet and passes it into the launched process through both environment variables and a stdin startup prelude.
 
+Unknown future LLM CLIs can be taught to Contynu through `.contynu/config.json`. If a launcher is listed there, the normal direct path like `contynu myllm` will recognize it as hydratable.
+
 ### Streamlined Generic Launch
 
 ```bash
@@ -102,9 +104,9 @@ More detailed docs:
 
 - [`docs/implementation-plan.md`](docs/implementation-plan.md)
 - [`docs/cli.md`](docs/cli.md)
+- [`docs/adapter-architecture.md`](docs/adapter-architecture.md)
 - [`docs/crash-recovery.md`](docs/crash-recovery.md)
 - [`docs/rehydration.md`](docs/rehydration.md)
-- [`docs/adapter-architecture.md`](docs/adapter-architecture.md)
 - [`docs/handoff-summary.md`](docs/handoff-summary.md)
 
 ## License

@@ -1,6 +1,7 @@
 pub mod adapters;
 pub mod blobs;
 pub mod checkpoint;
+pub mod config;
 pub mod error;
 pub mod event;
 pub mod files;
@@ -15,6 +16,7 @@ pub use blobs::{BlobDescriptor, BlobStore};
 pub use checkpoint::{
     CheckpointManager, CheckpointManifest, RehydrationArtifact, RehydrationPacket,
 };
+pub use config::{ConfiguredLlmLauncher, ContynuConfig};
 pub use error::{ContynuError, Result};
 pub use event::{Actor, EventDraft, EventEnvelope, EventType};
 pub use files::{FileChange, FileChangeKind, FileTracker};

@@ -24,6 +24,29 @@ This pass implements the generic terminal wrapper end to end and includes a firs
 
 Native provider-specific argument-level integration is still deferred until the canonical event and storage contracts are stable.
 
+## Configurable Launchers
+
+Contynu can be taught about future LLM tools through `.contynu/config.json`.
+
+Example:
+
+```json
+{
+  "llm_launchers": [
+    {
+      "command": "futurellm",
+      "aliases": ["futurellm-cli"],
+      "hydrate": true,
+      "extra_env": {
+        "FUTURELLM_MODE": "enabled"
+      }
+    }
+  ]
+}
+```
+
+If a direct launch command matches `command` or any alias, Contynu treats it as a hydratable LLM launcher and applies the same rehydration delivery path used by built-in launchers.
+
 ## Extension Path
 
 Future adapters should:

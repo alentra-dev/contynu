@@ -178,3 +178,77 @@ fn direct_passthrough_launches_regular_commands() {
         "direct"
     );
 }
+
+#[test]
+fn configured_custom_llm_launcher_is_hydrated() {
+    let dir = tempdir().unwrap();
+    let state_dir = dir.path().join(".contynu");
+    let bin_dir = dir.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        state_dir.join("config.json"),
+        r#"{
+          "llm_launchers": [
+            {
+              "command": "futurellm",
+              "aliases": ["futurellm-cli"],
+              "hydrate": true,
+              "extra_env": {"FUTURELLM_MODE": "enabled"}
+            }
+          ]
+        }"#,
+    )
+    .unwrap();
+
+    let future_path = bin_dir.join("futurellm");
+    let capture_path = dir.path().join("futurellm-capture.txt");
+    fs::write(
+        &future_path,
+        format!(
+            "#!/bin/sh\nprintf \"env:%s|extra:%s\\n\" \"$CONTYNU_REHYDRATION_PACKET_FILE\" \"$FUTURELLM_MODE\" > \"{}\"\ncat >> \"{}\"\nprintf futurellm\n",
+            capture_path.display(),
+            capture_path.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&future_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&future_path, perms).unwrap();
+    }
+    let path = env::var("PATH").unwrap_or_default();
+    let combined_path = format!("{}:{}", bin_dir.display(), path);
+
+    let start = Command::new(env!("CARGO_BIN_EXE_contynu"))
+        .env("PATH", &combined_path)
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("start-project")
+        .output()
+        .unwrap();
+    assert!(start.status.success());
+    let project_id = String::from_utf8_lossy(&start.stdout).trim().to_string();
+
+    let launch = Command::new(env!("CARGO_BIN_EXE_contynu"))
+        .env("PATH", &combined_path)
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("--cwd")
+        .arg(dir.path())
+        .arg("futurellm")
+        .output()
+        .unwrap();
+    assert!(
+        launch.status.success(),
+        "configured launcher failed: {}",
+        String::from_utf8_lossy(&launch.stderr)
+    );
+    let captured = fs::read_to_string(&capture_path).unwrap();
+    assert!(captured.contains("rehydration.json"));
+    assert!(captured.contains("extra:enabled"));
+    assert!(captured.contains("CONTYNU REHYDRATION CONTEXT"));
+    assert!(captured.contains(&project_id));
+}

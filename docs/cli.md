@@ -6,6 +6,8 @@
 
 Launches an ordinary terminal command directly inside Contynu’s runtime without requiring the `run` subcommand. This is the simplest generic wrapper path.
 
+If the executable matches a configured LLM launcher in `.contynu/config.json`, Contynu will treat it as hydratable instead of a plain terminal command.
+
 ### `contynu codex [-- <args...>]`
 
 Launches `codex` inside Contynu’s runtime using the primary project by default. When continuing an existing project, Contynu writes the rehydration packet to runtime files, exposes their paths via environment variables, and sends a startup prelude on stdin.
@@ -88,6 +90,7 @@ Repairs a truncated journal tail if needed, then reconciles journal state back i
 - Contynu now models one continuous project memory per state directory by default.
 - Raw project IDs remain available for exact scripting and advanced targeting.
 - Known LLM launchers now have dedicated top-level commands so users do not need to remember `run -- <tool>`.
+- Unknown future launchers can be configured in `.contynu/config.json`.
 - Ordinary terminal commands can also be launched directly as `contynu <command...>`.
 - Known LLM launchers receive continuity context via `CONTYNU_REHYDRATION_PACKET_FILE`, `CONTYNU_REHYDRATION_PROMPT_FILE`, and a startup stdin prelude when Contynu is continuing an existing project.
 - `contynu run` uses a generic subprocess wrapper with real-time pipe capture rather than full PTY emulation.

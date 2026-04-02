@@ -1,9 +1,11 @@
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use crate::checkpoint::RehydrationPacket;
+use crate::config::{ConfiguredLlmLauncher, ContynuConfig};
 use crate::error::Result;
 use crate::ids::ProjectId;
 
@@ -14,11 +16,20 @@ pub enum AdapterKind {
     CodexCli,
     ClaudeCli,
     GeminiCli,
+    ConfiguredLlm,
 }
 
 pub trait Adapter {
     fn kind(&self) -> AdapterKind;
     fn name(&self) -> &'static str;
+}
+
+#[derive(Debug, Clone)]
+pub struct AdapterSpec {
+    kind: AdapterKind,
+    name: String,
+    should_hydrate: bool,
+    extra_env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,36 +61,45 @@ impl Adapter for TerminalAdapter {
     }
 }
 
-impl AdapterKind {
-    pub fn detect(program: &str) -> Self {
+impl AdapterSpec {
+    pub fn detect(program: &str, config: &ContynuConfig) -> Self {
         match program {
-            "codex" | "codex-cli" => Self::CodexCli,
-            "claude" | "claude-code" => Self::ClaudeCli,
-            "gemini" | "gemini-cli" => Self::GeminiCli,
-            _ => Self::Terminal,
+            "codex" | "codex-cli" => Self::builtin(AdapterKind::CodexCli, "codex_cli", true),
+            "claude" | "claude-code" => Self::builtin(AdapterKind::ClaudeCli, "claude_cli", true),
+            "gemini" | "gemini-cli" => Self::builtin(AdapterKind::GeminiCli, "gemini_cli", true),
+            _ => {
+                if let Some(launcher) = config.find_llm_launcher(program) {
+                    Self::configured(launcher)
+                } else {
+                    Self::builtin(AdapterKind::Terminal, "terminal", false)
+                }
+            }
         }
     }
 
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Terminal => "terminal",
-            Self::CodexCli => "codex_cli",
-            Self::ClaudeCli => "claude_cli",
-            Self::GeminiCli => "gemini_cli",
-        }
+    pub fn kind(&self) -> AdapterKind {
+        self.kind
     }
 
-    pub fn should_hydrate(self) -> bool {
-        !matches!(self, Self::Terminal)
+    pub fn as_str(&self) -> &str {
+        &self.name
+    }
+
+    pub fn should_hydrate(&self) -> bool {
+        self.should_hydrate
     }
 
     pub fn build_launch_plan(
-        self,
+        &self,
         executable: OsString,
         args: Vec<OsString>,
         hydration: Option<&HydrationContext>,
     ) -> Result<LaunchPlan> {
-        let mut env = Vec::new();
+        let mut env = self
+            .extra_env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<Vec<_>>();
         let mut stdin_prelude = None;
 
         if let Some(hydration) = hydration {
@@ -99,7 +119,8 @@ impl AdapterKind {
                 "CONTYNU_REHYDRATION_SCHEMA_VERSION".into(),
                 hydration.packet.schema_version.to_string(),
             ));
-            stdin_prelude = Some(render_stdin_prelude(self, &hydration.packet).into_bytes());
+            stdin_prelude =
+                Some(render_stdin_prelude(self.as_str(), &hydration.packet).into_bytes());
         }
 
         Ok(LaunchPlan {
@@ -109,14 +130,32 @@ impl AdapterKind {
             stdin_prelude,
         })
     }
+
+    fn builtin(kind: AdapterKind, name: &str, should_hydrate: bool) -> Self {
+        Self {
+            kind,
+            name: name.into(),
+            should_hydrate,
+            extra_env: BTreeMap::new(),
+        }
+    }
+
+    fn configured(launcher: &ConfiguredLlmLauncher) -> Self {
+        Self {
+            kind: AdapterKind::ConfiguredLlm,
+            name: launcher.command.clone(),
+            should_hydrate: launcher.hydrate,
+            extra_env: launcher.extra_env.clone(),
+        }
+    }
 }
 
-fn render_stdin_prelude(adapter: AdapterKind, packet: &RehydrationPacket) -> String {
+fn render_stdin_prelude(adapter_name: &str, packet: &RehydrationPacket) -> String {
     let packet_json =
         serde_json::to_string_pretty(packet).expect("rehydration packet should serialize");
     format!(
         "CONTYNU REHYDRATION CONTEXT\nadapter={}\nproject_id={}\nUse this as authoritative project state when starting work.\n{}\n\n",
-        adapter.as_str(),
+        adapter_name,
         packet.project_id,
         packet_json
     )

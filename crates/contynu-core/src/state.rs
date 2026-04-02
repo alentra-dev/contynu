@@ -37,6 +37,10 @@ impl StatePaths {
         self.sqlite_root().join("contynu.db")
     }
 
+    pub fn config_path(&self) -> PathBuf {
+        self.root.join("config.json")
+    }
+
     pub fn blobs_root(&self) -> PathBuf {
         self.root.join("blobs")
     }
