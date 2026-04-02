@@ -328,6 +328,18 @@ impl MetadataStore {
         Ok(())
     }
 
+    pub fn set_turn_summary_memory(
+        &self,
+        turn_id: &TurnId,
+        summary_memory_id: &MemoryId,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE turns SET summary_memory_id = ?2 WHERE turn_id = ?1",
+            params![turn_id.as_str(), summary_memory_id.as_str()],
+        )?;
+        Ok(())
+    }
+
     pub fn record_event(
         &self,
         event: &EventEnvelope,
@@ -648,6 +660,94 @@ impl MetadataStore {
         Ok(artifacts)
     }
 
+    pub fn list_current_files(&self, session_id: &SessionId) -> Result<Vec<FileRecord>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT file_id, session_id, workspace_relative_path, kind, last_known_sha256,
+                   last_snapshot_event_id, last_diff_event_id, observed_at, is_generated
+            FROM files
+            WHERE session_id = ?1
+            ORDER BY workspace_relative_path ASC, observed_at DESC
+            "#,
+        )?;
+        let rows = stmt.query_map(params![session_id.as_str()], |row| {
+            Ok(FileRecord {
+                file_id: FileId::parse(row.get::<_, String>(0)?).map_err(into_sql_error)?,
+                session_id: SessionId::parse(row.get::<_, String>(1)?).map_err(into_sql_error)?,
+                workspace_relative_path: row.get(2)?,
+                kind: row.get(3)?,
+                last_known_sha256: row.get(4)?,
+                last_snapshot_event_id: row
+                    .get::<_, Option<String>>(5)?
+                    .map(EventId::parse)
+                    .transpose()
+                    .map_err(into_sql_error)?,
+                last_diff_event_id: row
+                    .get::<_, Option<String>>(6)?
+                    .map(EventId::parse)
+                    .transpose()
+                    .map_err(into_sql_error)?,
+                observed_at: parse_rfc3339(&row.get::<_, String>(7)?).map_err(into_sql_error)?,
+                is_generated: row.get::<_, i64>(8)? != 0,
+            })
+        })?;
+
+        let mut deduped = Vec::new();
+        let mut last_path = None::<String>;
+        for row in rows {
+            let file = row?;
+            if last_path.as_deref() == Some(file.workspace_relative_path.as_str()) {
+                continue;
+            }
+            last_path = Some(file.workspace_relative_path.clone());
+            deduped.push(file);
+        }
+        Ok(deduped)
+    }
+
+    pub fn list_events_for_turn(
+        &self,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+    ) -> Result<Vec<EventRecord>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT event_id, session_id, turn_id, seq, ts, actor, event_type, payload_json,
+                   checksum, journal_path, journal_byte_offset, journal_line
+            FROM events
+            WHERE session_id = ?1 AND turn_id = ?2
+            ORDER BY seq ASC
+            "#,
+        )?;
+        let rows = stmt.query_map(params![session_id.as_str(), turn_id.as_str()], |row| {
+            let payload_json: String = row.get(7)?;
+            Ok(EventRecord {
+                event_id: EventId::parse(row.get::<_, String>(0)?).map_err(into_sql_error)?,
+                session_id: SessionId::parse(row.get::<_, String>(1)?).map_err(into_sql_error)?,
+                turn_id: row
+                    .get::<_, Option<String>>(2)?
+                    .map(TurnId::parse)
+                    .transpose()
+                    .map_err(into_sql_error)?,
+                seq: row.get::<_, i64>(3)? as u64,
+                ts: parse_rfc3339(&row.get::<_, String>(4)?).map_err(into_sql_error)?,
+                actor: row.get(5)?,
+                event_type: row.get(6)?,
+                payload_json: serde_json::from_str(&payload_json).map_err(into_sql_error)?,
+                checksum: row.get(8)?,
+                journal_path: row.get(9)?,
+                journal_byte_offset: row.get::<_, i64>(10)? as u64,
+                journal_line: row.get::<_, i64>(11)? as usize,
+            })
+        })?;
+
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(row?);
+        }
+        Ok(events)
+    }
+
     pub fn list_memory_objects(
         &self,
         session_id: &SessionId,
@@ -732,7 +832,7 @@ impl MetadataStore {
             SELECT memory_id, session_id, kind, status, text, confidence, source_event_ids_json,
                    created_at, superseded_by
             FROM memory_objects
-            WHERE text LIKE ?1
+            WHERE text LIKE ?1 AND status != 'superseded'
             ORDER BY created_at DESC
             LIMIT 50
             "#,
@@ -836,7 +936,7 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{MetadataStore, SessionRecord};
+    use super::{MemoryObjectKind, MetadataStore, SessionRecord};
     use crate::event::{Actor, EventDraft, EventType};
     use crate::ids::SessionId;
     use crate::journal::Journal;
@@ -878,5 +978,89 @@ mod tests {
 
         store.reconcile_session(&journal, &session_id).unwrap();
         assert_eq!(store.list_events_for_session(&session_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn list_current_files_and_active_memory_filters_work() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("contynu.db");
+        let store = MetadataStore::open(&db).unwrap();
+        let session_id = SessionId::new();
+
+        store
+            .register_session(&SessionRecord {
+                session_id: session_id.clone(),
+                project_id: None,
+                status: "started".into(),
+                cli_name: None,
+                cli_version: None,
+                model_name: None,
+                cwd: None,
+                repo_root: None,
+                host_fingerprint: None,
+                started_at: chrono::Utc::now(),
+                ended_at: None,
+            })
+            .unwrap();
+
+        let first_memory = crate::store::MemoryObject {
+            memory_id: crate::ids::MemoryId::new(),
+            session_id: session_id.clone(),
+            kind: MemoryObjectKind::Summary,
+            status: "superseded".into(),
+            text: "old summary".into(),
+            confidence: Some(0.5),
+            source_event_ids: Vec::new(),
+            created_at: chrono::Utc::now(),
+            superseded_by: None,
+        };
+        let active_memory = crate::store::MemoryObject {
+            memory_id: crate::ids::MemoryId::new(),
+            session_id: session_id.clone(),
+            kind: MemoryObjectKind::Summary,
+            status: "active".into(),
+            text: "current summary".into(),
+            confidence: Some(0.9),
+            source_event_ids: Vec::new(),
+            created_at: chrono::Utc::now(),
+            superseded_by: None,
+        };
+        store.insert_memory_object(&first_memory).unwrap();
+        store.insert_memory_object(&active_memory).unwrap();
+
+        store
+            .register_file(&crate::store::FileRecord {
+                file_id: crate::ids::FileId::new(),
+                session_id: session_id.clone(),
+                workspace_relative_path: "src/main.rs".into(),
+                kind: "source_text".into(),
+                last_known_sha256: Some("sha256:one".into()),
+                last_snapshot_event_id: None,
+                last_diff_event_id: None,
+                observed_at: chrono::Utc::now(),
+                is_generated: false,
+            })
+            .unwrap();
+        store
+            .register_file(&crate::store::FileRecord {
+                file_id: crate::ids::FileId::new(),
+                session_id: session_id.clone(),
+                workspace_relative_path: "src/main.rs".into(),
+                kind: "source_deleted".into(),
+                last_known_sha256: None,
+                last_snapshot_event_id: None,
+                last_diff_event_id: None,
+                observed_at: chrono::Utc::now(),
+                is_generated: false,
+            })
+            .unwrap();
+
+        let current_files = store.list_current_files(&session_id).unwrap();
+        assert_eq!(current_files.len(), 1);
+        assert_eq!(current_files[0].workspace_relative_path, "src/main.rs");
+
+        let memory_hits = store.search_memory("summary").unwrap();
+        assert_eq!(memory_hits.len(), 1);
+        assert_eq!(memory_hits[0].text, "current summary");
     }
 }

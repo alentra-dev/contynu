@@ -167,16 +167,10 @@ impl<'a> CheckpointManager<'a> {
         let open_loops = memory_texts(&memory, MemoryObjectKind::Todo);
         let relevant_files = self
             .store
-            .search_exact(".")
-            .unwrap_or_default()
+            .list_current_files(session_id)?
             .into_iter()
-            .filter_map(|event| {
-                event
-                    .payload_json
-                    .get("path")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_owned)
-            })
+            .filter(|file| file.last_known_sha256.is_some())
+            .map(|file| file.workspace_relative_path)
             .take(10)
             .collect::<Vec<_>>();
         let recent_verbatim_context = events

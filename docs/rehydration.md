@@ -31,6 +31,6 @@ Contynu does not treat raw transcript dumping as resume logic. Resume and handof
 In this pass, packets are derived from:
 
 - the earliest captured user message for mission inference
-- memory objects in SQLite for reusable state
+- active memory objects in SQLite for reusable state
 - recent message and IO events for verbatim context
-- tracked artifacts and observed file paths for relevant references
+- tracked artifacts and the structured current-file index for relevant references

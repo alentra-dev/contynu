@@ -280,6 +280,7 @@ impl RuntimeEngine {
 
         let after = tracker.snapshot()?;
         let changes = tracker.diff(&before, &after);
+        let mut change_event_ids = Vec::new();
         for change in &changes {
             let snapshot_event_type = match change.kind {
                 FileChangeKind::Added | FileChangeKind::Modified => EventType::FileSnapshot,
@@ -305,6 +306,7 @@ impl RuntimeEngine {
                 payload,
             ))?;
             store.record_event(&event, &journal.path().display().to_string(), append)?;
+            change_event_ids.push(event.event_id.clone());
 
             let mut diff_event_id = None;
             if let Some(diff) = &change.diff {
@@ -324,6 +326,7 @@ impl RuntimeEngine {
                     &journal.path().display().to_string(),
                     diff_append,
                 )?;
+                change_event_ids.push(diff_event.event_id.clone());
                 diff_event_id = Some(diff_event.event_id.clone());
             }
 
@@ -369,6 +372,18 @@ impl RuntimeEngine {
                         created_at: Utc::now(),
                     })?;
                 }
+            } else if change.kind == FileChangeKind::Deleted {
+                store.register_file(&FileRecord {
+                    file_id: FileId::new(),
+                    session_id: session_id.clone(),
+                    workspace_relative_path: change.path.clone(),
+                    kind: format!("{}_deleted", change.role.as_str()),
+                    last_known_sha256: None,
+                    last_snapshot_event_id: Some(event.event_id.clone()),
+                    last_diff_event_id: diff_event_id,
+                    observed_at: Utc::now(),
+                    is_generated: change.role != FileRole::Source,
+                })?;
             }
         }
         Self::persist_workspace_scan_summary(
@@ -390,6 +405,7 @@ impl RuntimeEngine {
             capture.status.code(),
             interrupted.load(Ordering::SeqCst),
             &changes,
+            &change_event_ids,
         )?;
 
         Self::persist(
@@ -784,7 +800,16 @@ impl RuntimeEngine {
         exit_code: Option<i32>,
         interrupted: bool,
         changes: &[FileChange],
+        change_event_ids: &[crate::ids::EventId],
     ) -> Result<()> {
+        let mut source_event_ids = store
+            .list_events_for_turn(session_id, turn_id)?
+            .into_iter()
+            .map(|event| event.event_id)
+            .collect::<Vec<_>>();
+        source_event_ids.extend(change_event_ids.iter().cloned());
+        source_event_ids.sort();
+        source_event_ids.dedup();
         let command_text = command
             .iter()
             .map(|item| item.to_string_lossy().into_owned())
@@ -807,6 +832,7 @@ impl RuntimeEngine {
             summary,
             Some(0.9),
             true,
+            source_event_ids.clone(),
         )?;
         Self::insert_memory_object(
             journal,
@@ -822,6 +848,7 @@ impl RuntimeEngine {
             ),
             Some(0.8),
             false,
+            source_event_ids.clone(),
         )?;
         if interrupted {
             Self::insert_memory_object(
@@ -833,6 +860,7 @@ impl RuntimeEngine {
                 "The previous turn was interrupted and may need manual continuation.".into(),
                 Some(0.8),
                 false,
+                source_event_ids.clone(),
             )?;
         } else if exit_code.unwrap_or_default() != 0 {
             Self::insert_memory_object(
@@ -847,6 +875,7 @@ impl RuntimeEngine {
                 ),
                 Some(0.85),
                 false,
+                source_event_ids.clone(),
             )?;
         }
         for change in changes {
@@ -864,6 +893,7 @@ impl RuntimeEngine {
                 note,
                 Some(0.7),
                 false,
+                source_event_ids.clone(),
             )?;
         }
         Ok(())
@@ -878,12 +908,13 @@ impl RuntimeEngine {
         text: String,
         confidence: Option<f64>,
         supersede_kind: bool,
-    ) -> Result<()> {
+        source_event_ids: Vec<crate::ids::EventId>,
+    ) -> Result<Option<MemoryId>> {
         if store
             .find_active_memory_by_text(session_id, kind, &text)?
             .is_some()
         {
-            return Ok(());
+            return Ok(None);
         }
         let memory_id = MemoryId::new();
         if supersede_kind {
@@ -896,11 +927,14 @@ impl RuntimeEngine {
             status: "active".into(),
             text: text.clone(),
             confidence,
-            source_event_ids: Vec::new(),
+            source_event_ids,
             created_at: Utc::now(),
             superseded_by: None,
         };
         store.insert_memory_object(&memory)?;
+        if kind == MemoryObjectKind::Summary {
+            store.set_turn_summary_memory(turn_id, &memory_id)?;
+        }
         Self::persist(
             journal,
             store,
@@ -916,7 +950,8 @@ impl RuntimeEngine {
                     "confidence": confidence,
                 }),
             ),
-        )
+        )?;
+        Ok(Some(memory_id))
     }
 
     fn prepare_hydration(
@@ -1092,6 +1127,12 @@ mod tests {
         assert!(memory
             .iter()
             .any(|item| item.kind == MemoryObjectKind::FileNote));
+        assert!(memory.iter().all(|item| !item.source_event_ids.is_empty()));
+
+        let turn_events = store
+            .list_events_for_turn(&outcome.project_id, &outcome.turn_id)
+            .unwrap();
+        assert!(!turn_events.is_empty());
     }
 
     #[test]
