@@ -183,6 +183,82 @@ fn direct_passthrough_launches_regular_commands() {
 }
 
 #[test]
+fn status_projects_recent_and_config_commands_work() {
+    let dir = tempdir().unwrap();
+    let state_dir = dir.path().join(".contynu");
+
+    let run = Command::new(env!("CARGO_BIN_EXE_contynu"))
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("--cwd")
+        .arg(dir.path())
+        .arg("bash")
+        .arg("-lc")
+        .arg("printf status-smoke")
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "initial run failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let status = Command::new(env!("CARGO_BIN_EXE_contynu"))
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("status")
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    let status_stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(status_stdout.contains("\"project_id\""));
+    assert!(status_stdout.contains("\"counts\""));
+
+    let projects = Command::new(env!("CARGO_BIN_EXE_contynu"))
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("projects")
+        .output()
+        .unwrap();
+    assert!(projects.status.success());
+    let projects_stdout = String::from_utf8_lossy(&projects.stdout);
+    assert!(projects_stdout.contains("\"primary\": true"));
+
+    let recent = Command::new(env!("CARGO_BIN_EXE_contynu"))
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("recent")
+        .output()
+        .unwrap();
+    assert!(recent.status.success());
+    let recent_stdout = String::from_utf8_lossy(&recent.stdout);
+    assert!(recent_stdout.contains("\"latest_turn\""));
+
+    let config_validate = Command::new(env!("CARGO_BIN_EXE_contynu"))
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("config")
+        .arg("validate")
+        .output()
+        .unwrap();
+    assert!(config_validate.status.success());
+    let config_validate_stdout = String::from_utf8_lossy(&config_validate.stdout);
+    assert!(config_validate_stdout.contains("\"launcher_count\""));
+    assert!(config_validate_stdout.contains("\"context_file\""));
+
+    let config_show = Command::new(env!("CARGO_BIN_EXE_contynu"))
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("config")
+        .arg("show")
+        .output()
+        .unwrap();
+    assert!(config_show.status.success());
+    let config_show_stdout = String::from_utf8_lossy(&config_show.stdout);
+    assert!(config_show_stdout.contains("\"command\": \"codex\""));
+}
+
+#[test]
 fn builtin_launcher_config_can_override_known_launcher_behavior() {
     let dir = tempdir().unwrap();
     let state_dir = dir.path().join(".contynu");

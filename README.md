@@ -106,6 +106,9 @@ contynu run -- cargo test
 
 ```bash
 contynu start-project
+contynu status
+contynu projects
+contynu recent
 contynu checkpoint
 contynu resume
 contynu handoff --target-model gpt-5.4
@@ -122,6 +125,7 @@ contynu search memory decision
 contynu artifacts list
 contynu doctor
 contynu repair
+contynu config validate
 ```
 
 Contynu now defaults to a single continuous project memory per state directory. A raw `project_id` still exists for exact targeting and scripting, but normal commands resolve the primary project automatically.
@@ -136,6 +140,7 @@ cargo fmt --check
 More detailed docs:
 
 - [`docs/implementation-plan.md`](docs/implementation-plan.md)
+- [`docs/finalization-roadmap.md`](docs/finalization-roadmap.md)
 - [`docs/cli.md`](docs/cli.md)
 - [`docs/adapter-architecture.md`](docs/adapter-architecture.md)
 - [`docs/crash-recovery.md`](docs/crash-recovery.md)

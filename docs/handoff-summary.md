@@ -18,6 +18,9 @@
 - `contynu claude [-- <args...>]`
 - `contynu gemini [-- <args...>]`
 - `contynu run -- <command...>`
+- `contynu status [--project <id>]`
+- `contynu projects`
+- `contynu recent [--limit <n>]`
 - `contynu start-project`
 - `contynu checkpoint [--project <id>]`
 - `contynu resume [--project <id>]`
@@ -29,6 +32,8 @@
 - `contynu search memory <query>`
 - `contynu artifacts list`
 - `contynu doctor`
+- `contynu config validate`
+- `contynu config show`
 - `contynu repair [--project <id>]`
 
 ## Known Limitations

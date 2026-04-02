@@ -275,6 +275,41 @@ impl MetadataStore {
         Ok(session)
     }
 
+    pub fn list_sessions(&self) -> Result<Vec<SessionRecord>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT session_id, project_id, status, cli_name, cli_version, model_name, cwd,
+                   repo_root, host_fingerprint, started_at, ended_at
+            FROM sessions
+            ORDER BY started_at DESC
+            "#,
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(SessionRecord {
+                session_id: SessionId::parse(row.get::<_, String>(0)?).map_err(into_sql_error)?,
+                project_id: row.get(1)?,
+                status: row.get(2)?,
+                cli_name: row.get(3)?,
+                cli_version: row.get(4)?,
+                model_name: row.get(5)?,
+                cwd: row.get(6)?,
+                repo_root: row.get(7)?,
+                host_fingerprint: row.get(8)?,
+                started_at: parse_rfc3339(&row.get::<_, String>(9)?).map_err(into_sql_error)?,
+                ended_at: row
+                    .get::<_, Option<String>>(10)?
+                    .map(|value| parse_rfc3339(&value))
+                    .transpose()
+                    .map_err(into_sql_error)?,
+            })
+        })?;
+        let mut sessions = Vec::new();
+        for row in rows {
+            sessions.push(row?);
+        }
+        Ok(sessions)
+    }
+
     pub fn update_session_status(
         &self,
         session_id: &SessionId,
@@ -326,6 +361,40 @@ impl MetadataStore {
             ],
         )?;
         Ok(())
+    }
+
+    pub fn list_turns_for_session(&self, session_id: &SessionId) -> Result<Vec<TurnRecord>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT turn_id, session_id, status, started_at, completed_at, summary_memory_id
+            FROM turns
+            WHERE session_id = ?1
+            ORDER BY started_at DESC
+            "#,
+        )?;
+        let rows = stmt.query_map(params![session_id.as_str()], |row| {
+            Ok(TurnRecord {
+                turn_id: TurnId::parse(row.get::<_, String>(0)?).map_err(into_sql_error)?,
+                session_id: SessionId::parse(row.get::<_, String>(1)?).map_err(into_sql_error)?,
+                status: row.get(2)?,
+                started_at: parse_rfc3339(&row.get::<_, String>(3)?).map_err(into_sql_error)?,
+                completed_at: row
+                    .get::<_, Option<String>>(4)?
+                    .map(|value| parse_rfc3339(&value))
+                    .transpose()
+                    .map_err(into_sql_error)?,
+                summary_memory_id: row
+                    .get::<_, Option<String>>(5)?
+                    .map(MemoryId::parse)
+                    .transpose()
+                    .map_err(into_sql_error)?,
+            })
+        })?;
+        let mut turns = Vec::new();
+        for row in rows {
+            turns.push(row?);
+        }
+        Ok(turns)
     }
 
     pub fn set_turn_summary_memory(

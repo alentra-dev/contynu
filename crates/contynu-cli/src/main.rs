@@ -30,6 +30,19 @@ enum Command {
     Codex(LlmCommand),
     Claude(LlmCommand),
     Gemini(LlmCommand),
+    Status {
+        #[arg(long, alias = "session")]
+        project: Option<String>,
+    },
+    Projects,
+    Recent {
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
     #[command(name = "start-project", visible_alias = "start-session")]
     StartProject,
     Checkpoint {
@@ -128,6 +141,12 @@ enum ArtifactsCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    Validate,
+    Show,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let state = StatePaths::new(&cli.state_dir);
@@ -138,6 +157,10 @@ fn main() -> Result<()> {
         Command::Codex(command) => launch_llm(&state, &cli.cwd, "codex", command),
         Command::Claude(command) => launch_llm(&state, &cli.cwd, "claude", command),
         Command::Gemini(command) => launch_llm(&state, &cli.cwd, "gemini", command),
+        Command::Status { project } => status(&state, project.as_deref()),
+        Command::Projects => projects(&state),
+        Command::Recent { limit } => recent(&state, limit),
+        Command::Config { command } => config_command(&state, command),
         Command::StartProject => start_project(&state, &cli.cwd),
         Command::Checkpoint { project, reason } => checkpoint(&state, project.as_deref(), &reason),
         Command::Resume { project } => resume(&state, project.as_deref(), None),
@@ -321,14 +344,147 @@ fn artifacts(state: &StatePaths, command: ArtifactsCommand) -> Result<()> {
     }
 }
 
+fn status(state: &StatePaths, project: Option<&str>) -> Result<()> {
+    ensure_state(state)?;
+    let store = MetadataStore::open(state.sqlite_db())?;
+    let project_id = resolve_project_id(state, project)?;
+    let session = store
+        .get_session(&project_id)?
+        .ok_or_else(|| anyhow!("project not found"))?;
+    let turns = store.list_turns_for_session(&project_id)?;
+    let artifacts = store.list_artifacts(Some(&project_id))?;
+    let files = store.list_current_files(&project_id)?;
+    let memory = store.list_memory_objects(&project_id, None)?;
+    let events = store.list_events_for_session(&project_id)?;
+    let latest_turn = turns.first().cloned();
+    let recent_events = events
+        .iter()
+        .rev()
+        .take(5)
+        .map(|event| {
+            serde_json::json!({
+                "seq": event.seq,
+                "event_type": event.event_type,
+                "ts": event.ts,
+            })
+        })
+        .collect::<Vec<_>>();
+    let report = serde_json::json!({
+        "project_id": project_id,
+        "status": session.status,
+        "cli_name": session.cli_name,
+        "cwd": session.cwd,
+        "started_at": session.started_at,
+        "latest_turn": latest_turn.map(|turn| serde_json::json!({
+            "turn_id": turn.turn_id,
+            "status": turn.status,
+            "started_at": turn.started_at,
+            "completed_at": turn.completed_at,
+            "summary_memory_id": turn.summary_memory_id,
+        })),
+        "counts": {
+            "turns": turns.len(),
+            "events": events.len(),
+            "artifacts": artifacts.len(),
+            "files": files.len(),
+            "memory_objects": memory.len(),
+        },
+        "recent_events": recent_events,
+    });
+    print_json(&report)
+}
+
+fn projects(state: &StatePaths) -> Result<()> {
+    ensure_state(state)?;
+    let store = MetadataStore::open(state.sqlite_db())?;
+    let primary = store.primary_project_id()?;
+    let sessions = store.list_sessions()?;
+    let report = sessions
+        .into_iter()
+        .map(|session| {
+            serde_json::json!({
+                "project_id": session.session_id,
+                "primary": primary.as_ref() == Some(&session.session_id),
+                "status": session.status,
+                "cli_name": session.cli_name,
+                "cwd": session.cwd,
+                "started_at": session.started_at,
+                "ended_at": session.ended_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    print_json(&report)
+}
+
+fn recent(state: &StatePaths, limit: usize) -> Result<()> {
+    ensure_state(state)?;
+    let store = MetadataStore::open(state.sqlite_db())?;
+    let sessions = store.list_sessions()?;
+    let mut items = Vec::new();
+    for session in sessions.into_iter().take(limit) {
+        let turns = store.list_turns_for_session(&session.session_id)?;
+        let latest_turn = turns.first().cloned();
+        items.push(serde_json::json!({
+            "project_id": session.session_id,
+            "status": session.status,
+            "cli_name": session.cli_name,
+            "cwd": session.cwd,
+            "started_at": session.started_at,
+            "latest_turn": latest_turn.map(|turn| serde_json::json!({
+                "turn_id": turn.turn_id,
+                "status": turn.status,
+                "started_at": turn.started_at,
+            })),
+        }));
+    }
+    print_json(&items)
+}
+
+fn config_command(state: &StatePaths, command: ConfigCommand) -> Result<()> {
+    ensure_state(state)?;
+    match command {
+        ConfigCommand::Validate => {
+            let config = ContynuConfig::load(&state.config_path())?;
+            let report = serde_json::json!({
+                "config_path": state.config_path().display().to_string(),
+                "launcher_count": config.llm_launchers.len(),
+                "launchers": config.llm_launchers.iter().map(|launcher| serde_json::json!({
+                    "command": launcher.command,
+                    "aliases": launcher.aliases,
+                    "hydrate": launcher.hydrate,
+                    "use_pty": launcher.use_pty,
+                    "context_file": launcher.context_file,
+                    "hydration_delivery": launcher.hydration_delivery,
+                    "hydration_args": launcher.hydration_args,
+                })).collect::<Vec<_>>(),
+            });
+            print_json(&report)
+        }
+        ConfigCommand::Show => {
+            let raw = std::fs::read_to_string(state.config_path())?;
+            println!("{raw}");
+            Ok(())
+        }
+    }
+}
+
 fn doctor(state: &StatePaths) -> Result<()> {
     ensure_state(state)?;
     let store = MetadataStore::open(state.sqlite_db())?;
+    let primary_project = store.primary_project_id()?;
+    let sessions = store.list_sessions()?;
+    let config = ContynuConfig::load(&state.config_path())?;
     let report = serde_json::json!({
         "state_root": state.root().display().to_string(),
+        "config_path": state.config_path().display().to_string(),
         "sqlite_db": state.sqlite_db().display().to_string(),
         "journal_root": state.journal_root().display().to_string(),
+        "runtime_root": state.runtime_root().display().to_string(),
+        "checkpoints_root": state.checkpoints_root().display().to_string(),
+        "primary_project_id": primary_project,
+        "projects": sessions.len(),
         "artifacts": store.list_artifacts(None)?.len(),
+        "config_launchers": config.llm_launchers.len(),
     });
     print_json(&report)
 }

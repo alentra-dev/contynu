@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -56,7 +56,9 @@ impl ContynuConfig {
             return Ok(Self::with_builtin_launchers());
         }
         let raw = fs::read_to_string(path)?;
-        Ok(serde_json::from_str(&raw)?)
+        let config = serde_json::from_str::<Self>(&raw)?;
+        config.validate()?;
+        Ok(config)
     }
 
     pub fn ensure_exists(path: &Path) -> Result<()> {
@@ -74,6 +76,30 @@ impl ContynuConfig {
         Ok(serde_json::to_string_pretty(
             &Self::with_builtin_launchers(),
         )?)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        let mut seen = BTreeSet::new();
+        for launcher in &self.llm_launchers {
+            if launcher.command.trim().is_empty() {
+                return Err(crate::error::ContynuError::Validation(
+                    "launcher command must not be empty".into(),
+                ));
+            }
+            for name in std::iter::once(&launcher.command).chain(launcher.aliases.iter()) {
+                if !seen.insert(name.clone()) {
+                    return Err(crate::error::ContynuError::Validation(format!(
+                        "duplicate launcher name or alias `{name}`"
+                    )));
+                }
+            }
+            if launcher.context_file.as_deref() == Some("") {
+                return Err(crate::error::ContynuError::Validation(
+                    "context_file must not be empty".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn find_llm_launcher(&self, command: &str) -> Option<&ConfiguredLlmLauncher> {
@@ -235,5 +261,23 @@ mod tests {
                 .as_deref(),
             Some("GEMINI.md")
         );
+    }
+
+    #[test]
+    fn duplicate_launcher_names_are_rejected() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "llm_launchers": [
+                {"command": "codex"},
+                {"command": "codex"}
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        assert!(ContynuConfig::load(&path).is_err());
     }
 }

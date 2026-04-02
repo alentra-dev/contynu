@@ -46,6 +46,18 @@ Runtime behavior in this pass:
 
 Creates or returns the primary continuous project memory for the current state directory.
 
+### `contynu status [--project <id>]`
+
+Prints a compact structured view of the current project state, including counts, latest turn metadata, and recent events.
+
+### `contynu projects`
+
+Lists known projects in the current state directory and marks the primary project.
+
+### `contynu recent [--limit <n>]`
+
+Shows the most recently active projects with their latest turn metadata.
+
 ### `contynu checkpoint [--project <id>]`
 
 Builds a checkpoint manifest and deterministic rehydration packet for the primary project unless a project is explicitly selected.
@@ -85,6 +97,14 @@ Lists tracked artifacts, optionally scoped to one project.
 ### `contynu doctor`
 
 Reports core storage paths and a minimal health summary.
+
+### `contynu config validate`
+
+Loads and validates `.contynu/config.json`, then prints the effective launcher configuration.
+
+### `contynu config show`
+
+Prints the raw config file contents.
 
 ### `contynu repair [--project <id>]`
 
