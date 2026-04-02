@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::checkpoint::RehydrationPacket;
-use crate::config::{ConfiguredLlmLauncher, ContynuConfig};
+use crate::config::{ConfiguredLlmLauncher, ContynuConfig, HydrationDelivery};
 use crate::error::Result;
 use crate::ids::ProjectId;
 
@@ -29,6 +29,7 @@ pub struct AdapterSpec {
     kind: AdapterKind,
     name: String,
     should_hydrate: bool,
+    hydration_delivery: HydrationDelivery,
     extra_env: BTreeMap<String, String>,
 }
 
@@ -103,24 +104,28 @@ impl AdapterSpec {
         let mut stdin_prelude = None;
 
         if let Some(hydration) = hydration {
-            env.push((
-                "CONTYNU_PROJECT_ID".into(),
-                hydration.project_id.as_str().to_string(),
-            ));
-            env.push((
-                "CONTYNU_REHYDRATION_PACKET_FILE".into(),
-                hydration.packet_path.display().to_string(),
-            ));
-            env.push((
-                "CONTYNU_REHYDRATION_PROMPT_FILE".into(),
-                hydration.prompt_path.display().to_string(),
-            ));
-            env.push((
-                "CONTYNU_REHYDRATION_SCHEMA_VERSION".into(),
-                hydration.packet.schema_version.to_string(),
-            ));
-            stdin_prelude =
-                Some(render_stdin_prelude(self.as_str(), &hydration.packet).into_bytes());
+            if self.hydration_delivery.includes_env() {
+                env.push((
+                    "CONTYNU_PROJECT_ID".into(),
+                    hydration.project_id.as_str().to_string(),
+                ));
+                env.push((
+                    "CONTYNU_REHYDRATION_PACKET_FILE".into(),
+                    hydration.packet_path.display().to_string(),
+                ));
+                env.push((
+                    "CONTYNU_REHYDRATION_PROMPT_FILE".into(),
+                    hydration.prompt_path.display().to_string(),
+                ));
+                env.push((
+                    "CONTYNU_REHYDRATION_SCHEMA_VERSION".into(),
+                    hydration.packet.schema_version.to_string(),
+                ));
+            }
+            if self.hydration_delivery.includes_stdin() {
+                stdin_prelude =
+                    Some(render_stdin_prelude(self.as_str(), &hydration.packet).into_bytes());
+            }
         }
 
         Ok(LaunchPlan {
@@ -136,6 +141,7 @@ impl AdapterSpec {
             kind,
             name: name.into(),
             should_hydrate,
+            hydration_delivery: HydrationDelivery::EnvAndStdin,
             extra_env: BTreeMap::new(),
         }
     }
@@ -145,6 +151,7 @@ impl AdapterSpec {
             kind: AdapterKind::ConfiguredLlm,
             name: launcher.command.clone(),
             should_hydrate: launcher.hydrate,
+            hydration_delivery: launcher.hydration_delivery,
             extra_env: launcher.extra_env.clone(),
         }
     }
@@ -159,4 +166,65 @@ fn render_stdin_prelude(adapter_name: &str, packet: &RehydrationPacket) -> Strin
         packet.project_id,
         packet_json
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    use serde_json::json;
+
+    use super::{AdapterSpec, HydrationContext};
+    use crate::checkpoint::RehydrationPacket;
+    use crate::config::ContynuConfig;
+    use crate::ids::ProjectId;
+
+    #[test]
+    fn configured_launcher_can_disable_stdin_hydration() {
+        let config = serde_json::from_value::<ContynuConfig>(json!({
+            "llm_launchers": [
+                {
+                    "command": "futurellm",
+                    "hydrate": true,
+                    "hydration_delivery": "env_only"
+                }
+            ]
+        }))
+        .unwrap();
+        let adapter = AdapterSpec::detect("futurellm", &config);
+        let project_id = ProjectId::new();
+        let packet = RehydrationPacket {
+            schema_version: 1,
+            project_id: project_id.clone(),
+            target_model: None,
+            mission: "Continue the project faithfully.".into(),
+            stable_facts: Vec::new(),
+            constraints: Vec::new(),
+            decisions: Vec::new(),
+            current_state: "No prior summary available.".into(),
+            open_loops: Vec::new(),
+            relevant_artifacts: Vec::new(),
+            relevant_files: Vec::new(),
+            recent_verbatim_context: Vec::new(),
+            retrieval_guidance: Vec::new(),
+        };
+        let hydration = HydrationContext {
+            project_id,
+            packet,
+            packet_path: PathBuf::from("/tmp/rehydration.json"),
+            prompt_path: PathBuf::from("/tmp/rehydration.txt"),
+        };
+
+        let plan = adapter
+            .build_launch_plan(OsString::from("futurellm"), Vec::new(), Some(&hydration))
+            .unwrap();
+
+        assert!(plan.stdin_prelude.is_none());
+        assert!(plan
+            .env
+            .iter()
+            .any(|(key, value)| key == "CONTYNU_REHYDRATION_PACKET_FILE"
+                && value == "/tmp/rehydration.json"));
+    }
 }

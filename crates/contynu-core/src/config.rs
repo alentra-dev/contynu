@@ -20,7 +20,28 @@ pub struct ConfiguredLlmLauncher {
     #[serde(default = "default_true")]
     pub hydrate: bool,
     #[serde(default)]
+    pub hydration_delivery: HydrationDelivery,
+    #[serde(default)]
     pub extra_env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HydrationDelivery {
+    EnvOnly,
+    StdinOnly,
+    #[default]
+    EnvAndStdin,
+}
+
+impl HydrationDelivery {
+    pub fn includes_env(self) -> bool {
+        matches!(self, Self::EnvOnly | Self::EnvAndStdin)
+    }
+
+    pub fn includes_stdin(self) -> bool {
+        matches!(self, Self::StdinOnly | Self::EnvAndStdin)
+    }
 }
 
 impl ContynuConfig {
@@ -47,7 +68,7 @@ fn default_true() -> bool {
 mod tests {
     use tempfile::tempdir;
 
-    use super::ContynuConfig;
+    use super::{ContynuConfig, HydrationDelivery};
 
     #[test]
     fn config_can_match_custom_launcher_aliases() {
@@ -66,5 +87,40 @@ mod tests {
         let config = ContynuConfig::load(&path).unwrap();
         assert!(config.find_llm_launcher("myllm").is_some());
         assert!(config.find_llm_launcher("myllm-cli").is_some());
+        assert_eq!(
+            config
+                .find_llm_launcher("myllm")
+                .unwrap()
+                .hydration_delivery,
+            HydrationDelivery::EnvAndStdin
+        );
+    }
+
+    #[test]
+    fn config_supports_custom_hydration_delivery() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "llm_launchers": [
+                {
+                  "command": "futurellm",
+                  "hydrate": true,
+                  "hydration_delivery": "env_only"
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let config = ContynuConfig::load(&path).unwrap();
+        assert_eq!(
+            config
+                .find_llm_launcher("futurellm")
+                .unwrap()
+                .hydration_delivery,
+            HydrationDelivery::EnvOnly
+        );
     }
 }

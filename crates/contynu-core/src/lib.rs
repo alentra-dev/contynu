@@ -16,7 +16,7 @@ pub use blobs::{BlobDescriptor, BlobStore};
 pub use checkpoint::{
     CheckpointManager, CheckpointManifest, RehydrationArtifact, RehydrationPacket,
 };
-pub use config::{ConfiguredLlmLauncher, ContynuConfig};
+pub use config::{ConfiguredLlmLauncher, ContynuConfig, HydrationDelivery};
 pub use error::{ContynuError, Result};
 pub use event::{Actor, EventDraft, EventEnvelope, EventType};
 pub use files::{FileChange, FileChangeKind, FileTracker};

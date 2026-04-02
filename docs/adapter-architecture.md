@@ -37,6 +37,7 @@ Example:
       "command": "futurellm",
       "aliases": ["futurellm-cli"],
       "hydrate": true,
+      "hydration_delivery": "env_only",
       "extra_env": {
         "FUTURELLM_MODE": "enabled"
       }
@@ -45,7 +46,13 @@ Example:
 }
 ```
 
-If a direct launch command matches `command` or any alias, Contynu treats it as a hydratable LLM launcher and applies the same rehydration delivery path used by built-in launchers.
+If a direct launch command matches `command` or any alias, Contynu treats it as a hydratable LLM launcher.
+
+Configured launchers can choose how rehydration is delivered:
+
+- `env_only`: materialize packet/prompt files and export their paths via environment variables only
+- `stdin_only`: send the startup prelude on stdin only
+- `env_and_stdin`: do both
 
 ## Extension Path
 

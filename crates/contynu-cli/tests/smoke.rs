@@ -194,6 +194,7 @@ fn configured_custom_llm_launcher_is_hydrated() {
               "command": "futurellm",
               "aliases": ["futurellm-cli"],
               "hydrate": true,
+              "hydration_delivery": "env_only",
               "extra_env": {"FUTURELLM_MODE": "enabled"}
             }
           ]
@@ -249,6 +250,6 @@ fn configured_custom_llm_launcher_is_hydrated() {
     let captured = fs::read_to_string(&capture_path).unwrap();
     assert!(captured.contains("rehydration.json"));
     assert!(captured.contains("extra:enabled"));
-    assert!(captured.contains("CONTYNU REHYDRATION CONTEXT"));
+    assert!(!captured.contains("CONTYNU REHYDRATION CONTEXT"));
     assert!(captured.contains(&project_id));
 }

@@ -46,6 +46,26 @@ When a known LLM launcher is continuing an existing project, Contynu now materia
 
 Unknown future LLM CLIs can be taught to Contynu through `.contynu/config.json`. If a launcher is listed there, the normal direct path like `contynu myllm` will recognize it as hydratable.
 
+Example:
+
+```json
+{
+  "llm_launchers": [
+    {
+      "command": "futurellm",
+      "aliases": ["futurellm-cli"],
+      "hydrate": true,
+      "hydration_delivery": "env_only",
+      "extra_env": {
+        "FUTURELLM_MODE": "enabled"
+      }
+    }
+  ]
+}
+```
+
+`hydration_delivery` supports `env_only`, `stdin_only`, or `env_and_stdin`.
+
 ### Streamlined Generic Launch
 
 ```bash
