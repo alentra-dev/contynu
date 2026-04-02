@@ -30,7 +30,6 @@ pub struct AdapterSpec {
     name: String,
     should_hydrate: bool,
     use_pty: bool,
-    context_file: Option<String>,
     hydration_delivery: HydrationDelivery,
     hydration_args: Vec<OsString>,
     extra_env: BTreeMap<String, String>,
@@ -92,10 +91,6 @@ impl AdapterSpec {
 
     pub fn use_pty(&self) -> bool {
         self.use_pty
-    }
-
-    pub fn context_file(&self) -> Option<&str> {
-        self.context_file.as_deref()
     }
 
     pub fn build_launch_plan(
@@ -160,7 +155,6 @@ impl AdapterSpec {
             name: name.into(),
             should_hydrate,
             use_pty: should_hydrate,
-            context_file: builtin_context_file(kind).map(str::to_string),
             hydration_delivery: HydrationDelivery::EnvAndStdin,
             hydration_args: Vec::new(),
             extra_env: BTreeMap::new(),
@@ -176,7 +170,6 @@ impl AdapterSpec {
             name: default_name.to_string(),
             should_hydrate: launcher.hydrate,
             use_pty: launcher.use_pty,
-            context_file: launcher.context_file.clone(),
             hydration_delivery: launcher.hydration_delivery,
             hydration_args: launcher
                 .hydration_args
@@ -195,15 +188,6 @@ fn builtin_kind_for_program(program: &str) -> Option<(AdapterKind, &'static str)
         "claude" | "claude-code" => Some((AdapterKind::ClaudeCli, "claude_cli")),
         "gemini" | "gemini-cli" => Some((AdapterKind::GeminiCli, "gemini_cli")),
         _ => None,
-    }
-}
-
-fn builtin_context_file(kind: AdapterKind) -> Option<&'static str> {
-    match kind {
-        AdapterKind::CodexCli => Some("AGENTS.md"),
-        AdapterKind::ClaudeCli => Some("CLAUDE.md"),
-        AdapterKind::GeminiCli => Some("GEMINI.md"),
-        AdapterKind::Terminal | AdapterKind::ConfiguredLlm => None,
     }
 }
 

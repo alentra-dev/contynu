@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::io::{IsTerminal, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -93,11 +93,6 @@ struct ProcessCapture {
     stderr_bytes: Vec<u8>,
 }
 
-struct WorkspaceContextGuard {
-    path: PathBuf,
-    original: Option<Vec<u8>>,
-}
-
 struct MemoryCandidate {
     kind: MemoryObjectKind,
     text: String,
@@ -107,16 +102,6 @@ struct MemoryCandidate {
 struct StartupIndicator {
     stop: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
-}
-
-impl Drop for WorkspaceContextGuard {
-    fn drop(&mut self) {
-        if let Some(original) = &self.original {
-            let _ = std::fs::write(&self.path, original);
-        } else {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
 }
 
 impl StartupIndicator {
@@ -322,21 +307,6 @@ impl RuntimeEngine {
             config.command[1..].to_vec(),
             hydration.as_ref(),
         )?;
-        let _context_guard = if let (Some(hydration), Some(context_file)) =
-            (hydration.as_ref(), adapter.context_file())
-        {
-            Some(Self::install_workspace_context(
-                &config.cwd,
-                context_file,
-                hydration,
-                &journal,
-                &store,
-                &session_id,
-                &turn_id,
-            )?)
-        } else {
-            None
-        };
         startup_indicator.stop();
 
         let interrupted = Arc::new(AtomicBool::new(false));
@@ -1261,37 +1231,6 @@ impl RuntimeEngine {
             prompt_text: prompt,
         })
     }
-
-    fn install_workspace_context(
-        cwd: &Path,
-        context_file: &str,
-        hydration: &HydrationContext,
-        journal: &Journal,
-        store: &MetadataStore,
-        session_id: &SessionId,
-        turn_id: &TurnId,
-    ) -> Result<WorkspaceContextGuard> {
-        let path = cwd.join(context_file);
-        let original = std::fs::read(&path).ok();
-        let merged = merge_workspace_context(original.as_deref(), &hydration.prompt_text);
-        std::fs::write(&path, merged.as_bytes())?;
-        Self::persist(
-            journal,
-            store,
-            EventDraft::new(
-                session_id.clone(),
-                Some(turn_id.clone()),
-                Actor::System,
-                EventType::ArtifactMaterialized,
-                json!({
-                    "kind": "workspace_context_file",
-                    "path": path.display().to_string(),
-                    "created": original.is_none(),
-                }),
-            ),
-        )?;
-        Ok(WorkspaceContextGuard { path, original })
-    }
 }
 
 fn resolve_transport(adapter: &AdapterSpec) -> ExecutionTransport {
@@ -1302,34 +1241,6 @@ fn resolve_transport(adapter: &AdapterSpec) -> ExecutionTransport {
     } else {
         ExecutionTransport::Pipes
     }
-}
-
-fn merge_workspace_context(original: Option<&[u8]>, prompt_text: &str) -> String {
-    const BEGIN: &str = "\n<!-- CONTYNU_BEGIN -->\n";
-    const END: &str = "\n<!-- CONTYNU_END -->\n";
-
-    let base = original
-        .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
-        .unwrap_or_default();
-    let cleaned = if let (Some(start), Some(end)) = (base.find(BEGIN), base.find(END)) {
-        let end = end + END.len();
-        let mut merged = String::new();
-        merged.push_str(&base[..start]);
-        merged.push_str(&base[end..]);
-        merged
-    } else {
-        base
-    };
-    let mut merged = cleaned.trim_end().to_string();
-    if !merged.is_empty() {
-        merged.push_str("\n\n");
-    }
-    merged
-        .push_str("Contynu continuity context. Use this as authoritative current project state.\n");
-    merged.push_str(BEGIN.trim_start_matches('\n'));
-    merged.push_str(prompt_text);
-    merged.push_str(END);
-    merged
 }
 
 fn mirror_chunk_to_terminal(kind: StreamKind, bytes: &[u8]) -> Result<()> {

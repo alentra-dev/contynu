@@ -22,8 +22,6 @@ pub struct ConfiguredLlmLauncher {
     #[serde(default)]
     pub use_pty: bool,
     #[serde(default)]
-    pub context_file: Option<String>,
-    #[serde(default)]
     pub hydration_delivery: HydrationDelivery,
     #[serde(default)]
     pub hydration_args: Vec<String>,
@@ -93,11 +91,6 @@ impl ContynuConfig {
                     )));
                 }
             }
-            if launcher.context_file.as_deref() == Some("") {
-                return Err(crate::error::ContynuError::Validation(
-                    "context_file must not be empty".into(),
-                ));
-            }
         }
         Ok(())
     }
@@ -126,8 +119,7 @@ fn builtin_launchers() -> Vec<ConfiguredLlmLauncher> {
             aliases: vec!["codex-cli".into()],
             hydrate: true,
             use_pty: true,
-            context_file: Some("AGENTS.md".into()),
-            hydration_delivery: HydrationDelivery::EnvOnly,
+            hydration_delivery: HydrationDelivery::EnvAndStdin,
             hydration_args: Vec::new(),
             extra_env: BTreeMap::new(),
         },
@@ -136,8 +128,7 @@ fn builtin_launchers() -> Vec<ConfiguredLlmLauncher> {
             aliases: vec!["claude-code".into()],
             hydrate: true,
             use_pty: true,
-            context_file: Some("CLAUDE.md".into()),
-            hydration_delivery: HydrationDelivery::EnvOnly,
+            hydration_delivery: HydrationDelivery::EnvAndStdin,
             hydration_args: Vec::new(),
             extra_env: BTreeMap::new(),
         },
@@ -146,8 +137,7 @@ fn builtin_launchers() -> Vec<ConfiguredLlmLauncher> {
             aliases: vec!["gemini-cli".into()],
             hydrate: true,
             use_pty: true,
-            context_file: None,
-            hydration_delivery: HydrationDelivery::EnvOnly,
+            hydration_delivery: HydrationDelivery::EnvAndStdin,
             hydration_args: Vec::new(),
             extra_env: BTreeMap::new(),
         },
@@ -198,7 +188,6 @@ mod tests {
                   "command": "futurellm",
                   "hydrate": true,
                   "use_pty": true,
-                  "context_file": "FUTURELLM.md",
                   "hydration_delivery": "env_only",
                   "hydration_args": ["--context-file", "{prompt_file}"]
                 }
@@ -216,10 +205,6 @@ mod tests {
             HydrationDelivery::EnvOnly
         );
         assert!(config.find_llm_launcher("futurellm").unwrap().use_pty);
-        assert_eq!(
-            config.find_llm_launcher("futurellm").unwrap().context_file,
-            Some("FUTURELLM.md".into())
-        );
         assert_eq!(
             config
                 .find_llm_launcher("futurellm")
@@ -241,25 +226,22 @@ mod tests {
             config
                 .find_llm_launcher("codex")
                 .unwrap()
-                .context_file
-                .as_deref(),
-            Some("AGENTS.md")
+                .hydration_delivery,
+            HydrationDelivery::EnvAndStdin
         );
         assert_eq!(
             config
                 .find_llm_launcher("claude")
                 .unwrap()
-                .context_file
-                .as_deref(),
-            Some("CLAUDE.md")
+                .hydration_delivery,
+            HydrationDelivery::EnvAndStdin
         );
         assert_eq!(
             config
                 .find_llm_launcher("gemini")
                 .unwrap()
-                .context_file
-                .as_deref(),
-            None
+                .hydration_delivery,
+            HydrationDelivery::EnvAndStdin
         );
     }
 

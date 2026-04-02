@@ -669,9 +669,6 @@ fn config_command(state: &StatePaths, command: ConfigCommand) -> Result<()> {
                 }
                 println!("  hydrate: {}", yes_no(launcher.hydrate));
                 println!("  use pty: {}", yes_no(launcher.use_pty));
-                if let Some(context_file) = launcher.context_file.as_deref() {
-                    println!("  context file: {}", context_file);
-                }
                 println!(
                     "  delivery: {}",
                     hydration_delivery_name(launcher.hydration_delivery)

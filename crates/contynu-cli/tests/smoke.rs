@@ -118,7 +118,7 @@ fn streamlined_launcher_reuses_primary_project() {
     fs::write(
         &codex_path,
         format!(
-            "#!/bin/sh\nprintf \"env:%s|ctx:%s\\n\" \"$CONTYNU_REHYDRATION_PACKET_FILE\" \"$(grep -c CONTYNU_BEGIN AGENTS.md 2>/dev/null || true)\" > \"{}\"\ngrep -q CONTYNU_BEGIN AGENTS.md && grep -q CONTYNU_END AGENTS.md && grep -q authoritative AGENTS.md\nprintf mocked-codex\n",
+            "#!/bin/sh\nprintf \"env:%s|prompt:%s\\n\" \"$CONTYNU_REHYDRATION_PACKET_FILE\" \"$CONTYNU_REHYDRATION_PROMPT_FILE\" > \"{}\"\nprintf mocked-codex\n",
             capture_path.display()
         ),
     )
@@ -165,7 +165,8 @@ fn streamlined_launcher_reuses_primary_project() {
     let captured = fs::read_to_string(&capture_path).unwrap();
     assert!(captured.contains("env:"));
     assert!(captured.contains("rehydration.json"));
-    assert!(captured.contains("ctx:1"));
+    assert!(captured.contains("prompt:"));
+    assert!(captured.contains("rehydration.txt"));
     assert!(!dir.path().join("AGENTS.md").exists());
 
     let inspect = Command::new(env!("CARGO_BIN_EXE_contynu"))
@@ -274,7 +275,7 @@ fn status_projects_recent_and_config_commands_work() {
     assert!(config_validate.status.success());
     let config_validate_stdout = String::from_utf8_lossy(&config_validate.stdout);
     assert!(config_validate_stdout.contains("Config is valid."));
-    assert!(config_validate_stdout.contains("context file:"));
+    assert!(config_validate_stdout.contains("delivery:"));
 
     let config_show = Command::new(env!("CARGO_BIN_EXE_contynu"))
         .arg("--state-dir")
