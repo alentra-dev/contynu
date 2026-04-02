@@ -20,6 +20,8 @@ pub struct ConfiguredLlmLauncher {
     #[serde(default = "default_true")]
     pub hydrate: bool,
     #[serde(default)]
+    pub use_pty: bool,
+    #[serde(default)]
     pub hydration_delivery: HydrationDelivery,
     #[serde(default)]
     pub hydration_args: Vec<String>,
@@ -95,6 +97,7 @@ fn builtin_launchers() -> Vec<ConfiguredLlmLauncher> {
             command: "codex".into(),
             aliases: vec!["codex-cli".into()],
             hydrate: true,
+            use_pty: true,
             hydration_delivery: HydrationDelivery::EnvAndStdin,
             hydration_args: Vec::new(),
             extra_env: BTreeMap::new(),
@@ -103,6 +106,7 @@ fn builtin_launchers() -> Vec<ConfiguredLlmLauncher> {
             command: "claude".into(),
             aliases: vec!["claude-code".into()],
             hydrate: true,
+            use_pty: true,
             hydration_delivery: HydrationDelivery::EnvAndStdin,
             hydration_args: Vec::new(),
             extra_env: BTreeMap::new(),
@@ -111,6 +115,7 @@ fn builtin_launchers() -> Vec<ConfiguredLlmLauncher> {
             command: "gemini".into(),
             aliases: vec!["gemini-cli".into()],
             hydrate: true,
+            use_pty: true,
             hydration_delivery: HydrationDelivery::EnvAndStdin,
             hydration_args: Vec::new(),
             extra_env: BTreeMap::new(),
@@ -161,6 +166,7 @@ mod tests {
                 {
                   "command": "futurellm",
                   "hydrate": true,
+                  "use_pty": true,
                   "hydration_delivery": "env_only",
                   "hydration_args": ["--context-file", "{prompt_file}"]
                 }
@@ -177,6 +183,7 @@ mod tests {
                 .hydration_delivery,
             HydrationDelivery::EnvOnly
         );
+        assert!(config.find_llm_launcher("futurellm").unwrap().use_pty);
         assert_eq!(
             config
                 .find_llm_launcher("futurellm")

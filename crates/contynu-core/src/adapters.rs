@@ -29,6 +29,7 @@ pub struct AdapterSpec {
     kind: AdapterKind,
     name: String,
     should_hydrate: bool,
+    use_pty: bool,
     hydration_delivery: HydrationDelivery,
     hydration_args: Vec<OsString>,
     extra_env: BTreeMap<String, String>,
@@ -85,6 +86,10 @@ impl AdapterSpec {
 
     pub fn should_hydrate(&self) -> bool {
         self.should_hydrate
+    }
+
+    pub fn use_pty(&self) -> bool {
+        self.use_pty
     }
 
     pub fn build_launch_plan(
@@ -148,6 +153,7 @@ impl AdapterSpec {
             kind,
             name: name.into(),
             should_hydrate,
+            use_pty: should_hydrate,
             hydration_delivery: HydrationDelivery::EnvAndStdin,
             hydration_args: Vec::new(),
             extra_env: BTreeMap::new(),
@@ -162,6 +168,7 @@ impl AdapterSpec {
             kind,
             name: default_name.to_string(),
             should_hydrate: launcher.hydrate,
+            use_pty: launcher.use_pty,
             hydration_delivery: launcher.hydration_delivery,
             hydration_args: launcher
                 .hydration_args
@@ -232,12 +239,14 @@ mod tests {
                 {
                     "command": "futurellm",
                     "hydrate": true,
+                    "use_pty": false,
                     "hydration_delivery": "env_only"
                 }
             ]
         }))
         .unwrap();
         let adapter = AdapterSpec::detect("futurellm", &config);
+        assert!(!adapter.use_pty());
         let project_id = ProjectId::new();
         let packet = RehydrationPacket {
             schema_version: 1,
@@ -350,6 +359,7 @@ mod tests {
                 {
                     "command": "codex",
                     "hydrate": true,
+                    "use_pty": false,
                     "hydration_delivery": "env_only",
                     "hydration_args": ["--context-file", "{prompt_file}"]
                 }
@@ -386,6 +396,7 @@ mod tests {
 
         assert_eq!(adapter.kind(), AdapterKind::CodexCli);
         assert_eq!(adapter.as_str(), "codex_cli");
+        assert!(!adapter.use_pty());
         assert!(plan.stdin_prelude.is_none());
         let args = plan
             .args

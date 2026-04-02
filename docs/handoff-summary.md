@@ -7,7 +7,8 @@
 - SQLite metadata store with migrations and journal reconciliation
 - content-addressed blob store with deduplication and integrity verification
 - checkpoint manager with manifest and rehydration packet generation
-- generic subprocess runtime wrapper with adapter detection, real-time stdout/stderr capture, and file diff capture
+- config-authoritative launcher layer seeded with known LLM entries
+- runtime wrapper with adapter detection, PTY-or-pipe transport selection, real-time stream capture, file classification, and post-turn memory derivation
 - one primary continuous project memory per state directory by default
 
 ## Commands Available
@@ -29,17 +30,17 @@
 
 ## Known Limitations
 
-- runtime wrapping uses real-time captured pipes rather than a full PTY session
+- PTY transport currently uses the local `script` utility as the Unix implementation path
 - interruption handling is best-effort rather than full signal choreography
-- structured memory derivation is manual/API-driven; automatic memory extraction is not yet implemented
+- structured memory derivation is heuristic and intentionally lightweight rather than model-assisted
 - checkpoint packets are deterministic but still heuristic in how mission and recent context are selected
-- automatic rehydration injection into target LLM CLIs is not implemented yet
+- automatic rehydration injection exists through config-driven env/stdin/arg surfaces, but not yet through richer provider-native session APIs
 - exact search is implemented; semantic retrieval remains intentionally deferred
 
 ## Next Best Steps
 
-1. implement a full PTY-backed runtime path for interactive CLIs
+1. replace the `script`-based PTY path with a first-class PTY implementation and stronger stdin/signal choreography
 2. add native adapter event mapping for Codex, Claude-style, and Gemini-style tools
-3. enrich file tracking with stronger generated-artifact classification and diff storage policy
-4. add automatic memory extraction and supersession logic
+3. deepen file tracking with better mime typing and artifact/source policy controls
+4. evolve memory derivation from heuristics into richer deterministic extraction and supersession policies
 5. add more integration coverage around resume/handoff workflows and repair semantics

@@ -18,6 +18,7 @@ pub struct FileSnapshot {
     pub size_bytes: u64,
     pub is_text: bool,
     pub text: Option<String>,
+    pub role: FileRole,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -28,10 +29,29 @@ pub enum FileChangeKind {
     Deleted,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileRole {
+    Source,
+    Generated,
+    Artifact,
+}
+
+impl FileRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Generated => "generated",
+            Self::Artifact => "artifact",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileChange {
     pub kind: FileChangeKind,
     pub path: String,
+    pub role: FileRole,
     pub before_sha256: Option<String>,
     pub after_sha256: Option<String>,
     pub diff: Option<String>,
@@ -96,12 +116,13 @@ impl FileTracker {
             snapshots.insert(
                 relative.clone(),
                 FileSnapshot {
-                    relative_path: relative,
+                    relative_path: relative.clone(),
                     absolute_path: path.to_path_buf(),
                     sha256: format!("sha256:{}", sha256_hex(&bytes)),
                     size_bytes: bytes.len() as u64,
                     is_text,
                     text,
+                    role: classify_file_role(&path, &relative, is_text),
                 },
             );
         }
@@ -125,6 +146,7 @@ impl FileTracker {
                 (None, Some(snapshot)) => changes.push(FileChange {
                     kind: FileChangeKind::Added,
                     path,
+                    role: snapshot.role,
                     before_sha256: None,
                     after_sha256: Some(snapshot.sha256.clone()),
                     diff: None,
@@ -133,6 +155,7 @@ impl FileTracker {
                 (Some(snapshot), None) => changes.push(FileChange {
                     kind: FileChangeKind::Deleted,
                     path,
+                    role: snapshot.role,
                     before_sha256: Some(snapshot.sha256.clone()),
                     after_sha256: None,
                     diff: None,
@@ -153,6 +176,7 @@ impl FileTracker {
                     changes.push(FileChange {
                         kind: FileChangeKind::Modified,
                         path,
+                        role: after.role,
                         before_sha256: Some(before.sha256.clone()),
                         after_sha256: Some(after.sha256.clone()),
                         diff,
@@ -173,4 +197,34 @@ fn default_ignore_patterns() -> Vec<String> {
         "target/**".into(),
         "node_modules/**".into(),
     ]
+}
+
+fn classify_file_role(path: &std::path::Path, relative_path: &str, is_text: bool) -> FileRole {
+    let lower = relative_path.to_ascii_lowercase();
+    if lower.starts_with("dist/")
+        || lower.starts_with("build/")
+        || lower.starts_with("coverage/")
+        || lower.starts_with("out/")
+        || lower.starts_with(".next/")
+    {
+        return FileRole::Generated;
+    }
+
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+    match extension.as_deref() {
+        Some(
+            "rs" | "toml" | "md" | "txt" | "json" | "yaml" | "yml" | "ts" | "tsx" | "js" | "jsx"
+            | "py" | "go" | "java" | "c" | "cc" | "cpp" | "h" | "hpp" | "sh" | "sql" | "html"
+            | "css" | "scss" | "proto",
+        ) => FileRole::Source,
+        Some(
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "pdf" | "zip" | "tar" | "gz" | "wasm" | "ico"
+            | "mp4" | "mp3" | "mov" | "bin",
+        ) => FileRole::Artifact,
+        _ if is_text => FileRole::Generated,
+        _ => FileRole::Artifact,
+    }
 }

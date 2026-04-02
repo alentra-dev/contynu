@@ -484,6 +484,48 @@ impl MetadataStore {
         Ok(())
     }
 
+    pub fn supersede_memory_kind(
+        &self,
+        session_id: &SessionId,
+        kind: MemoryObjectKind,
+        superseded_by: &MemoryId,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            UPDATE memory_objects
+            SET status = 'superseded', superseded_by = ?3
+            WHERE session_id = ?1 AND kind = ?2 AND status != 'superseded'
+            "#,
+            params![session_id.as_str(), kind.as_str(), superseded_by.as_str()],
+        )?;
+        Ok(())
+    }
+
+    pub fn find_active_memory_by_text(
+        &self,
+        session_id: &SessionId,
+        kind: MemoryObjectKind,
+        text: &str,
+    ) -> Result<Option<MemoryObject>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT memory_id, session_id, kind, status, text, confidence, source_event_ids_json,
+                   created_at, superseded_by
+            FROM memory_objects
+            WHERE session_id = ?1 AND kind = ?2 AND text = ?3 AND status != 'superseded'
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+        )?;
+        let memory = stmt
+            .query_row(
+                params![session_id.as_str(), kind.as_str(), text],
+                map_memory,
+            )
+            .optional()?;
+        Ok(memory)
+    }
+
     pub fn list_events_for_session(&self, session_id: &SessionId) -> Result<Vec<EventRecord>> {
         let mut stmt = self.conn.prepare(
             r#"

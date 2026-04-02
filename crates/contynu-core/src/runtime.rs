@@ -19,11 +19,14 @@ use crate::checkpoint::CheckpointManager;
 use crate::config::ContynuConfig;
 use crate::error::{ContynuError, Result};
 use crate::event::{Actor, EventDraft, EventType};
-use crate::files::{FileChangeKind, FileTracker};
-use crate::ids::{ArtifactId, FileId, ProjectId, SessionId, TurnId};
+use crate::files::{FileChange, FileChangeKind, FileRole, FileTracker};
+use crate::ids::{ArtifactId, FileId, MemoryId, ProjectId, SessionId, TurnId};
 use crate::journal::Journal;
 use crate::state::StatePaths;
-use crate::store::{ArtifactRecord, FileRecord, MetadataStore, SessionRecord, TurnRecord};
+use crate::store::{
+    ArtifactRecord, FileRecord, MemoryObject, MemoryObjectKind, MetadataStore, SessionRecord,
+    TurnRecord,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunConfig {
@@ -51,6 +54,39 @@ const STREAM_CHUNK_SIZE: usize = 4096;
 enum StreamKind {
     Stdout,
     Stderr,
+    Pty,
+}
+
+impl StreamKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+            Self::Pty => "pty",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ExecutionTransport {
+    Pipes,
+    Pty,
+}
+
+impl ExecutionTransport {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pipes => "pipes",
+            Self::Pty => "pty",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ProcessCapture {
+    status: std::process::ExitStatus,
+    stdout_bytes: Vec<u8>,
+    stderr_bytes: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -88,6 +124,7 @@ impl RuntimeEngine {
         let turn_id = TurnId::new();
         let journal = Journal::open(state.journal_path_for_session(&session_id))?;
         let adapter = AdapterSpec::detect(&config.command[0].to_string_lossy(), &config_file);
+        let transport = resolve_transport(&adapter);
         let tracker = FileTracker::new(&config.cwd, &config.ignore_patterns)?;
         let before = tracker.snapshot()?;
 
@@ -130,6 +167,7 @@ impl RuntimeEngine {
                     "adapter_kind": adapter.as_str(),
                     "adapter_type": format!("{:?}", adapter.kind()).to_lowercase(),
                     "program": config.command[0].to_string_lossy(),
+                    "transport": transport.as_str(),
                 }),
             ),
         )?;
@@ -163,6 +201,7 @@ impl RuntimeEngine {
                     "cwd": config.cwd.display().to_string(),
                     "adapter_kind": adapter.as_str(),
                     "continued": continuing_session,
+                    "transport": transport.as_str(),
                 }),
             ),
         )?;
@@ -188,6 +227,7 @@ impl RuntimeEngine {
                 json!({
                     "command": config.command.iter().map(|item| item.to_string_lossy().to_string()).collect::<Vec<_>>(),
                     "cwd": config.cwd.display().to_string(),
+                    "transport": transport.as_str(),
                 }),
             ),
         )?;
@@ -198,66 +238,17 @@ impl RuntimeEngine {
             hydration.as_ref(),
         )?;
 
-        let mut command = Command::new(&launch_plan.executable);
-        command.args(&launch_plan.args);
-        command.current_dir(&config.cwd);
-        if launch_plan.stdin_prelude.is_some() {
-            command.stdin(Stdio::piped());
-        } else {
-            command.stdin(Stdio::null());
-        }
-        command.stdout(Stdio::piped());
-        command.stderr(Stdio::piped());
-        command.envs(launch_plan.env.iter().map(|(key, value)| (key, value)));
-
-        let mut child = command
-            .spawn()
-            .map_err(|error| ContynuError::CommandStart(error.to_string()))?;
-
-        if let Some(stdin_prelude) = launch_plan.stdin_prelude {
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(&stdin_prelude)?;
-                stdin.flush()?;
-            }
-        }
-
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| ContynuError::InvalidState("missing stdout pipe".into()))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| ContynuError::InvalidState("missing stderr pipe".into()))?;
-
-        let child = Arc::new(Mutex::new(child));
         let interrupted = Arc::new(AtomicBool::new(false));
-        let child_for_signal = Arc::clone(&child);
-        let interrupted_for_signal = Arc::clone(&interrupted);
-        ctrlc::set_handler(move || {
-            interrupted_for_signal.store(true, Ordering::SeqCst);
-            if let Ok(mut child) = child_for_signal.lock() {
-                let _ = child.kill();
-            }
-        })
-        .ok();
-
-        let (sender, receiver) = mpsc::channel();
-        let stdout_handle = spawn_reader(stdout, StreamKind::Stdout, sender.clone());
-        let stderr_handle = spawn_reader(stderr, StreamKind::Stderr, sender);
-
-        let (stdout_bytes, stderr_bytes) =
-            Self::capture_streams(receiver, &journal, &store, &session_id, &turn_id)?;
-        stdout_handle
-            .join()
-            .map_err(|_| ContynuError::InvalidState("stdout reader thread panicked".into()))??;
-        stderr_handle
-            .join()
-            .map_err(|_| ContynuError::InvalidState("stderr reader thread panicked".into()))??;
-        let status = child
-            .lock()
-            .map_err(|_| ContynuError::Validation("child process mutex poisoned".into()))?
-            .wait()?;
+        let capture = Self::execute_launch_plan(
+            &config.cwd,
+            &launch_plan,
+            transport,
+            &journal,
+            &store,
+            &session_id,
+            &turn_id,
+            Arc::clone(&interrupted),
+        )?;
 
         Self::register_stream_artifacts(
             &journal,
@@ -265,8 +256,9 @@ impl RuntimeEngine {
             &blob_store,
             &session_id,
             &turn_id,
-            &stdout_bytes,
-            &stderr_bytes,
+            transport,
+            &capture.stdout_bytes,
+            &capture.stderr_bytes,
         )?;
 
         Self::persist(
@@ -278,21 +270,24 @@ impl RuntimeEngine {
                 Actor::Runtime,
                 EventType::ProcessExited,
                 json!({
-                    "exit_code": status.code(),
-                    "success": status.success(),
+                    "exit_code": capture.status.code(),
+                    "success": capture.status.success(),
                     "interrupted": interrupted.load(Ordering::SeqCst),
+                    "transport": transport.as_str(),
                 }),
             ),
         )?;
 
         let after = tracker.snapshot()?;
-        for change in tracker.diff(&before, &after) {
+        let changes = tracker.diff(&before, &after);
+        for change in &changes {
             let snapshot_event_type = match change.kind {
                 FileChangeKind::Added | FileChangeKind::Modified => EventType::FileSnapshot,
                 FileChangeKind::Deleted => EventType::FileDeleted,
             };
             let payload = json!({
                 "path": change.path,
+                "role": change.role.as_str(),
                 "kind": match change.kind {
                     FileChangeKind::Added => "added",
                     FileChangeKind::Modified => "modified",
@@ -311,7 +306,28 @@ impl RuntimeEngine {
             ))?;
             store.record_event(&event, &journal.path().display().to_string(), append)?;
 
-            if let Some(snapshot) = change.snapshot {
+            let mut diff_event_id = None;
+            if let Some(diff) = &change.diff {
+                let (diff_event, diff_append) = journal.append(EventDraft::new(
+                    session_id.clone(),
+                    Some(turn_id.clone()),
+                    Actor::Filesystem,
+                    EventType::FileDiff,
+                    json!({
+                        "path": change.path,
+                        "role": change.role.as_str(),
+                        "diff": diff,
+                    }),
+                ))?;
+                store.record_event(
+                    &diff_event,
+                    &journal.path().display().to_string(),
+                    diff_append,
+                )?;
+                diff_event_id = Some(diff_event.event_id.clone());
+            }
+
+            if let Some(snapshot) = &change.snapshot {
                 let bytes = std::fs::read(&snapshot.absolute_path)?;
                 let blob = blob_store.put_bytes(&bytes)?;
                 store.register_blob(&blob, None)?;
@@ -319,27 +335,33 @@ impl RuntimeEngine {
                     file_id: FileId::new(),
                     session_id: session_id.clone(),
                     workspace_relative_path: snapshot.relative_path.clone(),
-                    kind: if snapshot.is_text {
-                        "text".into()
-                    } else {
-                        "binary".into()
-                    },
+                    kind: format!(
+                        "{}_{}",
+                        snapshot.role.as_str(),
+                        if snapshot.is_text { "text" } else { "binary" }
+                    ),
                     last_known_sha256: Some(snapshot.sha256.clone()),
                     last_snapshot_event_id: Some(event.event_id.clone()),
-                    last_diff_event_id: None,
+                    last_diff_event_id: diff_event_id,
                     observed_at: Utc::now(),
-                    is_generated: !snapshot.relative_path.ends_with(".rs")
-                        && !snapshot.relative_path.ends_with(".md")
-                        && !snapshot.relative_path.ends_with(".toml"),
+                    is_generated: snapshot.role != FileRole::Source,
                 })?;
 
-                if !snapshot.is_text || snapshot.size_bytes > 128 * 1024 {
+                if snapshot.role != FileRole::Source
+                    || !snapshot.is_text
+                    || snapshot.size_bytes > 128 * 1024
+                {
                     store.register_artifact(&ArtifactRecord {
                         artifact_id: ArtifactId::new(),
                         session_id: session_id.clone(),
                         source_event_id: event.event_id.clone(),
-                        path: Some(snapshot.relative_path),
-                        kind: "file_output".into(),
+                        path: Some(snapshot.relative_path.clone()),
+                        kind: match snapshot.role {
+                            FileRole::Source => "source_snapshot",
+                            FileRole::Generated => "generated_file_output",
+                            FileRole::Artifact => "artifact_output",
+                        }
+                        .into(),
                         mime_type: None,
                         sha256: blob.sha256.clone(),
                         blob_relative_path: blob.relative_path,
@@ -349,6 +371,26 @@ impl RuntimeEngine {
                 }
             }
         }
+        Self::persist_workspace_scan_summary(
+            &journal,
+            &store,
+            &session_id,
+            &turn_id,
+            &changes,
+            transport,
+        )?;
+        Self::derive_memory_objects(
+            &journal,
+            &store,
+            &session_id,
+            &turn_id,
+            &config.command,
+            adapter.as_str(),
+            transport,
+            capture.status.code(),
+            interrupted.load(Ordering::SeqCst),
+            &changes,
+        )?;
 
         Self::persist(
             &journal,
@@ -358,7 +400,7 @@ impl RuntimeEngine {
                 Some(turn_id.clone()),
                 Actor::Runtime,
                 EventType::TurnCompleted,
-                json!({"exit_code": status.code(), "interrupted": interrupted.load(Ordering::SeqCst)}),
+                json!({"exit_code": capture.status.code(), "interrupted": interrupted.load(Ordering::SeqCst), "transport": transport.as_str()}),
             ),
         )?;
         Self::persist(
@@ -373,7 +415,7 @@ impl RuntimeEngine {
                 } else {
                     EventType::SessionEnded
                 },
-                json!({"exit_code": status.code()}),
+                json!({"exit_code": capture.status.code(), "transport": transport.as_str()}),
             ),
         )?;
         store.update_turn_status(&turn_id, "completed", Some(Utc::now()))?;
@@ -395,7 +437,7 @@ impl RuntimeEngine {
         Ok(RunOutcome {
             project_id: session_id,
             turn_id,
-            exit_code: status.code(),
+            exit_code: capture.status.code(),
             interrupted: interrupted.load(Ordering::SeqCst),
         })
     }
@@ -404,6 +446,180 @@ impl RuntimeEngine {
         let (event, append) = journal.append(draft)?;
         store.record_event(&event, &journal.path().display().to_string(), append)?;
         Ok(())
+    }
+
+    fn execute_launch_plan(
+        cwd: &std::path::Path,
+        launch_plan: &crate::adapters::LaunchPlan,
+        transport: ExecutionTransport,
+        journal: &Journal,
+        store: &MetadataStore,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+        interrupted: Arc<AtomicBool>,
+    ) -> Result<ProcessCapture> {
+        match transport {
+            ExecutionTransport::Pipes => Self::execute_with_pipes(
+                cwd,
+                launch_plan,
+                journal,
+                store,
+                session_id,
+                turn_id,
+                interrupted,
+            ),
+            ExecutionTransport::Pty => Self::execute_with_pty(
+                cwd,
+                launch_plan,
+                journal,
+                store,
+                session_id,
+                turn_id,
+                interrupted,
+            ),
+        }
+    }
+
+    fn execute_with_pipes(
+        cwd: &std::path::Path,
+        launch_plan: &crate::adapters::LaunchPlan,
+        journal: &Journal,
+        store: &MetadataStore,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+        interrupted: Arc<AtomicBool>,
+    ) -> Result<ProcessCapture> {
+        let mut command = Command::new(&launch_plan.executable);
+        command.args(&launch_plan.args);
+        command.current_dir(cwd);
+        if launch_plan.stdin_prelude.is_some() {
+            command.stdin(Stdio::piped());
+        } else {
+            command.stdin(Stdio::null());
+        }
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        command.envs(launch_plan.env.iter().map(|(key, value)| (key, value)));
+
+        let mut child = command
+            .spawn()
+            .map_err(|error| ContynuError::CommandStart(error.to_string()))?;
+
+        if let Some(stdin_prelude) = &launch_plan.stdin_prelude {
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(stdin_prelude)?;
+                stdin.flush()?;
+            }
+        }
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ContynuError::InvalidState("missing stdout pipe".into()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| ContynuError::InvalidState("missing stderr pipe".into()))?;
+
+        let child = Arc::new(Mutex::new(child));
+        install_ctrlc_handler(Arc::clone(&child), interrupted);
+
+        let (sender, receiver) = mpsc::channel();
+        let stdout_handle = spawn_reader(stdout, StreamKind::Stdout, sender.clone());
+        let stderr_handle = spawn_reader(stderr, StreamKind::Stderr, sender);
+
+        let (stdout_bytes, stderr_bytes) =
+            Self::capture_streams(receiver, journal, store, session_id, turn_id)?;
+        stdout_handle
+            .join()
+            .map_err(|_| ContynuError::InvalidState("stdout reader thread panicked".into()))??;
+        stderr_handle
+            .join()
+            .map_err(|_| ContynuError::InvalidState("stderr reader thread panicked".into()))??;
+        let status = child
+            .lock()
+            .map_err(|_| ContynuError::Validation("child process mutex poisoned".into()))?
+            .wait()?;
+
+        Ok(ProcessCapture {
+            status,
+            stdout_bytes,
+            stderr_bytes,
+        })
+    }
+
+    fn execute_with_pty(
+        cwd: &std::path::Path,
+        launch_plan: &crate::adapters::LaunchPlan,
+        journal: &Journal,
+        store: &MetadataStore,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+        interrupted: Arc<AtomicBool>,
+    ) -> Result<ProcessCapture> {
+        let mut script_command = Command::new("script");
+        let command_text = std::iter::once(&launch_plan.executable)
+            .chain(launch_plan.args.iter())
+            .map(shell_escape)
+            .collect::<Vec<_>>()
+            .join(" ");
+        script_command.args(["-qefc", &command_text, "/dev/null"]);
+        script_command.current_dir(cwd);
+        script_command.stdin(Stdio::piped());
+        script_command.stdout(Stdio::piped());
+        script_command.stderr(Stdio::piped());
+        script_command.envs(launch_plan.env.iter().map(|(key, value)| (key, value)));
+
+        let mut child = script_command
+            .spawn()
+            .map_err(|error| ContynuError::CommandStart(error.to_string()))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Some(stdin_prelude) = &launch_plan.stdin_prelude {
+                stdin.write_all(stdin_prelude)?;
+                stdin.flush()?;
+            }
+            thread::spawn(move || {
+                let mut input = std::io::stdin();
+                let _ = std::io::copy(&mut input, &mut stdin);
+                let _ = stdin.flush();
+            });
+        }
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ContynuError::InvalidState("missing pty stdout pipe".into()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| ContynuError::InvalidState("missing pty stderr pipe".into()))?;
+
+        let child = Arc::new(Mutex::new(child));
+        install_ctrlc_handler(Arc::clone(&child), interrupted);
+
+        let (sender, receiver) = mpsc::channel();
+        let stdout_handle = spawn_reader(stdout, StreamKind::Pty, sender.clone());
+        let stderr_handle = spawn_reader(stderr, StreamKind::Stderr, sender);
+
+        let (stdout_bytes, stderr_bytes) =
+            Self::capture_streams(receiver, journal, store, session_id, turn_id)?;
+        stdout_handle
+            .join()
+            .map_err(|_| ContynuError::InvalidState("pty reader thread panicked".into()))??;
+        stderr_handle.join().map_err(|_| {
+            ContynuError::InvalidState("pty stderr reader thread panicked".into())
+        })??;
+        let status = child
+            .lock()
+            .map_err(|_| ContynuError::Validation("child process mutex poisoned".into()))?
+            .wait()?;
+
+        Ok(ProcessCapture {
+            status,
+            stdout_bytes,
+            stderr_bytes,
+        })
     }
 
     fn capture_streams(
@@ -428,11 +644,14 @@ impl RuntimeEngine {
                     let event_type = match kind {
                         StreamKind::Stdout => EventType::StdoutCaptured,
                         StreamKind::Stderr => EventType::StderrCaptured,
+                        StreamKind::Pty => EventType::StdoutCaptured,
                     };
                     if kind == StreamKind::Stdout {
                         stdout_bytes.extend_from_slice(&bytes);
-                    } else {
+                    } else if kind == StreamKind::Stderr {
                         stderr_bytes.extend_from_slice(&bytes);
+                    } else {
+                        stdout_bytes.extend_from_slice(&bytes);
                     }
                     Self::persist(
                         journal,
@@ -444,17 +663,14 @@ impl RuntimeEngine {
                             event_type,
                             json!({
                                 "text": text,
-                                "stream": match kind {
-                                    StreamKind::Stdout => "stdout",
-                                    StreamKind::Stderr => "stderr",
-                                },
+                                "stream": kind.as_str(),
                                 "bytes": bytes.len(),
                             }),
                         ),
                     )?;
                 }
                 StreamMessage::Closed { kind } => match kind {
-                    StreamKind::Stdout => stdout_closed = true,
+                    StreamKind::Stdout | StreamKind::Pty => stdout_closed = true,
                     StreamKind::Stderr => stderr_closed = true,
                 },
             }
@@ -469,13 +685,19 @@ impl RuntimeEngine {
         blob_store: &BlobStore,
         session_id: &SessionId,
         turn_id: &TurnId,
+        transport: ExecutionTransport,
         stdout_bytes: &[u8],
         stderr_bytes: &[u8],
     ) -> Result<()> {
-        for (kind, bytes, mime_type) in [
-            ("stdout_capture", stdout_bytes, "text/plain"),
-            ("stderr_capture", stderr_bytes, "text/plain"),
-        ] {
+        let captures = if matches!(transport, ExecutionTransport::Pty) {
+            vec![("pty_capture", stdout_bytes, "text/plain")]
+        } else {
+            vec![
+                ("stdout_capture", stdout_bytes, "text/plain"),
+                ("stderr_capture", stderr_bytes, "text/plain"),
+            ]
+        };
+        for (kind, bytes, mime_type) in captures {
             if bytes.is_empty() {
                 continue;
             }
@@ -509,6 +731,192 @@ impl RuntimeEngine {
         }
 
         Ok(())
+    }
+
+    fn persist_workspace_scan_summary(
+        journal: &Journal,
+        store: &MetadataStore,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+        changes: &[FileChange],
+        transport: ExecutionTransport,
+    ) -> Result<()> {
+        let source = changes
+            .iter()
+            .filter(|change| change.role == FileRole::Source)
+            .count();
+        let generated = changes
+            .iter()
+            .filter(|change| change.role == FileRole::Generated)
+            .count();
+        let artifacts = changes
+            .iter()
+            .filter(|change| change.role == FileRole::Artifact)
+            .count();
+        Self::persist(
+            journal,
+            store,
+            EventDraft::new(
+                session_id.clone(),
+                Some(turn_id.clone()),
+                Actor::Filesystem,
+                EventType::WorkspaceScanCompleted,
+                json!({
+                    "transport": transport.as_str(),
+                    "changed_files": changes.len(),
+                    "source_changes": source,
+                    "generated_changes": generated,
+                    "artifact_changes": artifacts,
+                }),
+            ),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn derive_memory_objects(
+        journal: &Journal,
+        store: &MetadataStore,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+        command: &[OsString],
+        adapter_name: &str,
+        transport: ExecutionTransport,
+        exit_code: Option<i32>,
+        interrupted: bool,
+        changes: &[FileChange],
+    ) -> Result<()> {
+        let command_text = command
+            .iter()
+            .map(|item| item.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let summary = format!(
+            "Last turn used `{}` via `{}` over `{}` and exited with {:?}. Changed {} files.",
+            command_text,
+            adapter_name,
+            transport.as_str(),
+            exit_code,
+            changes.len()
+        );
+        Self::insert_memory_object(
+            journal,
+            store,
+            session_id,
+            turn_id,
+            MemoryObjectKind::Summary,
+            summary,
+            Some(0.9),
+            true,
+        )?;
+        Self::insert_memory_object(
+            journal,
+            store,
+            session_id,
+            turn_id,
+            MemoryObjectKind::Fact,
+            format!(
+                "Command `{}` exited with {:?} using {} transport.",
+                command_text,
+                exit_code,
+                transport.as_str()
+            ),
+            Some(0.8),
+            false,
+        )?;
+        if interrupted {
+            Self::insert_memory_object(
+                journal,
+                store,
+                session_id,
+                turn_id,
+                MemoryObjectKind::Todo,
+                "The previous turn was interrupted and may need manual continuation.".into(),
+                Some(0.8),
+                false,
+            )?;
+        } else if exit_code.unwrap_or_default() != 0 {
+            Self::insert_memory_object(
+                journal,
+                store,
+                session_id,
+                turn_id,
+                MemoryObjectKind::Todo,
+                format!(
+                    "Investigate non-zero exit from `{}`: {:?}.",
+                    command_text, exit_code
+                ),
+                Some(0.85),
+                false,
+            )?;
+        }
+        for change in changes {
+            let note = match change.role {
+                FileRole::Source => format!("Changed source file {}.", change.path),
+                FileRole::Generated => format!("Produced generated file {}.", change.path),
+                FileRole::Artifact => format!("Produced artifact file {}.", change.path),
+            };
+            Self::insert_memory_object(
+                journal,
+                store,
+                session_id,
+                turn_id,
+                MemoryObjectKind::FileNote,
+                note,
+                Some(0.7),
+                false,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn insert_memory_object(
+        journal: &Journal,
+        store: &MetadataStore,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+        kind: MemoryObjectKind,
+        text: String,
+        confidence: Option<f64>,
+        supersede_kind: bool,
+    ) -> Result<()> {
+        if store
+            .find_active_memory_by_text(session_id, kind, &text)?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let memory_id = MemoryId::new();
+        if supersede_kind {
+            store.supersede_memory_kind(session_id, kind, &memory_id)?;
+        }
+        let memory = MemoryObject {
+            memory_id: memory_id.clone(),
+            session_id: session_id.clone(),
+            kind,
+            status: "active".into(),
+            text: text.clone(),
+            confidence,
+            source_event_ids: Vec::new(),
+            created_at: Utc::now(),
+            superseded_by: None,
+        };
+        store.insert_memory_object(&memory)?;
+        Self::persist(
+            journal,
+            store,
+            EventDraft::new(
+                session_id.clone(),
+                Some(turn_id.clone()),
+                Actor::System,
+                EventType::MemoryObjectDerived,
+                json!({
+                    "memory_id": memory_id,
+                    "kind": kind.as_str(),
+                    "text": text,
+                    "confidence": confidence,
+                }),
+            ),
+        )
     }
 
     fn prepare_hydration(
@@ -562,6 +970,38 @@ impl RuntimeEngine {
     }
 }
 
+fn resolve_transport(adapter: &AdapterSpec) -> ExecutionTransport {
+    if adapter.use_pty() && cfg!(unix) && script_available() {
+        ExecutionTransport::Pty
+    } else {
+        ExecutionTransport::Pipes
+    }
+}
+
+fn script_available() -> bool {
+    Command::new("script")
+        .arg("-V")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok()
+}
+
+fn shell_escape(value: &OsString) -> String {
+    let value = value.to_string_lossy();
+    if value.is_empty() {
+        return "''".into();
+    }
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':'))
+    {
+        return value.into_owned();
+    }
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
 fn spawn_reader<R: Read + Send + 'static>(
     mut reader: R,
     kind: StreamKind,
@@ -584,6 +1024,16 @@ fn spawn_reader<R: Read + Send + 'static>(
     })
 }
 
+fn install_ctrlc_handler(child: Arc<Mutex<std::process::Child>>, interrupted: Arc<AtomicBool>) {
+    ctrlc::set_handler(move || {
+        interrupted.store(true, Ordering::SeqCst);
+        if let Ok(mut child) = child.lock() {
+            let _ = child.kill();
+        }
+    })
+    .ok();
+}
+
 #[cfg(test)]
 mod tests {
     use std::thread;
@@ -592,7 +1042,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{RunConfig, RuntimeEngine};
-    use crate::{Journal, MetadataStore, StatePaths};
+    use crate::{Journal, MemoryObjectKind, MetadataStore, StatePaths};
 
     #[test]
     fn runtime_run_captures_process_and_files() {
@@ -628,7 +1078,20 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| event.event_type == "stderr_captured"));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == "workspace_scan_completed"));
         assert!(workspace.join("output.txt").exists());
+
+        let memory = store
+            .list_memory_objects(&outcome.project_id, None)
+            .unwrap();
+        assert!(memory
+            .iter()
+            .any(|item| item.kind == MemoryObjectKind::Summary));
+        assert!(memory
+            .iter()
+            .any(|item| item.kind == MemoryObjectKind::FileNote));
     }
 
     #[test]
@@ -711,5 +1174,77 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| event.event_type == "session_resumed"));
+    }
+
+    #[test]
+    fn runtime_can_use_pty_transport_for_configured_launcher() {
+        if !super::script_available() {
+            return;
+        }
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state = dir.path().join(".contynu");
+        std::fs::create_dir_all(&state).unwrap();
+
+        let launcher = dir.path().join("mock-pty-llm");
+        let tty_path = workspace.join("tty.txt");
+        std::fs::write(
+            state.join("config.json"),
+            format!(
+                r#"{{
+                  "llm_launchers": [
+                    {{
+                      "command": "{}",
+                      "hydrate": true,
+                      "use_pty": true,
+                      "hydration_delivery": "env_only"
+                    }}
+                  ]
+                }}"#,
+                launcher.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &launcher,
+            format!(
+                "#!/bin/sh\ntty > \"{}\"\nprintf pty-ok\n",
+                tty_path.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&launcher).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&launcher, perms).unwrap();
+        }
+
+        let outcome = RuntimeEngine::run(RunConfig {
+            state_dir: state.clone(),
+            cwd: workspace.clone(),
+            command: vec![launcher.into_os_string()],
+            ignore_patterns: Vec::new(),
+            checkpoint_on_exit: false,
+            project_id: None,
+        })
+        .unwrap();
+
+        assert_eq!(outcome.exit_code, Some(0));
+        let tty_output = std::fs::read_to_string(tty_path).unwrap();
+        assert!(tty_output.contains("/dev/"));
+
+        let store = MetadataStore::open(StatePaths::new(state).sqlite_db()).unwrap();
+        let events = store.list_events_for_session(&outcome.project_id).unwrap();
+        assert!(events.iter().any(|event| {
+            event.event_type == "stdout_captured"
+                && event
+                    .payload_json
+                    .to_string()
+                    .contains("\"stream\":\"pty\"")
+        }));
     }
 }
