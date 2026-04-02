@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    mpsc::{self, Receiver, Sender},
+    mpsc::{self, Receiver, RecvTimeoutError, Sender},
     Arc, Mutex,
 };
 use std::thread;
@@ -696,15 +696,23 @@ impl RuntimeEngine {
         )?;
         let mut stdin = child.try_clone_writer()?;
         let stdin_capture = Arc::new(Mutex::new(Vec::<u8>::new()));
-        if let Some(stdin_prelude) = &launch_plan.stdin_prelude {
-            stdin.write_all(stdin_prelude)?;
-            stdin.flush()?;
-            if let Ok(mut captured) = stdin_capture.lock() {
-                captured.extend_from_slice(stdin_prelude);
-            }
-        }
+        let (prelude_sender, prelude_receiver) = mpsc::channel::<()>();
+        let stdin_prelude = launch_plan.stdin_prelude.clone();
         let stdin_capture_thread = Arc::clone(&stdin_capture);
         let stdin_handle = thread::spawn(move || {
+            if let Some(stdin_prelude) = stdin_prelude.as_ref() {
+                match prelude_receiver.recv_timeout(std::time::Duration::from_secs(8)) {
+                    Ok(()) | Err(RecvTimeoutError::Timeout) => {
+                        if stdin.write_all(stdin_prelude).is_ok() {
+                            let _ = stdin.flush();
+                            if let Ok(mut captured) = stdin_capture_thread.lock() {
+                                captured.extend_from_slice(stdin_prelude);
+                            }
+                        }
+                    }
+                    Err(RecvTimeoutError::Disconnected) => {}
+                }
+            }
             let mut input = std::io::stdin();
             let mut buffer = vec![0_u8; STREAM_CHUNK_SIZE];
             loop {
@@ -728,7 +736,11 @@ impl RuntimeEngine {
         let stdout_capture = Arc::new(Mutex::new(Vec::<u8>::new()));
         install_pty_ctrlc_handler(&child, interrupted);
         let stdout_capture_thread = Arc::clone(&stdout_capture);
+        let readiness_window = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let readiness_window_thread = Arc::clone(&readiness_window);
+        let needs_prelude = launch_plan.stdin_prelude.is_some();
         let stdout_handle = thread::spawn(move || -> Result<()> {
+            let mut prelude_sent = !needs_prelude;
             loop {
                 let mut buffer = vec![0_u8; STREAM_CHUNK_SIZE];
                 let read = match stdout.read(&mut buffer) {
@@ -742,6 +754,19 @@ impl RuntimeEngine {
                 buffer.truncate(read);
                 if let Ok(mut captured) = stdout_capture_thread.lock() {
                     captured.extend_from_slice(&buffer);
+                }
+                if !prelude_sent {
+                    if let Ok(mut window) = readiness_window_thread.lock() {
+                        window.extend_from_slice(&buffer);
+                        if window.len() > 8192 {
+                            let drop_len = window.len() - 8192;
+                            window.drain(..drop_len);
+                        }
+                        if launcher_ready_for_prelude(window.as_slice()) {
+                            let _ = prelude_sender.send(());
+                            prelude_sent = true;
+                        }
+                    }
                 }
                 mirror_chunk_to_terminal(StreamKind::Pty, &buffer)?;
             }
@@ -1395,6 +1420,17 @@ fn normalize_script_prompts(bytes: &[u8]) -> Vec<String> {
     }
 
     dedupe_lines(prompts)
+}
+
+fn launcher_ready_for_prelude(bytes: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(&strip_ansi_escape_bytes(bytes)).into_owned();
+    let compact = text.replace('\r', "\n");
+    compact.contains("\n❯")
+        || compact.contains("\n›")
+        || compact.contains("\n >")
+        || compact.contains("Type your message")
+        || compact.contains("Shift+Tab to accept edits")
+        || compact.contains("what can I do for you?")
 }
 
 fn normalize_script_responses(bytes: &[u8]) -> Vec<String> {
