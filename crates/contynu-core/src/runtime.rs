@@ -1203,10 +1203,7 @@ impl RuntimeEngine {
         let packet_path = runtime_dir.join("rehydration.json");
         let prompt_path = runtime_dir.join("rehydration.txt");
         let packet_json = serde_json::to_string_pretty(&packet)?;
-        let prompt = format!(
-            "Project continuity context for {}.\nUse the JSON packet as authoritative state.\n{}",
-            adapter_name, packet_json
-        );
+        let prompt = crate::checkpoint::render_rehydration_prompt(&packet, adapter_name);
         std::fs::write(&packet_path, &packet_json)?;
         std::fs::write(&prompt_path, &prompt)?;
 

@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::Path;
+use std::{collections::BTreeMap, fmt::Write as _};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -52,6 +53,13 @@ pub struct CheckpointManager<'a> {
     state_paths: &'a StatePaths,
     store: &'a MetadataStore,
     blob_store: &'a BlobStore,
+}
+
+#[derive(Debug, Clone)]
+struct DialogueTurn {
+    seq: u64,
+    prompt: String,
+    response: String,
 }
 
 impl<'a> CheckpointManager<'a> {
@@ -142,50 +150,78 @@ impl<'a> CheckpointManager<'a> {
         let events = self.store.list_events_for_session(session_id)?;
         let memory = self.store.list_memory_objects(session_id, None)?;
         let artifacts = self.store.list_artifacts(Some(session_id))?;
+        let dialogue_turns = extract_dialogue_turns(&events);
+        let latest_dialogue = dialogue_turns.last();
 
-        let mission = events
-            .iter()
-            .find_map(|event| {
-                if event.event_type == "message_input" {
-                    event
-                        .payload_json
-                        .get("content")
-                        .and_then(|value| value.as_array())
-                        .and_then(|items| items.first())
-                        .and_then(|item| item.get("text"))
-                        .and_then(|text| text.as_str())
-                        .map(str::to_owned)
-                } else {
-                    None
-                }
+        let mission = latest_dialogue
+            .map(|dialogue| dialogue.prompt.clone())
+            .or_else(|| {
+                events.iter().find_map(|event| {
+                    if event.event_type == "message_input" {
+                        event
+                            .payload_json
+                            .get("content")
+                            .and_then(|value| value.as_array())
+                            .and_then(|items| items.first())
+                            .and_then(|item| item.get("text"))
+                            .and_then(|text| text.as_str())
+                            .map(str::to_owned)
+                    } else {
+                        None
+                    }
+                })
             })
             .unwrap_or_else(|| "Continue the session faithfully from canonical state.".into());
 
-        let stable_facts = memory_texts(&memory, MemoryObjectKind::Fact);
-        let constraints = memory_texts(&memory, MemoryObjectKind::Constraint);
-        let decisions = memory_texts(&memory, MemoryObjectKind::Decision);
-        let open_loops = memory_texts(&memory, MemoryObjectKind::Todo);
+        let stable_facts = trim_list(memory_texts(&memory, MemoryObjectKind::Fact), 8);
+        let constraints = trim_list(memory_texts(&memory, MemoryObjectKind::Constraint), 8);
+        let decisions = trim_list(memory_texts(&memory, MemoryObjectKind::Decision), 8);
+        let open_loops = trim_list(memory_texts(&memory, MemoryObjectKind::Todo), 8);
         let relevant_files = Vec::new();
-        let recent_verbatim_context = events
-            .iter()
-            .rev()
-            .filter_map(|event| {
-                if event.event_type == "message_input"
-                    || event.event_type == "message_output"
-                    || event.event_type == "stdout_captured"
-                    || event.event_type == "stderr_captured"
-                {
-                    Some(event.payload_json.to_string())
-                } else {
-                    None
-                }
-            })
-            .take(12)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>();
-        let current_state = if let Some(summary) = memory
+        let recent_verbatim_context = if !dialogue_turns.is_empty() {
+            dialogue_turns
+                .iter()
+                .rev()
+                .take(3)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .flat_map(|dialogue| {
+                    [
+                        format!("User: {}", dialogue.prompt),
+                        format!("Assistant: {}", dialogue.response),
+                    ]
+                })
+                .collect::<Vec<_>>()
+        } else {
+            events
+                .iter()
+                .rev()
+                .filter_map(|event| {
+                    if event.event_type == "message_input"
+                        || event.event_type == "message_output"
+                        || event.event_type == "stdout_captured"
+                        || event.event_type == "stderr_captured"
+                    {
+                        extract_event_summary_text(event)
+                            .map(|text| one_line(&text))
+                            .filter(|text| !text.is_empty())
+                    } else {
+                        None
+                    }
+                })
+                .take(8)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+        };
+        let current_state = if let Some(dialogue) = latest_dialogue {
+            format!(
+                "The latest user request was: {}. The latest assistant response was: {}",
+                dialogue.prompt, dialogue.response
+            )
+        } else if let Some(summary) = memory
             .iter()
             .rev()
             .find(|item| item.kind == MemoryObjectKind::Summary)
@@ -212,6 +248,11 @@ impl<'a> CheckpointManager<'a> {
             open_loops,
             relevant_artifacts: artifacts
                 .into_iter()
+                .rev()
+                .take(8)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
                 .map(|artifact| RehydrationArtifact {
                     path: artifact.path.unwrap_or_else(|| "<unknown>".into()),
                     kind: artifact.kind,
@@ -229,6 +270,61 @@ impl<'a> CheckpointManager<'a> {
     }
 }
 
+pub fn render_rehydration_prompt(packet: &RehydrationPacket, adapter_name: &str) -> String {
+    let mut prompt = String::new();
+    let _ = writeln!(prompt, "Contynu continuity context for {}.", adapter_name);
+    prompt
+        .push_str("Use this as authoritative project memory carried forward from prior work.\n\n");
+    prompt.push_str("Project\n\n");
+    let _ = writeln!(prompt, "- ID: {}", packet.project_id);
+    if let Some(target_model) = packet.target_model.as_deref() {
+        let _ = writeln!(prompt, "- Target model: {}", target_model);
+    }
+    let _ = writeln!(prompt, "- Schema version: {}", packet.schema_version);
+    prompt.push('\n');
+
+    prompt.push_str("Mission\n\n");
+    let _ = writeln!(prompt, "- {}", packet.mission);
+    prompt.push('\n');
+
+    prompt.push_str("Current State\n\n");
+    let _ = writeln!(prompt, "- {}", packet.current_state);
+    prompt.push('\n');
+
+    write_bullets(
+        &mut prompt,
+        "Recent Conversation",
+        &packet.recent_verbatim_context,
+    );
+    write_bullets(&mut prompt, "Stable Facts", &packet.stable_facts);
+    write_bullets(&mut prompt, "Constraints", &packet.constraints);
+    write_bullets(&mut prompt, "Decisions", &packet.decisions);
+    write_bullets(&mut prompt, "Open Loops", &packet.open_loops);
+    write_bullets(&mut prompt, "Relevant Files", &packet.relevant_files);
+
+    let artifact_lines = packet
+        .relevant_artifacts
+        .iter()
+        .map(|artifact| {
+            format!(
+                "{} | {} | {}",
+                artifact.kind, artifact.path, artifact.sha256
+            )
+        })
+        .collect::<Vec<_>>();
+    write_bullets(&mut prompt, "Relevant Artifacts", &artifact_lines);
+    write_bullets(
+        &mut prompt,
+        "Retrieval Guidance",
+        &packet.retrieval_guidance,
+    );
+
+    prompt.push_str(
+        "Carry this continuity forward naturally. If the user asks about prior work, answer from this memory instead of claiming there is no earlier context.\n",
+    );
+    prompt
+}
+
 fn memory_texts(memory: &[crate::store::MemoryObject], kind: MemoryObjectKind) -> Vec<String> {
     memory
         .iter()
@@ -239,6 +335,229 @@ fn memory_texts(memory: &[crate::store::MemoryObject], kind: MemoryObjectKind) -
 
 fn path_string(path: &Path) -> String {
     path.display().to_string()
+}
+
+fn write_bullets(buffer: &mut String, title: &str, items: &[String]) {
+    buffer.push_str(title);
+    buffer.push_str("\n\n");
+    if items.is_empty() {
+        buffer.push_str("- None recorded.\n\n");
+        return;
+    }
+    for item in items {
+        let _ = writeln!(buffer, "- {}", one_line(item));
+    }
+    buffer.push('\n');
+}
+
+fn trim_list(items: Vec<String>, limit: usize) -> Vec<String> {
+    if items.len() <= limit {
+        items
+    } else {
+        items
+            .into_iter()
+            .rev()
+            .take(limit)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
+    }
+}
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn extract_dialogue_turns(events: &[crate::store::EventRecord]) -> Vec<DialogueTurn> {
+    let mut by_turn = BTreeMap::<String, (u64, Option<String>, Option<String>)>::new();
+
+    for event in events {
+        let Some(turn_id) = event.turn_id.as_ref() else {
+            continue;
+        };
+        let entry = by_turn
+            .entry(turn_id.to_string())
+            .or_insert((event.seq, None, None));
+        entry.0 = entry.0.min(event.seq);
+
+        match event.event_type.as_str() {
+            "stdin_captured" | "message_input" => {
+                if entry.1.is_none() {
+                    entry.1 = extract_prompt_text(event);
+                }
+            }
+            "stdout_captured" | "message_output" => {
+                if entry.2.is_none() {
+                    entry.2 = extract_response_text(event);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut turns = by_turn
+        .into_values()
+        .filter_map(|(seq, prompt, response)| match (prompt, response) {
+            (Some(prompt), Some(response)) if !prompt.is_empty() && !response.is_empty() => {
+                Some(DialogueTurn {
+                    seq,
+                    prompt,
+                    response,
+                })
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    turns.sort_by_key(|turn| turn.seq);
+    turns
+}
+
+fn extract_prompt_text(event: &crate::store::EventRecord) -> Option<String> {
+    let text = event.payload_json.get("text")?.as_str()?;
+    let cleaned = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| !line.eq_ignore_ascii_case("/quit"))
+        .filter(|line| !line.starts_with("Script "))
+        .map(strip_terminal_prefix)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    cleaned.last().map(|line| one_line(line))
+}
+
+fn extract_response_text(event: &crate::store::EventRecord) -> Option<String> {
+    let text = event.payload_json.get("text")?.as_str()?;
+    let mut lines: Vec<String> = Vec::new();
+    let mut capturing = false;
+
+    for raw_line in text.lines() {
+        let line = one_line(raw_line.trim());
+        if line.is_empty() {
+            if capturing && !lines.is_empty() && !lines.last().unwrap().is_empty() {
+                lines.push(String::new());
+            }
+            continue;
+        }
+
+        if !capturing {
+            if let Some(candidate) = line
+                .strip_prefix("• ")
+                .or_else(|| line.strip_prefix("● "))
+                .or_else(|| line.strip_prefix("✦ "))
+                .map(str::trim)
+            {
+                if looks_like_natural_language(candidate) {
+                    capturing = true;
+                    lines.push(candidate.to_string());
+                }
+            }
+            continue;
+        }
+
+        if is_terminal_ui_line(&line) {
+            if !lines.is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        lines.push(line);
+    }
+
+    let response = lines
+        .into_iter()
+        .fold(
+            Vec::<String>::new(),
+            |mut acc: Vec<String>, line: String| {
+                if line.is_empty() {
+                    if acc.last().map(|value| value.is_empty()).unwrap_or(false) {
+                        return acc;
+                    }
+                    acc.push(String::new());
+                } else {
+                    acc.push(line);
+                }
+                acc
+            },
+        )
+        .join("\n")
+        .trim()
+        .to_string();
+
+    if response.is_empty() {
+        None
+    } else {
+        Some(response)
+    }
+}
+
+fn extract_event_summary_text(event: &crate::store::EventRecord) -> Option<String> {
+    match event.event_type.as_str() {
+        "stdin_captured" | "stdout_captured" | "stderr_captured" => event
+            .payload_json
+            .get("text")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+        "message_input" | "message_output" | "message_chunk" => event
+            .payload_json
+            .get("content")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.get("text").and_then(|value| value.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .filter(|value| !value.is_empty()),
+        _ => None,
+    }
+}
+
+fn strip_terminal_prefix(line: &str) -> &str {
+    line.trim_start_matches(">|VTE(7600)")
+        .trim_start_matches('>')
+}
+
+fn looks_like_natural_language(value: &str) -> bool {
+    value.chars().any(|ch| ch.is_ascii_alphabetic())
+}
+
+fn is_terminal_ui_line(line: &str) -> bool {
+    line.starts_with('?')
+        || line.starts_with("workspace ")
+        || line.starts_with("sandbox")
+        || line.starts_with("model")
+        || line.starts_with("Shift+Tab")
+        || line.starts_with("Press Ctrl+C")
+        || line.starts_with("Enable ")
+        || line.starts_with("Agent powering down")
+        || line.starts_with("Interaction Summary")
+        || line.starts_with("To resume this session:")
+        || line.starts_with("Token usage:")
+        || line.starts_with("Tip:")
+        || line.starts_with("Starting MCP servers")
+        || line.starts_with("Use /skills")
+        || line.starts_with("╭")
+        || line.starts_with("╰")
+        || line.starts_with("│")
+        || line.starts_with("─")
+        || line.starts_with("▀")
+        || line.starts_with("▄")
+        || line.starts_with("⠋")
+        || line.starts_with("⠙")
+        || line.starts_with("⠹")
+        || line.starts_with("⠸")
+        || line.starts_with("⠼")
+        || line.starts_with("⠴")
+        || line.starts_with("⠦")
+        || line.starts_with("⠧")
+        || line.starts_with("⠇")
+        || line.starts_with("⠏")
+        || line.contains("GEMINI.md files")
+        || line.contains("Type your message or @path/to/file")
 }
 
 #[cfg(test)]
