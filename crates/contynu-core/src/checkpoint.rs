@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::Path;
-use std::{collections::BTreeMap, fmt::Write as _};
+use std::{collections::VecDeque, fmt::Write as _};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -57,7 +57,6 @@ pub struct CheckpointManager<'a> {
 
 #[derive(Debug, Clone)]
 struct DialogueTurn {
-    seq: u64,
     prompt: String,
     response: String,
 }
@@ -370,64 +369,66 @@ fn one_line(text: &str) -> String {
 }
 
 fn extract_dialogue_turns(events: &[crate::store::EventRecord]) -> Vec<DialogueTurn> {
-    let mut by_turn = BTreeMap::<String, (u64, Option<String>, Option<String>)>::new();
+    let mut turns = Vec::new();
+    let mut pending_prompts = VecDeque::<String>::new();
 
     for event in events {
-        let Some(turn_id) = event.turn_id.as_ref() else {
-            continue;
-        };
-        let entry = by_turn
-            .entry(turn_id.to_string())
-            .or_insert((event.seq, None, None));
-        entry.0 = entry.0.min(event.seq);
-
         match event.event_type.as_str() {
             "stdin_captured" | "message_input" => {
-                if entry.1.is_none() {
-                    entry.1 = extract_prompt_text(event);
+                if let Some(prompt) = extract_prompt_text(event) {
+                    pending_prompts.push_back(prompt);
                 }
             }
             "stdout_captured" | "message_output" => {
-                if entry.2.is_none() {
-                    entry.2 = extract_response_text(event);
+                if let Some(response) = extract_response_text(event) {
+                    if let Some(prompt) = pending_prompts.pop_front() {
+                        turns.push(DialogueTurn { prompt, response });
+                    }
                 }
             }
             _ => {}
         }
     }
 
-    let mut turns = by_turn
-        .into_values()
-        .filter_map(|(seq, prompt, response)| match (prompt, response) {
-            (Some(prompt), Some(response)) if !prompt.is_empty() && !response.is_empty() => {
-                Some(DialogueTurn {
-                    seq,
-                    prompt,
-                    response,
-                })
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    turns.sort_by_key(|turn| turn.seq);
     turns
 }
 
 fn extract_prompt_text(event: &crate::store::EventRecord) -> Option<String> {
-    let text = event.payload_json.get("text")?.as_str()?;
-    let cleaned = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .filter(|line| !line.eq_ignore_ascii_case("/quit"))
-        .filter(|line| !line.starts_with("Script "))
-        .map(strip_terminal_prefix)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
-    cleaned.last().map(|line| one_line(line))
+    match event.event_type.as_str() {
+        "stdin_captured" => event
+            .payload_json
+            .get("text")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(one_line),
+        _ => {
+            let text = event.payload_json.get("text")?.as_str()?;
+            let cleaned = text
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .filter(|line| !line.eq_ignore_ascii_case("/quit"))
+                .filter(|line| !line.starts_with("Script "))
+                .map(strip_terminal_prefix)
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>();
+            cleaned.last().map(|line| one_line(line))
+        }
+    }
 }
 
 fn extract_response_text(event: &crate::store::EventRecord) -> Option<String> {
+    if event.event_type == "stdout_captured" {
+        return event
+            .payload_json
+            .get("text")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned);
+    }
+
     let text = event.payload_json.get("text")?.as_str()?;
     let mut lines: Vec<String> = Vec::new();
     let mut capturing = false;
@@ -632,5 +633,86 @@ mod tests {
 
         assert_eq!(manifest.project_id, session_id);
         assert!(packet.mission.contains("Fix the journal"));
+    }
+
+    #[test]
+    fn checkpoint_prefers_recent_dialogue_from_captured_transcripts() {
+        let dir = tempdir().unwrap();
+        let state = StatePaths::new(dir.path().join(".contynu"));
+        state.ensure_layout().unwrap();
+
+        let store = MetadataStore::open(state.sqlite_db()).unwrap();
+        let blobs = BlobStore::new(state.blobs_root());
+        let session_id = SessionId::new();
+        let journal = Journal::open(state.journal_path_for_session(&session_id)).unwrap();
+        let turn_id = crate::ids::TurnId::new();
+
+        store
+            .register_session(&SessionRecord {
+                session_id: session_id.clone(),
+                project_id: None,
+                status: "started".into(),
+                cli_name: None,
+                cli_version: None,
+                model_name: None,
+                cwd: None,
+                repo_root: None,
+                host_fingerprint: None,
+                started_at: chrono::Utc::now(),
+                ended_at: None,
+            })
+            .unwrap();
+        store
+            .register_turn(&crate::store::TurnRecord {
+                turn_id: turn_id.clone(),
+                session_id: session_id.clone(),
+                status: "completed".into(),
+                started_at: chrono::Utc::now(),
+                completed_at: Some(chrono::Utc::now()),
+                summary_memory_id: None,
+            })
+            .unwrap();
+
+        for (event_type, text) in [
+            (EventType::StdinCaptured, "why is the sky blue?"),
+            (
+                EventType::StdoutCaptured,
+                "The sky appears blue because Rayleigh scattering favors shorter wavelengths.",
+            ),
+            (EventType::StdinCaptured, "what did you just say about the sky?"),
+            (
+                EventType::StdoutCaptured,
+                "I said the sky looks blue because blue light scatters more strongly in the atmosphere.",
+            ),
+        ] {
+            let (event, append) = journal
+                .append(EventDraft::new(
+                    session_id.clone(),
+                    Some(turn_id.clone()),
+                    Actor::Runtime,
+                    event_type,
+                    json!({"text": text}),
+                ))
+                .unwrap();
+            store
+                .record_event(&event, &journal.path().display().to_string(), append)
+                .unwrap();
+        }
+
+        let manager = CheckpointManager::new(&state, &store, &blobs);
+        let packet = manager.build_packet(&session_id, None).unwrap();
+
+        assert_eq!(packet.mission, "what did you just say about the sky?");
+        assert!(packet
+            .recent_verbatim_context
+            .iter()
+            .any(|line| line.contains("User: why is the sky blue?")));
+        assert!(packet
+            .recent_verbatim_context
+            .iter()
+            .any(|line| line.contains("Assistant: The sky appears blue because Rayleigh scattering favors shorter wavelengths.")));
+        assert!(packet
+            .current_state
+            .contains("what did you just say about the sky?"));
     }
 }

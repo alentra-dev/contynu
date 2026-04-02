@@ -169,6 +169,12 @@ struct PendingTranscript {
     stdout: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone)]
+struct DialogueCapture {
+    prompts: Vec<String>,
+    responses: Vec<String>,
+}
+
 enum TranscriptStream {
     Stdin,
     Stdout,
@@ -482,11 +488,21 @@ impl RuntimeEngine {
                 .iter()
                 .any(|event| event.event_type == "stdout_captured");
 
-            if let Some(path) = transcript.stdin.as_ref() {
+            let stdin_bytes = transcript
+                .stdin
+                .as_ref()
+                .map(|path| std::fs::read(path).unwrap_or_default())
+                .unwrap_or_default();
+            let stdout_bytes = transcript
+                .stdout
+                .as_ref()
+                .map(|path| std::fs::read(path).unwrap_or_default())
+                .unwrap_or_default();
+
+            if !has_stdin || !has_stdout {
+                let dialogue = extract_interactive_dialogue(&stdin_bytes, &stdout_bytes);
                 if !has_stdin {
-                    let bytes = std::fs::read(path).unwrap_or_default();
-                    let normalized = normalize_script_input(&bytes);
-                    if !normalized.is_empty() {
+                    for prompt in &dialogue.prompts {
                         Self::persist(
                             journal,
                             store,
@@ -496,23 +512,17 @@ impl RuntimeEngine {
                                 Actor::Runtime,
                                 EventType::StdinCaptured,
                                 json!({
-                                    "text": normalized,
+                                    "text": prompt,
                                     "stream": "stdin",
-                                    "bytes": bytes.len(),
+                                    "bytes": prompt.len(),
                                     "recovered": true,
                                 }),
                             ),
                         )?;
                     }
                 }
-                let _ = std::fs::remove_file(path);
-            }
-
-            if let Some(path) = transcript.stdout.as_ref() {
                 if !has_stdout {
-                    let bytes = std::fs::read(path).unwrap_or_default();
-                    let normalized = normalize_script_output(&bytes);
-                    if !normalized.is_empty() {
+                    for response in &dialogue.responses {
                         Self::persist(
                             journal,
                             store,
@@ -522,15 +532,21 @@ impl RuntimeEngine {
                                 Actor::Runtime,
                                 EventType::StdoutCaptured,
                                 json!({
-                                    "text": normalized,
+                                    "text": response,
                                     "stream": "stdout",
-                                    "bytes": bytes.len(),
+                                    "bytes": response.len(),
                                     "recovered": true,
                                 }),
                             ),
                         )?;
                     }
                 }
+            }
+
+            if let Some(path) = transcript.stdin.as_ref() {
+                let _ = std::fs::remove_file(path);
+            }
+            if let Some(path) = transcript.stdout.as_ref() {
                 let _ = std::fs::remove_file(path);
             }
         }
@@ -833,12 +849,13 @@ impl RuntimeEngine {
 
         let stdin_log_bytes = std::fs::read(&stdin_log).unwrap_or_default();
         let stdout_log_bytes = std::fs::read(&stdout_log).unwrap_or_default();
-        let stdin_text = normalize_script_input(&stdin_log_bytes);
-        let stdout_text = normalize_script_output(&stdout_log_bytes);
+        let dialogue = extract_interactive_dialogue(&stdin_log_bytes, &stdout_log_bytes);
+        let stdin_text = dialogue.prompts.join("\n\n");
+        let stdout_text = dialogue.responses.join("\n\n");
         let stdin_bytes = stdin_text.as_bytes().to_vec();
         let stdout_bytes = stdout_text.as_bytes().to_vec();
 
-        if !stdin_bytes.is_empty() {
+        for prompt in &dialogue.prompts {
             Self::persist(
                 journal,
                 store,
@@ -848,14 +865,14 @@ impl RuntimeEngine {
                     Actor::Runtime,
                     EventType::StdinCaptured,
                     json!({
-                        "text": stdin_text,
+                        "text": prompt,
                         "stream": "stdin",
-                        "bytes": stdin_bytes.len(),
+                        "bytes": prompt.len(),
                     }),
                 ),
             )?;
         }
-        if !stdout_bytes.is_empty() {
+        for response in &dialogue.responses {
             Self::persist(
                 journal,
                 store,
@@ -865,9 +882,9 @@ impl RuntimeEngine {
                     Actor::Runtime,
                     EventType::StdoutCaptured,
                     json!({
-                        "text": stdout_text,
+                        "text": response,
                         "stream": "stdout",
-                        "bytes": stdout_bytes.len(),
+                        "bytes": response.len(),
                     }),
                 ),
             )?;
@@ -1054,13 +1071,21 @@ impl RuntimeEngine {
             .map(|item| item.to_string_lossy().into_owned())
             .collect::<Vec<_>>()
             .join(" ");
-        let summary = format!(
-            "Last turn used `{}` via `{}` over `{}` and exited with {:?}.",
-            command_text,
-            adapter_name,
-            transport.as_str(),
-            exit_code,
-        );
+        let latest_dialogue = latest_dialogue_from_events(&source_events);
+        let summary = if let Some((prompt, response)) = latest_dialogue.as_ref() {
+            format!(
+                "Most recent exchange: user asked \"{}\" and the assistant answered \"{}\".",
+                prompt, response
+            )
+        } else {
+            format!(
+                "Last turn used `{}` via `{}` over `{}` and exited with {:?}.",
+                command_text,
+                adapter_name,
+                transport.as_str(),
+                exit_code,
+            )
+        };
         Self::insert_memory_object(
             journal,
             store,
@@ -1072,22 +1097,24 @@ impl RuntimeEngine {
             true,
             source_event_ids.clone(),
         )?;
-        Self::insert_memory_object(
-            journal,
-            store,
-            session_id,
-            turn_id,
-            MemoryObjectKind::Fact,
-            format!(
-                "Command `{}` exited with {:?} using {} transport.",
-                command_text,
-                exit_code,
-                transport.as_str()
-            ),
-            Some(0.8),
-            false,
-            source_event_ids.clone(),
-        )?;
+        if latest_dialogue.is_none() || interrupted || exit_code.unwrap_or_default() != 0 {
+            Self::insert_memory_object(
+                journal,
+                store,
+                session_id,
+                turn_id,
+                MemoryObjectKind::Fact,
+                format!(
+                    "Command `{}` exited with {:?} using {} transport.",
+                    command_text,
+                    exit_code,
+                    transport.as_str()
+                ),
+                Some(0.8),
+                false,
+                source_event_ids.clone(),
+            )?;
+        }
         if interrupted {
             Self::insert_memory_object(
                 journal,
@@ -1370,7 +1397,14 @@ fn parse_transcript_log_name(
         .map(|turn_id| (turn_id, suffix))
 }
 
-fn normalize_script_input(bytes: &[u8]) -> String {
+fn extract_interactive_dialogue(stdin_bytes: &[u8], stdout_bytes: &[u8]) -> DialogueCapture {
+    DialogueCapture {
+        prompts: normalize_script_prompts(stdin_bytes),
+        responses: normalize_script_responses(stdout_bytes),
+    }
+}
+
+fn normalize_script_prompts(bytes: &[u8]) -> Vec<String> {
     let text = String::from_utf8_lossy(&strip_ansi_escape_bytes(bytes)).into_owned();
     let mut prompts = Vec::new();
 
@@ -1383,15 +1417,15 @@ fn normalize_script_input(bytes: &[u8]) -> String {
         if prompt.is_empty() || is_terminal_ui_line(prompt) || prompt == "/quit" {
             continue;
         }
-        if prompt.chars().any(|ch| ch.is_ascii_alphabetic()) {
+        if looks_like_user_prompt(prompt) {
             prompts.push(one_line(prompt));
         }
     }
 
-    dedupe_lines(prompts).join("\n\n").trim().to_string()
+    dedupe_lines(prompts)
 }
 
-fn normalize_script_output(bytes: &[u8]) -> String {
+fn normalize_script_responses(bytes: &[u8]) -> Vec<String> {
     let text = String::from_utf8_lossy(&strip_ansi_escape_bytes(bytes)).into_owned();
     let mut responses = Vec::<String>::new();
     let mut current = Vec::<String>::new();
@@ -1414,12 +1448,16 @@ fn normalize_script_output(bytes: &[u8]) -> String {
             continue;
         }
 
-        let stripped = strip_leading_answer_marker(&line).unwrap_or(&line);
         if !capturing {
-            if strip_leading_answer_marker(&line).is_some() && looks_like_natural_language(stripped)
-            {
+            if let Some(candidate) = response_start_candidate(&line) {
                 capturing = true;
-                current.push(one_line(stripped));
+                if let Some((kept, boundary_hit)) = truncate_at_ui_boundary(&candidate) {
+                    current.push(kept);
+                    if boundary_hit {
+                        finalize_response(&mut responses, &mut current);
+                        capturing = false;
+                    }
+                }
             }
             continue;
         }
@@ -1429,28 +1467,76 @@ fn normalize_script_output(bytes: &[u8]) -> String {
             || line.starts_with('❯')
             || line.starts_with('›')
         {
-            if !current.is_empty() {
-                let response = current.join("\n").trim().to_string();
-                if !response.is_empty() {
-                    responses.push(response);
-                }
-                current.clear();
-                capturing = false;
-            }
+            finalize_response(&mut responses, &mut current);
+            capturing = false;
             continue;
         }
 
-        current.push(one_line(&line));
-    }
-
-    if !current.is_empty() {
-        let response = current.join("\n").trim().to_string();
-        if !response.is_empty() {
-            responses.push(response);
+        if let Some((kept, boundary_hit)) = truncate_at_ui_boundary(&line) {
+            current.push(one_line(&kept));
+            if boundary_hit {
+                finalize_response(&mut responses, &mut current);
+                capturing = false;
+            }
         }
     }
 
-    dedupe_lines(responses).join("\n\n").trim().to_string()
+    if !current.is_empty() {
+        finalize_response(&mut responses, &mut current);
+    }
+
+    dedupe_lines(responses)
+}
+
+fn finalize_response(responses: &mut Vec<String>, current: &mut Vec<String>) {
+    let response = current.join("\n").trim().to_string();
+    current.clear();
+    if !response.is_empty() {
+        responses.push(response);
+    }
+}
+
+fn response_start_candidate(line: &str) -> Option<String> {
+    if let Some(marked) = strip_leading_answer_marker(line) {
+        return looks_like_response_text(marked).then(|| one_line(marked));
+    }
+
+    if is_terminal_ui_line(line)
+        || line.starts_with('>')
+        || line.starts_with('❯')
+        || line.starts_with('›')
+    {
+        return None;
+    }
+
+    looks_like_response_text(line).then(|| one_line(line))
+}
+
+fn truncate_at_ui_boundary(line: &str) -> Option<(String, bool)> {
+    let boundaries = [
+        " › ",
+        " ❯ ",
+        " > ",
+        " Token usage:",
+        " To continue this session, run ",
+        " Resume this session with:",
+    ];
+
+    let mut end = line.len();
+    let mut boundary_hit = false;
+    for boundary in boundaries {
+        if let Some(index) = line.find(boundary) {
+            end = end.min(index);
+            boundary_hit = true;
+        }
+    }
+
+    let kept = one_line(line[..end].trim());
+    if kept.is_empty() {
+        None
+    } else {
+        Some((kept, boundary_hit))
+    }
 }
 
 fn strip_ansi_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -1534,8 +1620,20 @@ fn strip_leading_answer_marker(line: &str) -> Option<&str> {
         .map(str::trim)
 }
 
-fn looks_like_natural_language(value: &str) -> bool {
-    value.chars().any(|ch| ch.is_ascii_alphabetic())
+fn looks_like_user_prompt(value: &str) -> bool {
+    value.chars().any(|ch| ch.is_ascii_alphanumeric())
+}
+
+fn looks_like_response_text(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || is_terminal_ui_line(trimmed) {
+        return false;
+    }
+
+    trimmed.chars().any(|ch| ch.is_ascii_alphabetic())
+        || trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, '.' | ',' | '?' | '!' | ' '))
 }
 
 fn is_terminal_ui_line(line: &str) -> bool {
@@ -1550,6 +1648,7 @@ fn is_terminal_ui_line(line: &str) -> bool {
         || line.starts_with("Agent powering down")
         || line.starts_with("Interaction Summary")
         || line.starts_with("To resume this session:")
+        || line.starts_with("To continue this session, run")
         || line.starts_with("Token usage:")
         || line.starts_with("Tip:")
         || line.starts_with("Starting MCP servers")
@@ -1577,6 +1676,9 @@ fn is_terminal_ui_line(line: &str) -> bool {
         || line.contains("accept edits")
         || line.contains("no sandbox")
         || line.contains("Auto (Gemini")
+        || line.starts_with('╭')
+        || line.starts_with('╰')
+        || line.starts_with('│')
         || line.contains("Rayleigh scattering") == false
             && line.chars().all(|ch| {
                 matches!(
@@ -1615,6 +1717,38 @@ fn dedupe_lines(lines: Vec<String>) -> Vec<String> {
         }
     }
     deduped
+}
+
+fn latest_dialogue_from_events(events: &[EventRecord]) -> Option<(String, String)> {
+    let mut prompts = Vec::new();
+    let mut responses = Vec::new();
+
+    for event in events {
+        match event.event_type.as_str() {
+            "stdin_captured" | "message_input" => {
+                if let Some(text) = extract_event_text(event) {
+                    let text = one_line(text.trim());
+                    if !text.is_empty() {
+                        prompts.push(text);
+                    }
+                }
+            }
+            "stdout_captured" | "message_output" => {
+                if let Some(text) = extract_event_text(event) {
+                    let text = text.trim().to_string();
+                    if !text.is_empty() {
+                        responses.push(text);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    match (prompts.last(), responses.last()) {
+        (Some(prompt), Some(response)) => Some((prompt.clone(), one_line(response))),
+        _ => None,
+    }
 }
 
 fn derive_structured_candidates(
@@ -1798,7 +1932,9 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{derive_structured_candidates, RunConfig, RuntimeEngine};
+    use super::{
+        derive_structured_candidates, extract_interactive_dialogue, RunConfig, RuntimeEngine,
+    };
     use crate::store::EventRecord;
     use crate::{EventId, Journal, MemoryObjectKind, MetadataStore, ProjectId, StatePaths, TurnId};
 
@@ -1895,6 +2031,43 @@ mod tests {
 
         let outcome = handle.join().unwrap();
         assert_eq!(outcome.exit_code, Some(0));
+    }
+
+    #[test]
+    fn interactive_dialogue_extraction_keeps_only_clean_prompts_and_responses() {
+        let stdin = "Script started on 2026-04-02
+>|VTE(7600)why is the sky blue?
+what was the answer again?
+Script done on 2026-04-02
+";
+        let stdout = "Script started on 2026-04-02
+╭────────────────────────╮
+│ >_ OpenAI Codex       │
+╰────────────────────────╯
+› why is the sky blue?
+• The sky appears blue because shorter blue wavelengths scatter more strongly in the atmosphere.
+Token usage: total=12
+› what was the answer again?
+• Blue light scatters more strongly than red light, so the sky looks blue. › Summarize recent commits
+To continue this session, run codex resume 123
+Script done on 2026-04-02
+";
+
+        let dialogue = extract_interactive_dialogue(stdin.as_bytes(), stdout.as_bytes());
+        assert_eq!(
+            dialogue.prompts,
+            vec![
+                "why is the sky blue?".to_string(),
+                "what was the answer again?".to_string()
+            ]
+        );
+        assert_eq!(
+            dialogue.responses,
+            vec![
+                "The sky appears blue because shorter blue wavelengths scatter more strongly in the atmosphere.".to_string(),
+                "Blue light scatters more strongly than red light, so the sky looks blue.".to_string()
+            ]
+        );
     }
 
     #[test]
