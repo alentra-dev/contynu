@@ -10,6 +10,13 @@ Creates the local state layout and initializes the SQLite metadata store.
 
 Starts a new session, wraps the external command, captures process lifecycle plus stdout/stderr, diffs workspace files before and after execution, records artifacts for large or binary outputs, and creates a checkpoint by default.
 
+Runtime behavior in this pass:
+
+- stdout and stderr are captured incrementally while the wrapped process is still running
+- each captured chunk is durably appended to the journal before the runtime continues
+- accumulated stdout/stderr are registered as blob-backed artifacts after process exit
+- workspace files are diffed before and after the run and recorded as canonical file events
+
 ### `contynu start-session`
 
 Allocates a session record without running a wrapped command.
@@ -60,5 +67,5 @@ Repairs a truncated journal tail if needed, then reconciles journal state back i
 
 ## Notes
 
-- `contynu run` currently uses a generic subprocess wrapper with captured pipes rather than full PTY emulation.
+- `contynu run` uses a generic subprocess wrapper with real-time pipe capture rather than full PTY emulation.
 - The adapter layer is model-agnostic and ready for native adapters, but only generic terminal wrapping is fully implemented in this pass.

@@ -7,7 +7,7 @@
 - SQLite metadata store with migrations and journal reconciliation
 - content-addressed blob store with deduplication and integrity verification
 - checkpoint manager with manifest and rehydration packet generation
-- generic subprocess runtime wrapper with adapter detection and file diff capture
+- generic subprocess runtime wrapper with adapter detection, real-time stdout/stderr capture, and file diff capture
 
 ## Commands Available
 
@@ -28,7 +28,7 @@
 
 ## Known Limitations
 
-- runtime wrapping currently uses captured pipes rather than a full PTY session
+- runtime wrapping uses real-time captured pipes rather than a full PTY session
 - interruption handling is best-effort rather than full signal choreography
 - structured memory derivation is manual/API-driven; automatic memory extraction is not yet implemented
 - checkpoint packets are deterministic but still heuristic in how mission and recent context are selected

@@ -1,10 +1,13 @@
 use std::ffi::OsString;
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
+    mpsc::{self, Receiver, Sender},
     Arc, Mutex,
 };
+use std::thread;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -39,6 +42,20 @@ pub struct RunOutcome {
 }
 
 pub struct RuntimeEngine;
+
+const STREAM_CHUNK_SIZE: usize = 4096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamKind {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Debug)]
+enum StreamMessage {
+    Chunk { kind: StreamKind, bytes: Vec<u8> },
+    Closed { kind: StreamKind },
+}
 
 impl RuntimeEngine {
     pub fn run(config: RunConfig) -> Result<RunOutcome> {
@@ -142,9 +159,18 @@ impl RuntimeEngine {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
 
-        let child = command
+        let mut child = command
             .spawn()
             .map_err(|error| ContynuError::CommandStart(error.to_string()))?;
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ContynuError::InvalidState("missing stdout pipe".into()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| ContynuError::InvalidState("missing stderr pipe".into()))?;
 
         let child = Arc::new(Mutex::new(child));
         let interrupted = Arc::new(AtomicBool::new(false));
@@ -158,58 +184,32 @@ impl RuntimeEngine {
         })
         .ok();
 
-        let (stdout, stderr, status) = {
-            let mut child = child
-                .lock()
-                .map_err(|_| ContynuError::Validation("child process mutex poisoned".into()))?;
-            let stdout = {
-                let mut buffer = Vec::new();
-                if let Some(stdout) = child.stdout.as_mut() {
-                    use std::io::Read;
-                    stdout.read_to_end(&mut buffer)?;
-                }
-                buffer
-            };
-            let stderr = {
-                let mut buffer = Vec::new();
-                if let Some(stderr) = child.stderr.as_mut() {
-                    use std::io::Read;
-                    stderr.read_to_end(&mut buffer)?;
-                }
-                buffer
-            };
-            let status = child.wait()?;
-            (stdout, stderr, status)
-        };
+        let (sender, receiver) = mpsc::channel();
+        let stdout_handle = spawn_reader(stdout, StreamKind::Stdout, sender.clone());
+        let stderr_handle = spawn_reader(stderr, StreamKind::Stderr, sender);
 
-        if !stdout.is_empty() {
-            let stdout_text = String::from_utf8_lossy(&stdout).into_owned();
-            Self::persist(
-                &journal,
-                &store,
-                EventDraft::new(
-                    session_id.clone(),
-                    Some(turn_id.clone()),
-                    Actor::Runtime,
-                    EventType::StdoutCaptured,
-                    json!({"text": stdout_text}),
-                ),
-            )?;
-        }
-        if !stderr.is_empty() {
-            let stderr_text = String::from_utf8_lossy(&stderr).into_owned();
-            Self::persist(
-                &journal,
-                &store,
-                EventDraft::new(
-                    session_id.clone(),
-                    Some(turn_id.clone()),
-                    Actor::Runtime,
-                    EventType::StderrCaptured,
-                    json!({"text": stderr_text}),
-                ),
-            )?;
-        }
+        let (stdout_bytes, stderr_bytes) =
+            Self::capture_streams(receiver, &journal, &store, &session_id, &turn_id)?;
+        stdout_handle
+            .join()
+            .map_err(|_| ContynuError::InvalidState("stdout reader thread panicked".into()))??;
+        stderr_handle
+            .join()
+            .map_err(|_| ContynuError::InvalidState("stderr reader thread panicked".into()))??;
+        let status = child
+            .lock()
+            .map_err(|_| ContynuError::Validation("child process mutex poisoned".into()))?
+            .wait()?;
+
+        Self::register_stream_artifacts(
+            &journal,
+            &store,
+            &blob_store,
+            &session_id,
+            &turn_id,
+            &stdout_bytes,
+            &stderr_bytes,
+        )?;
 
         Self::persist(
             &journal,
@@ -337,14 +337,144 @@ impl RuntimeEngine {
         store.record_event(&event, &journal.path().display().to_string(), append)?;
         Ok(())
     }
+
+    fn capture_streams(
+        receiver: Receiver<StreamMessage>,
+        journal: &Journal,
+        store: &MetadataStore,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
+        let mut stdout_closed = false;
+        let mut stderr_closed = false;
+        let mut stdout_bytes = Vec::new();
+        let mut stderr_bytes = Vec::new();
+
+        while !(stdout_closed && stderr_closed) {
+            match receiver
+                .recv()
+                .map_err(|_| ContynuError::InvalidState("stream capture channel closed".into()))?
+            {
+                StreamMessage::Chunk { kind, bytes } => {
+                    let text = String::from_utf8_lossy(&bytes).into_owned();
+                    let event_type = match kind {
+                        StreamKind::Stdout => EventType::StdoutCaptured,
+                        StreamKind::Stderr => EventType::StderrCaptured,
+                    };
+                    if kind == StreamKind::Stdout {
+                        stdout_bytes.extend_from_slice(&bytes);
+                    } else {
+                        stderr_bytes.extend_from_slice(&bytes);
+                    }
+                    Self::persist(
+                        journal,
+                        store,
+                        EventDraft::new(
+                            session_id.clone(),
+                            Some(turn_id.clone()),
+                            Actor::Runtime,
+                            event_type,
+                            json!({
+                                "text": text,
+                                "stream": match kind {
+                                    StreamKind::Stdout => "stdout",
+                                    StreamKind::Stderr => "stderr",
+                                },
+                                "bytes": bytes.len(),
+                            }),
+                        ),
+                    )?;
+                }
+                StreamMessage::Closed { kind } => match kind {
+                    StreamKind::Stdout => stdout_closed = true,
+                    StreamKind::Stderr => stderr_closed = true,
+                },
+            }
+        }
+
+        Ok((stdout_bytes, stderr_bytes))
+    }
+
+    fn register_stream_artifacts(
+        journal: &Journal,
+        store: &MetadataStore,
+        blob_store: &BlobStore,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+        stdout_bytes: &[u8],
+        stderr_bytes: &[u8],
+    ) -> Result<()> {
+        for (kind, bytes, mime_type) in [
+            ("stdout_capture", stdout_bytes, "text/plain"),
+            ("stderr_capture", stderr_bytes, "text/plain"),
+        ] {
+            if bytes.is_empty() {
+                continue;
+            }
+
+            let blob = blob_store.put_bytes(bytes)?;
+            store.register_blob(&blob, Some(mime_type))?;
+            let (event, append) = journal.append(EventDraft::new(
+                session_id.clone(),
+                Some(turn_id.clone()),
+                Actor::Runtime,
+                EventType::ArtifactRegistered,
+                json!({
+                    "artifact_kind": kind,
+                    "sha256": blob.sha256,
+                    "size_bytes": blob.size_bytes,
+                }),
+            ))?;
+            store.record_event(&event, &journal.path().display().to_string(), append)?;
+            store.register_artifact(&ArtifactRecord {
+                artifact_id: ArtifactId::new(),
+                session_id: session_id.clone(),
+                source_event_id: event.event_id.clone(),
+                path: None,
+                kind: kind.into(),
+                mime_type: Some(mime_type.into()),
+                sha256: blob.sha256.clone(),
+                blob_relative_path: blob.relative_path,
+                size_bytes: blob.size_bytes,
+                created_at: Utc::now(),
+            })?;
+        }
+
+        Ok(())
+    }
+}
+
+fn spawn_reader<R: Read + Send + 'static>(
+    mut reader: R,
+    kind: StreamKind,
+    sender: Sender<StreamMessage>,
+) -> thread::JoinHandle<Result<()>> {
+    thread::spawn(move || loop {
+        let mut buffer = vec![0_u8; STREAM_CHUNK_SIZE];
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            let _ = sender.send(StreamMessage::Closed { kind });
+            return Ok(());
+        }
+        buffer.truncate(read);
+        sender
+            .send(StreamMessage::Chunk {
+                kind,
+                bytes: buffer,
+            })
+            .map_err(|_| ContynuError::InvalidState("stream capture receiver dropped".into()))?;
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::thread;
+    use std::time::Duration;
+
     use tempfile::tempdir;
 
     use super::{RunConfig, RuntimeEngine};
-    use crate::{MetadataStore, StatePaths};
+    use crate::{Journal, MetadataStore, StatePaths};
 
     #[test]
     fn runtime_run_captures_process_and_files() {
@@ -380,5 +510,49 @@ mod tests {
             .iter()
             .any(|event| event.event_type == "stderr_captured"));
         assert!(workspace.join("output.txt").exists());
+    }
+
+    #[test]
+    fn runtime_persists_stream_output_before_process_exit() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state = dir.path().join(".contynu");
+        let state_for_thread = state.clone();
+        let workspace_for_thread = workspace.clone();
+
+        let handle = thread::spawn(move || {
+            RuntimeEngine::run(RunConfig {
+                state_dir: state_for_thread,
+                cwd: workspace_for_thread,
+                command: vec![
+                    "bash".into(),
+                    "-lc".into(),
+                    "printf early && sleep 1 && printf done".into(),
+                ],
+                ignore_patterns: Vec::new(),
+                checkpoint_on_exit: false,
+            })
+            .unwrap()
+        });
+
+        thread::sleep(Duration::from_millis(300));
+
+        let journal_root = StatePaths::new(&state).journal_root();
+        let mut entries = std::fs::read_dir(&journal_root)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.path());
+        assert_eq!(entries.len(), 1);
+
+        let journal = Journal::open(entries[0].path()).unwrap();
+        let replay = journal.replay().unwrap();
+        assert!(replay
+            .iter()
+            .any(|item| item.event.event_type.as_str() == "stdout_captured"));
+
+        let outcome = handle.join().unwrap();
+        assert_eq!(outcome.exit_code, Some(0));
     }
 }

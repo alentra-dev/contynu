@@ -21,6 +21,9 @@ pub enum ContynuError {
     #[error("validation error: {0}")]
     Validation(String),
 
+    #[error("invalid state: {0}")]
+    InvalidState(String),
+
     #[error("checksum mismatch for event `{event_id}`")]
     ChecksumMismatch { event_id: String },
 

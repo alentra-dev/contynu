@@ -45,6 +45,8 @@ contynu init
 contynu run -- cargo test
 ```
 
+`contynu run` now captures stdout/stderr incrementally while the process is running, durably appends stream events to the journal in real time, and registers stream output artifacts in the blob store after exit.
+
 ### Create or inspect recovery state
 
 ```bash

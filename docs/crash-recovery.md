@@ -25,6 +25,10 @@ SQLite is treated as derived structured state. If SQLite is incomplete or stale 
 
 The `contynu repair --session <id>` command performs this recovery path.
 
+## Streaming Runtime Durability
+
+For wrapped command execution, stdout and stderr are persisted as the process runs rather than only after exit. This reduces the amount of volatile work that can be lost if the runtime itself crashes mid-command.
+
 ## Current Limitations
 
 - Mid-file corruption is surfaced as an error rather than silently repaired.
