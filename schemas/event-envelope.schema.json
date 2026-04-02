@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contynu.com/schemas/event-envelope.schema.json",
+  "title": "Contynu Event Envelope",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "event_id",
+    "session_id",
+    "seq",
+    "ts",
+    "actor",
+    "event_type",
+    "payload",
+    "payload_sha256"
+  ],
+  "properties": {
+    "schema_version": { "type": "integer", "minimum": 1 },
+    "event_id": { "type": "string", "pattern": "^evt_[a-f0-9]{32}$" },
+    "session_id": { "type": "string", "pattern": "^ses_[a-f0-9]{32}$" },
+    "turn_id": { "type": ["string", "null"], "pattern": "^trn_[a-f0-9]{32}$" },
+    "seq": { "type": "integer", "minimum": 1 },
+    "ts": { "type": "string", "format": "date-time" },
+    "actor": {
+      "type": "string",
+      "enum": ["user", "assistant", "tool", "system", "runtime"]
+    },
+    "event_type": { "type": "string", "minLength": 1 },
+    "parent_event_id": { "type": ["string", "null"], "pattern": "^evt_[a-f0-9]{32}$" },
+    "payload": { "type": "object" },
+    "payload_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  },
+  "additionalProperties": false
+}
