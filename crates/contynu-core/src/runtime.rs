@@ -485,7 +485,7 @@ impl RuntimeEngine {
             if let Some(path) = transcript.stdin.as_ref() {
                 if !has_stdin {
                     let bytes = std::fs::read(path).unwrap_or_default();
-                    let normalized = normalize_script_transcript(&bytes);
+                    let normalized = normalize_script_input(&bytes);
                     if !normalized.is_empty() {
                         Self::persist(
                             journal,
@@ -511,7 +511,7 @@ impl RuntimeEngine {
             if let Some(path) = transcript.stdout.as_ref() {
                 if !has_stdout {
                     let bytes = std::fs::read(path).unwrap_or_default();
-                    let normalized = normalize_script_transcript(&bytes);
+                    let normalized = normalize_script_output(&bytes);
                     if !normalized.is_empty() {
                         Self::persist(
                             journal,
@@ -833,8 +833,8 @@ impl RuntimeEngine {
 
         let stdin_log_bytes = std::fs::read(&stdin_log).unwrap_or_default();
         let stdout_log_bytes = std::fs::read(&stdout_log).unwrap_or_default();
-        let stdin_text = normalize_script_transcript(&stdin_log_bytes);
-        let stdout_text = normalize_script_transcript(&stdout_log_bytes);
+        let stdin_text = normalize_script_input(&stdin_log_bytes);
+        let stdout_text = normalize_script_output(&stdout_log_bytes);
         let stdin_bytes = stdin_text.as_bytes().to_vec();
         let stdout_bytes = stdout_text.as_bytes().to_vec();
 
@@ -1370,37 +1370,87 @@ fn parse_transcript_log_name(
         .map(|turn_id| (turn_id, suffix))
 }
 
-fn normalize_script_transcript(bytes: &[u8]) -> String {
+fn normalize_script_input(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(&strip_ansi_escape_bytes(bytes)).into_owned();
-    let mut normalized_lines = Vec::new();
-    let mut previous_blank = false;
+    let mut prompts = Vec::new();
 
     for raw_line in text.replace('\r', "\n").lines() {
-        let cleaned = raw_line
-            .chars()
-            .filter(|ch| {
-                !matches!(*ch, '\u{0000}'..='\u{0008}' | '\u{000B}'..='\u{001F}' | '\u{007F}')
-                    || *ch == '\n'
-                    || *ch == '\t'
-            })
-            .collect::<String>();
-        let line = cleaned.trim_end();
-        if line.starts_with("Script started on ") || line.starts_with("Script done on ") {
+        let line = cleaned_terminal_line(raw_line);
+        if line.is_empty() || is_script_wrapper_line(&line) {
             continue;
         }
-        if line.trim().is_empty() {
-            if previous_blank {
-                continue;
-            }
-            previous_blank = true;
-            normalized_lines.push(String::new());
+        let prompt = strip_terminal_prefix(&line);
+        if prompt.is_empty() || is_terminal_ui_line(prompt) || prompt == "/quit" {
             continue;
         }
-        previous_blank = false;
-        normalized_lines.push(line.to_string());
+        if prompt.chars().any(|ch| ch.is_ascii_alphabetic()) {
+            prompts.push(one_line(prompt));
+        }
     }
 
-    normalized_lines.join("\n").trim().to_string()
+    dedupe_lines(prompts).join("\n\n").trim().to_string()
+}
+
+fn normalize_script_output(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(&strip_ansi_escape_bytes(bytes)).into_owned();
+    let mut responses = Vec::<String>::new();
+    let mut current = Vec::<String>::new();
+    let mut capturing = false;
+
+    for raw_line in text.replace('\r', "\n").lines() {
+        let line = cleaned_terminal_line(raw_line);
+        if line.is_empty() {
+            if capturing
+                && !current
+                    .last()
+                    .map(|value| value.is_empty())
+                    .unwrap_or(false)
+            {
+                current.push(String::new());
+            }
+            continue;
+        }
+        if is_script_wrapper_line(&line) {
+            continue;
+        }
+
+        let stripped = strip_leading_answer_marker(&line).unwrap_or(&line);
+        if !capturing {
+            if strip_leading_answer_marker(&line).is_some() && looks_like_natural_language(stripped)
+            {
+                capturing = true;
+                current.push(one_line(stripped));
+            }
+            continue;
+        }
+
+        if is_terminal_ui_line(&line)
+            || line.starts_with('>')
+            || line.starts_with('❯')
+            || line.starts_with('›')
+        {
+            if !current.is_empty() {
+                let response = current.join("\n").trim().to_string();
+                if !response.is_empty() {
+                    responses.push(response);
+                }
+                current.clear();
+                capturing = false;
+            }
+            continue;
+        }
+
+        current.push(one_line(&line));
+    }
+
+    if !current.is_empty() {
+        let response = current.join("\n").trim().to_string();
+        if !response.is_empty() {
+            responses.push(response);
+        }
+    }
+
+    dedupe_lines(responses).join("\n\n").trim().to_string()
 }
 
 fn strip_ansi_escape_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -1451,6 +1501,120 @@ fn strip_ansi_escape_bytes(bytes: &[u8]) -> Vec<u8> {
     }
 
     out
+}
+
+fn cleaned_terminal_line(raw_line: &str) -> String {
+    raw_line
+        .chars()
+        .filter(|ch| {
+            !matches!(*ch, '\u{0000}'..='\u{0008}' | '\u{000B}'..='\u{001F}' | '\u{007F}')
+                || *ch == '\n'
+                || *ch == '\t'
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn is_script_wrapper_line(line: &str) -> bool {
+    line.starts_with("Script started on ") || line.starts_with("Script done on ")
+}
+
+fn strip_terminal_prefix(line: &str) -> &str {
+    line.trim_start_matches(">|VTE(7600)")
+        .trim_start_matches("|VTE(7600)")
+        .trim_start_matches('>')
+        .trim()
+}
+
+fn strip_leading_answer_marker(line: &str) -> Option<&str> {
+    line.strip_prefix("• ")
+        .or_else(|| line.strip_prefix("● "))
+        .or_else(|| line.strip_prefix("✦ "))
+        .map(str::trim)
+}
+
+fn looks_like_natural_language(value: &str) -> bool {
+    value.chars().any(|ch| ch.is_ascii_alphabetic())
+}
+
+fn is_terminal_ui_line(line: &str) -> bool {
+    line.starts_with('?')
+        || line.starts_with("workspace ")
+        || line.starts_with("sandbox")
+        || line.starts_with("/model")
+        || line.starts_with("model")
+        || line.starts_with("Shift+Tab")
+        || line.starts_with("Press Ctrl+C")
+        || line.starts_with("Enable ")
+        || line.starts_with("Agent powering down")
+        || line.starts_with("Interaction Summary")
+        || line.starts_with("To resume this session:")
+        || line.starts_with("Token usage:")
+        || line.starts_with("Tip:")
+        || line.starts_with("Starting MCP servers")
+        || line.starts_with("Use /skills")
+        || line.starts_with("Accessing workspace:")
+        || line.starts_with("Quick safety check:")
+        || line.starts_with("Security guide")
+        || line.starts_with("Recent activity")
+        || line.starts_with("What's new")
+        || line.starts_with("Waiting for authentication")
+        || line.starts_with("Automatic update failed")
+        || line.starts_with("Gemini CLI update available")
+        || line.starts_with("Installed with npm")
+        || line.starts_with("Signed in with Google:")
+        || line.starts_with("Plan:")
+        || line.starts_with("Claude Code v")
+        || line.starts_with("OpenAI Codex")
+        || line.starts_with("Gemini CLI v")
+        || line.contains("Type your message or @path/to/file")
+        || line.contains("GEMINI.md files")
+        || line.contains("CLAUDE.md")
+        || line.contains("AGENTS.md")
+        || line.contains("esc to cancel")
+        || line.contains("? for shortcuts")
+        || line.contains("accept edits")
+        || line.contains("no sandbox")
+        || line.contains("Auto (Gemini")
+        || line.contains("Rayleigh scattering") == false
+            && line.chars().all(|ch| {
+                matches!(
+                    ch,
+                    '─' | '▀'
+                        | '▄'
+                        | '│'
+                        | '╭'
+                        | '╰'
+                        | '▝'
+                        | '▜'
+                        | '▗'
+                        | '▟'
+                        | '▘'
+                        | ' '
+                        | '█'
+                        | '▌'
+                        | '▛'
+                        | '▖'
+                        | '▚'
+                        | '▞'
+                        | '▐'
+                )
+            })
+}
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn dedupe_lines(lines: Vec<String>) -> Vec<String> {
+    let mut deduped = Vec::new();
+    for line in lines {
+        if deduped.last() != Some(&line) {
+            deduped.push(line);
+        }
+    }
+    deduped
 }
 
 fn derive_structured_candidates(
