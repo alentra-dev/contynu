@@ -146,6 +146,7 @@ fn streamlined_launcher_reuses_primary_project() {
         String::from_utf8_lossy(&codex.stderr)
     );
     let stdout = String::from_utf8_lossy(&codex.stdout);
+    assert!(stdout.contains("mocked-codex"));
     assert!(stdout.contains(&project_id));
     let captured = fs::read_to_string(&capture_path).unwrap();
     assert!(captured.contains("env:"));
@@ -166,7 +167,7 @@ fn direct_passthrough_launches_regular_commands() {
         .arg(dir.path())
         .arg("bash")
         .arg("-lc")
-        .arg("printf direct > direct.txt")
+        .arg("printf direct && printf direct > direct.txt")
         .output()
         .unwrap();
     assert!(
@@ -175,6 +176,7 @@ fn direct_passthrough_launches_regular_commands() {
         String::from_utf8_lossy(&command.stderr)
     );
     let stdout = String::from_utf8_lossy(&command.stdout);
+    assert!(stdout.contains("direct"));
     assert!(stdout.contains("\"project_id\""));
     assert_eq!(
         fs::read_to_string(dir.path().join("direct.txt")).unwrap(),

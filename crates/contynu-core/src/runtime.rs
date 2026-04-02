@@ -686,6 +686,7 @@ impl RuntimeEngine {
                     } else {
                         stdout_bytes.extend_from_slice(&bytes);
                     }
+                    mirror_chunk_to_terminal(kind, &bytes)?;
                     Self::persist(
                         journal,
                         store,
@@ -1101,6 +1102,22 @@ fn merge_workspace_context(original: Option<&[u8]>, prompt_text: &str) -> String
     merged.push_str(prompt_text);
     merged.push_str(END);
     merged
+}
+
+fn mirror_chunk_to_terminal(kind: StreamKind, bytes: &[u8]) -> Result<()> {
+    match kind {
+        StreamKind::Stdout | StreamKind::Pty => {
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(bytes)?;
+            stdout.flush()?;
+        }
+        StreamKind::Stderr => {
+            let mut stderr = std::io::stderr().lock();
+            stderr.write_all(bytes)?;
+            stderr.flush()?;
+        }
+    }
+    Ok(())
 }
 
 fn derive_structured_candidates(
