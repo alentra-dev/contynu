@@ -536,26 +536,39 @@ fn print_json<T: Serialize>(value: &T) -> Result<()> {
 }
 
 fn print_run_footer(outcome: &RunOutcome) {
-    let exit_text = match outcome.exit_code {
-        Some(code) => format!("exit {code}"),
-        None => "no exit code".to_string(),
-    };
-    let footer = if outcome.interrupted {
-        format!(
-            "Contynu paused here.\nSaved turn {} in project {} before exit with {}.",
-            short_id(outcome.turn_id.as_str()),
-            short_id(outcome.project_id.as_str()),
-            exit_text
-        )
+    let lines = if outcome.interrupted {
+        vec![
+            "Contynu paused here.".to_string(),
+            format!(
+                "Saved turn {} in project {}.",
+                short_id(outcome.turn_id.as_str()),
+                short_id(outcome.project_id.as_str())
+            ),
+        ]
     } else {
-        format!(
-            "Let's contynu another time. Goodbye for now.\nSaved turn {} in project {} with {}.",
-            short_id(outcome.turn_id.as_str()),
-            short_id(outcome.project_id.as_str()),
-            exit_text
-        )
+        vec![
+            "Let's contynu another time. Goodbye for now.".to_string(),
+            format!(
+                "Saved turn {} in project {}.",
+                short_id(outcome.turn_id.as_str()),
+                short_id(outcome.project_id.as_str())
+            ),
+        ]
     };
-    eprintln!("{footer}");
+
+    let width = lines
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0);
+    eprintln!();
+    eprintln!("┌{}┐", "─".repeat(width + 2));
+    for line in lines {
+        let padding = width.saturating_sub(line.chars().count());
+        eprintln!("│ {}{} │", line, " ".repeat(padding));
+    }
+    eprintln!("└{}┘", "─".repeat(width + 2));
+    eprintln!();
 }
 
 fn short_id(value: &str) -> &str {
