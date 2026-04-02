@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
@@ -18,6 +19,9 @@ struct Cli {
 
     #[arg(long, global = true, default_value = ".")]
     cwd: PathBuf,
+
+    #[arg(long, global = true)]
+    new: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -150,6 +154,7 @@ enum ConfigCommand {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let state = StatePaths::new(&cli.state_dir);
+    maybe_reset_state_for_new(&state, &cli.command, cli.new)?;
 
     match cli.command {
         Command::Init => init(&state),
@@ -176,6 +181,45 @@ fn main() -> Result<()> {
         Command::Repair { project } => repair(&state, project.as_deref()),
         Command::External(command) => passthrough(&state, &cli.cwd, command),
     }
+}
+
+fn maybe_reset_state_for_new(state: &StatePaths, command: &Command, reset: bool) -> Result<()> {
+    if !reset {
+        return Ok(());
+    }
+
+    if !matches!(
+        command,
+        Command::Run(_)
+            | Command::Codex(_)
+            | Command::Claude(_)
+            | Command::Gemini(_)
+            | Command::StartProject
+            | Command::External(_)
+    ) {
+        return Err(anyhow!(
+            "`--new` is only supported when starting a new run or launcher session"
+        ));
+    }
+
+    eprintln!(
+        "Contynu will permanently wipe the chat history for this project folder at {}.",
+        state.root().display()
+    );
+    eprint!("Type `yes` to continue: ");
+    io::stderr().flush()?;
+
+    let mut confirmation = String::new();
+    io::stdin().read_line(&mut confirmation)?;
+    if confirmation.trim() != "yes" {
+        return Err(anyhow!("aborted without wiping project history"));
+    }
+
+    if state.root().exists() {
+        std::fs::remove_dir_all(state.root())?;
+    }
+
+    Ok(())
 }
 
 fn init(state: &StatePaths) -> Result<()> {

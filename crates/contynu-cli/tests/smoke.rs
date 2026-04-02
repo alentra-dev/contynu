@@ -290,6 +290,58 @@ fn status_projects_recent_and_config_commands_work() {
 }
 
 #[test]
+fn new_flag_prompts_and_wipes_history_before_starting_fresh() {
+    let dir = tempdir().unwrap();
+    let state_dir = dir.path().join(".contynu");
+
+    let initial = Command::new(env!("CARGO_BIN_EXE_contynu"))
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("--cwd")
+        .arg(dir.path())
+        .arg("bash")
+        .arg("-lc")
+        .arg("printf first")
+        .output()
+        .unwrap();
+    assert!(initial.status.success());
+
+    let mut fresh = Command::new(env!("CARGO_BIN_EXE_contynu"))
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("--new")
+        .arg("--cwd")
+        .arg(dir.path())
+        .arg("bash")
+        .arg("-lc")
+        .arg("printf second")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    use std::io::Write as _;
+    fresh.stdin.as_mut().unwrap().write_all(b"yes\n").unwrap();
+    let output = fresh.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("permanently wipe the chat history"));
+    assert!(stderr.contains("Type `yes` to continue"));
+
+    let inspect = Command::new(env!("CARGO_BIN_EXE_contynu"))
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("inspect")
+        .arg("project")
+        .output()
+        .unwrap();
+    assert!(inspect.status.success());
+    let inspect_stdout = String::from_utf8_lossy(&inspect.stdout);
+    assert!(!inspect_stdout.contains("first"));
+}
+
+#[test]
 fn builtin_launcher_config_can_override_known_launcher_behavior() {
     let dir = tempdir().unwrap();
     let state_dir = dir.path().join(".contynu");
