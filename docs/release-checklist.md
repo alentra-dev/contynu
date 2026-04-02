@@ -38,10 +38,9 @@ All should be exercised against a real local state directory before release.
 
 ## Distribution
 
-- GitHub release workflow succeeds for all supported targets
+- GitHub release workflow succeeds for the supported release target set
 - release artifacts include installers and checksums
-- `scripts/install.sh` installs correctly on Linux and macOS
-- `scripts/install.ps1` installs correctly on Windows
+- `scripts/install.sh` installs correctly on Linux
 - README install instructions match the published release assets
 
 ## Documentation
