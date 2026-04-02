@@ -86,6 +86,7 @@ impl ExecutionTransport {
 
 #[derive(Debug)]
 struct ProcessCapture {
+    stdin_bytes: Vec<u8>,
     exit_code: Option<i32>,
     success: bool,
     stdout_bytes: Vec<u8>,
@@ -276,6 +277,7 @@ impl RuntimeEngine {
 
         let interrupted = Arc::new(AtomicBool::new(false));
         let capture = Self::execute_launch_plan(
+            &state,
             &config.cwd,
             &launch_plan,
             transport,
@@ -293,6 +295,7 @@ impl RuntimeEngine {
             &session_id,
             &turn_id,
             transport,
+            &capture.stdin_bytes,
             &capture.stdout_bytes,
             &capture.stderr_bytes,
         )?;
@@ -383,6 +386,7 @@ impl RuntimeEngine {
     }
 
     fn execute_launch_plan(
+        state: &StatePaths,
         cwd: &std::path::Path,
         launch_plan: &crate::adapters::LaunchPlan,
         transport: ExecutionTransport,
@@ -402,9 +406,16 @@ impl RuntimeEngine {
                 turn_id,
                 interrupted,
             ),
-            ExecutionTransport::InheritTerminal => {
-                Self::execute_with_inherited_terminal(cwd, launch_plan, interrupted)
-            }
+            ExecutionTransport::InheritTerminal => Self::execute_with_inherited_terminal(
+                state,
+                cwd,
+                launch_plan,
+                journal,
+                store,
+                session_id,
+                turn_id,
+                interrupted,
+            ),
             ExecutionTransport::Pty => Self::execute_with_pty(
                 cwd,
                 launch_plan,
@@ -480,6 +491,7 @@ impl RuntimeEngine {
             .wait()?;
 
         Ok(ProcessCapture {
+            stdin_bytes: Vec::new(),
             exit_code: status.code(),
             success: status.success(),
             stdout_bytes,
@@ -488,10 +500,31 @@ impl RuntimeEngine {
     }
 
     fn execute_with_inherited_terminal(
+        state: &StatePaths,
         cwd: &std::path::Path,
         launch_plan: &crate::adapters::LaunchPlan,
+        journal: &Journal,
+        store: &MetadataStore,
+        session_id: &SessionId,
+        turn_id: &TurnId,
         interrupted: Arc<AtomicBool>,
     ) -> Result<ProcessCapture> {
+        #[cfg(unix)]
+        {
+            if launch_plan.stdin_prelude.is_none() {
+                return Self::execute_with_script_logging(
+                    state,
+                    cwd,
+                    launch_plan,
+                    journal,
+                    store,
+                    session_id,
+                    turn_id,
+                    interrupted,
+                );
+            }
+        }
+
         let mut command = Command::new(&launch_plan.executable);
         command.args(&launch_plan.args);
         command.current_dir(cwd);
@@ -512,6 +545,7 @@ impl RuntimeEngine {
             .wait()?;
 
         Ok(ProcessCapture {
+            stdin_bytes: Vec::new(),
             exit_code: status.code(),
             success: status.success(),
             stdout_bytes: Vec::new(),
@@ -563,10 +597,102 @@ impl RuntimeEngine {
         let status = child.wait()?;
 
         Ok(ProcessCapture {
+            stdin_bytes: Vec::new(),
             exit_code: status.code(),
             success: status.success(),
             stdout_bytes,
             stderr_bytes,
+        })
+    }
+
+    #[cfg(unix)]
+    #[allow(clippy::too_many_arguments)]
+    fn execute_with_script_logging(
+        state: &StatePaths,
+        cwd: &std::path::Path,
+        launch_plan: &crate::adapters::LaunchPlan,
+        journal: &Journal,
+        store: &MetadataStore,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+        interrupted: Arc<AtomicBool>,
+    ) -> Result<ProcessCapture> {
+        let runtime_dir = state.project_runtime_dir(session_id);
+        std::fs::create_dir_all(&runtime_dir)?;
+        let stdin_log = runtime_dir.join(format!("{}-stdin.log", turn_id.as_str()));
+        let stdout_log = runtime_dir.join(format!("{}-stdout.log", turn_id.as_str()));
+
+        let command_text = shell_command_text(&launch_plan.executable, &launch_plan.args);
+        let mut command = Command::new("script");
+        command.current_dir(cwd);
+        command.stdin(Stdio::inherit());
+        command.stdout(Stdio::inherit());
+        command.stderr(Stdio::inherit());
+        command.envs(launch_plan.env.iter().map(|(key, value)| (key, value)));
+        command.arg("-qef");
+        command.arg("--log-in");
+        command.arg(&stdin_log);
+        command.arg("--log-out");
+        command.arg(&stdout_log);
+        command.arg("--command");
+        command.arg(command_text);
+        command.arg("/dev/null");
+
+        let child = command
+            .spawn()
+            .map_err(|error| ContynuError::CommandStart(error.to_string()))?;
+
+        let child = Arc::new(Mutex::new(child));
+        install_ctrlc_handler(Arc::clone(&child), interrupted);
+        let status = child
+            .lock()
+            .map_err(|_| ContynuError::Validation("child process mutex poisoned".into()))?
+            .wait()?;
+
+        let stdin_bytes = std::fs::read(&stdin_log).unwrap_or_default();
+        let stdout_bytes = std::fs::read(&stdout_log).unwrap_or_default();
+
+        if !stdin_bytes.is_empty() {
+            Self::persist(
+                journal,
+                store,
+                EventDraft::new(
+                    session_id.clone(),
+                    Some(turn_id.clone()),
+                    Actor::Runtime,
+                    EventType::StdinCaptured,
+                    json!({
+                        "text": String::from_utf8_lossy(&stdin_bytes).into_owned(),
+                        "stream": "stdin",
+                        "bytes": stdin_bytes.len(),
+                    }),
+                ),
+            )?;
+        }
+        if !stdout_bytes.is_empty() {
+            Self::persist(
+                journal,
+                store,
+                EventDraft::new(
+                    session_id.clone(),
+                    Some(turn_id.clone()),
+                    Actor::Runtime,
+                    EventType::StdoutCaptured,
+                    json!({
+                        "text": String::from_utf8_lossy(&stdout_bytes).into_owned(),
+                        "stream": "stdout",
+                        "bytes": stdout_bytes.len(),
+                    }),
+                ),
+            )?;
+        }
+
+        Ok(ProcessCapture {
+            stdin_bytes,
+            exit_code: status.code(),
+            success: status.success(),
+            stdout_bytes,
+            stderr_bytes: Vec::new(),
         })
     }
 
@@ -635,11 +761,17 @@ impl RuntimeEngine {
         session_id: &SessionId,
         turn_id: &TurnId,
         transport: ExecutionTransport,
+        stdin_bytes: &[u8],
         stdout_bytes: &[u8],
         stderr_bytes: &[u8],
     ) -> Result<()> {
         let captures = if matches!(transport, ExecutionTransport::Pty) {
             vec![("pty_capture", stdout_bytes, "text/plain")]
+        } else if matches!(transport, ExecutionTransport::InheritTerminal) {
+            vec![
+                ("stdin_capture", stdin_bytes, "text/plain"),
+                ("stdout_capture", stdout_bytes, "text/plain"),
+            ]
         } else {
             vec![
                 ("stdout_capture", stdout_bytes, "text/plain"),
@@ -972,6 +1104,21 @@ fn mirror_chunk_to_terminal(kind: StreamKind, bytes: &[u8]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn shell_command_text(executable: &OsString, args: &[OsString]) -> String {
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push(shell_escape(&executable.to_string_lossy()));
+    for arg in args {
+        parts.push(shell_escape(&arg.to_string_lossy()));
+    }
+    parts.join(" ")
+}
+
+#[cfg(unix)]
+fn shell_escape(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn derive_structured_candidates(
