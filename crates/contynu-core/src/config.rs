@@ -146,7 +146,7 @@ fn builtin_launchers() -> Vec<ConfiguredLlmLauncher> {
             aliases: vec!["gemini-cli".into()],
             hydrate: true,
             use_pty: true,
-            context_file: Some("GEMINI.md".into()),
+            context_file: None,
             hydration_delivery: HydrationDelivery::EnvOnly,
             hydration_args: Vec::new(),
             extra_env: BTreeMap::new(),
@@ -259,7 +259,7 @@ mod tests {
                 .unwrap()
                 .context_file
                 .as_deref(),
-            Some("GEMINI.md")
+            None
         );
     }
 

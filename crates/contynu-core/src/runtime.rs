@@ -1,5 +1,5 @@
 use std::ffi::OsString;
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -71,6 +71,7 @@ impl StreamKind {
 enum ExecutionTransport {
     Pipes,
     Pty,
+    InheritTerminal,
 }
 
 impl ExecutionTransport {
@@ -78,6 +79,7 @@ impl ExecutionTransport {
         match self {
             Self::Pipes => "pipes",
             Self::Pty => "pty",
+            Self::InheritTerminal => "inherit_terminal",
         }
     }
 }
@@ -400,6 +402,9 @@ impl RuntimeEngine {
                 turn_id,
                 interrupted,
             ),
+            ExecutionTransport::InheritTerminal => {
+                Self::execute_with_inherited_terminal(cwd, launch_plan, interrupted)
+            }
             ExecutionTransport::Pty => Self::execute_with_pty(
                 cwd,
                 launch_plan,
@@ -479,6 +484,38 @@ impl RuntimeEngine {
             success: status.success(),
             stdout_bytes,
             stderr_bytes,
+        })
+    }
+
+    fn execute_with_inherited_terminal(
+        cwd: &std::path::Path,
+        launch_plan: &crate::adapters::LaunchPlan,
+        interrupted: Arc<AtomicBool>,
+    ) -> Result<ProcessCapture> {
+        let mut command = Command::new(&launch_plan.executable);
+        command.args(&launch_plan.args);
+        command.current_dir(cwd);
+        command.stdin(Stdio::inherit());
+        command.stdout(Stdio::inherit());
+        command.stderr(Stdio::inherit());
+        command.envs(launch_plan.env.iter().map(|(key, value)| (key, value)));
+
+        let child = command
+            .spawn()
+            .map_err(|error| ContynuError::CommandStart(error.to_string()))?;
+
+        let child = Arc::new(Mutex::new(child));
+        install_ctrlc_handler(Arc::clone(&child), interrupted);
+        let status = child
+            .lock()
+            .map_err(|_| ContynuError::Validation("child process mutex poisoned".into()))?
+            .wait()?;
+
+        Ok(ProcessCapture {
+            exit_code: status.code(),
+            success: status.success(),
+            stdout_bytes: Vec::new(),
+            stderr_bytes: Vec::new(),
         })
     }
 
@@ -884,7 +921,9 @@ impl RuntimeEngine {
 }
 
 fn resolve_transport(adapter: &AdapterSpec) -> ExecutionTransport {
-    if adapter.use_pty() && cfg!(unix) {
+    if adapter.use_pty() && std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        ExecutionTransport::InheritTerminal
+    } else if adapter.use_pty() && cfg!(unix) {
         ExecutionTransport::Pty
     } else {
         ExecutionTransport::Pipes

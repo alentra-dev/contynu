@@ -76,7 +76,7 @@ fn project_is_created_and_reused_by_default() {
         String::from_utf8_lossy(&run.stderr)
     );
     let run_stdout = String::from_utf8_lossy(&run.stdout);
-    assert!(run_stdout.contains(&project_id));
+    assert!(run_stdout.contains("smoke"));
 
     let inspect = Command::new(env!("CARGO_BIN_EXE_contynu"))
         .arg("--state-dir")
@@ -91,6 +91,7 @@ fn project_is_created_and_reused_by_default() {
         String::from_utf8_lossy(&inspect.stderr)
     );
     let inspect_stdout = String::from_utf8_lossy(&inspect.stdout);
+    assert!(inspect_stdout.contains(&project_id));
     assert!(inspect_stdout.contains("session_resumed"));
 }
 
@@ -147,12 +148,22 @@ fn streamlined_launcher_reuses_primary_project() {
     );
     let stdout = String::from_utf8_lossy(&codex.stdout);
     assert!(stdout.contains("mocked-codex"));
-    assert!(stdout.contains(&project_id));
     let captured = fs::read_to_string(&capture_path).unwrap();
     assert!(captured.contains("env:"));
     assert!(captured.contains("rehydration.json"));
     assert!(captured.contains("ctx:1"));
     assert!(!dir.path().join("AGENTS.md").exists());
+
+    let inspect = Command::new(env!("CARGO_BIN_EXE_contynu"))
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("inspect")
+        .arg("project")
+        .output()
+        .unwrap();
+    assert!(inspect.status.success());
+    let inspect_stdout = String::from_utf8_lossy(&inspect.stdout);
+    assert!(inspect_stdout.contains(&project_id));
 }
 
 #[test]
@@ -177,7 +188,6 @@ fn direct_passthrough_launches_regular_commands() {
     );
     let stdout = String::from_utf8_lossy(&command.stdout);
     assert!(stdout.contains("direct"));
-    assert!(stdout.contains("\"project_id\""));
     assert_eq!(
         fs::read_to_string(dir.path().join("direct.txt")).unwrap(),
         "direct"

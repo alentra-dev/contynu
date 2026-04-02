@@ -234,7 +234,7 @@ fn start_project(state: &StatePaths, cwd: &PathBuf) -> Result<()> {
 
 fn run(state: &StatePaths, cwd: &PathBuf, command: RunCommand) -> Result<()> {
     ensure_state(state)?;
-    let outcome = RuntimeEngine::run(RunConfig {
+    RuntimeEngine::run(RunConfig {
         state_dir: state.root().to_path_buf(),
         cwd: cwd.clone(),
         command: command.command.into_iter().map(Into::into).collect(),
@@ -242,7 +242,7 @@ fn run(state: &StatePaths, cwd: &PathBuf, command: RunCommand) -> Result<()> {
         checkpoint_on_exit: !command.no_checkpoint,
         project_id: command.project.map(ProjectId::parse).transpose()?,
     })?;
-    print_json(&outcome)
+    Ok(())
 }
 
 fn launch_llm(
@@ -254,7 +254,7 @@ fn launch_llm(
     ensure_state(state)?;
     let mut argv = vec![executable.to_string()];
     argv.extend(command.args);
-    let outcome = RuntimeEngine::run(RunConfig {
+    RuntimeEngine::run(RunConfig {
         state_dir: state.root().to_path_buf(),
         cwd: cwd.clone(),
         command: argv.into_iter().map(Into::into).collect(),
@@ -262,12 +262,12 @@ fn launch_llm(
         checkpoint_on_exit: !command.no_checkpoint,
         project_id: command.project.map(ProjectId::parse).transpose()?,
     })?;
-    print_json(&outcome)
+    Ok(())
 }
 
 fn passthrough(state: &StatePaths, cwd: &PathBuf, command: Vec<OsString>) -> Result<()> {
     ensure_state(state)?;
-    let outcome = RuntimeEngine::run(RunConfig {
+    RuntimeEngine::run(RunConfig {
         state_dir: state.root().to_path_buf(),
         cwd: cwd.clone(),
         command,
@@ -275,7 +275,7 @@ fn passthrough(state: &StatePaths, cwd: &PathBuf, command: Vec<OsString>) -> Res
         checkpoint_on_exit: true,
         project_id: None,
     })?;
-    print_json(&outcome)
+    Ok(())
 }
 
 fn checkpoint(state: &StatePaths, project: Option<&str>, reason: &str) -> Result<()> {
