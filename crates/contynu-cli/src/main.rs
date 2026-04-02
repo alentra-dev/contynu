@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
 use contynu_core::{
-    BlobStore, CheckpointManager, EventDraft, EventId, EventType, Journal, MetadataStore,
-    ProjectId, RunConfig, RuntimeEngine, StatePaths,
+    BlobStore, CheckpointManager, ContynuConfig, EventDraft, EventId, EventType, Journal,
+    MetadataStore, ProjectId, RunConfig, RuntimeEngine, StatePaths,
 };
 use serde::Serialize;
 
@@ -163,6 +163,7 @@ fn init(state: &StatePaths) -> Result<()> {
 
 fn ensure_state(state: &StatePaths) -> Result<()> {
     state.ensure_layout()?;
+    ContynuConfig::ensure_exists(&state.config_path())?;
     let _ = MetadataStore::open(state.sqlite_db())?;
     let _ = BlobStore::new(state.blobs_root());
     Ok(())

@@ -49,10 +49,27 @@ impl HydrationDelivery {
 impl ContynuConfig {
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
-            return Ok(Self::default());
+            return Ok(Self::with_builtin_launchers());
         }
         let raw = fs::read_to_string(path)?;
         Ok(serde_json::from_str(&raw)?)
+    }
+
+    pub fn ensure_exists(path: &Path) -> Result<()> {
+        if path.exists() {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, Self::default_file_contents()?)?;
+        Ok(())
+    }
+
+    pub fn default_file_contents() -> Result<String> {
+        Ok(serde_json::to_string_pretty(
+            &Self::with_builtin_launchers(),
+        )?)
     }
 
     pub fn find_llm_launcher(&self, command: &str) -> Option<&ConfiguredLlmLauncher> {
@@ -60,10 +77,45 @@ impl ContynuConfig {
             launcher.command == command || launcher.aliases.iter().any(|alias| alias == command)
         })
     }
+
+    pub fn with_builtin_launchers() -> Self {
+        Self {
+            llm_launchers: builtin_launchers(),
+        }
+    }
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn builtin_launchers() -> Vec<ConfiguredLlmLauncher> {
+    vec![
+        ConfiguredLlmLauncher {
+            command: "codex".into(),
+            aliases: vec!["codex-cli".into()],
+            hydrate: true,
+            hydration_delivery: HydrationDelivery::EnvAndStdin,
+            hydration_args: Vec::new(),
+            extra_env: BTreeMap::new(),
+        },
+        ConfiguredLlmLauncher {
+            command: "claude".into(),
+            aliases: vec!["claude-code".into()],
+            hydrate: true,
+            hydration_delivery: HydrationDelivery::EnvAndStdin,
+            hydration_args: Vec::new(),
+            extra_env: BTreeMap::new(),
+        },
+        ConfiguredLlmLauncher {
+            command: "gemini".into(),
+            aliases: vec!["gemini-cli".into()],
+            hydrate: true,
+            hydration_delivery: HydrationDelivery::EnvAndStdin,
+            hydration_args: Vec::new(),
+            extra_env: BTreeMap::new(),
+        },
+    ]
 }
 
 #[cfg(test)]
@@ -132,5 +184,18 @@ mod tests {
                 .hydration_args,
             vec!["--context-file", "{prompt_file}"]
         );
+    }
+
+    #[test]
+    fn ensure_exists_writes_builtin_launchers() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+
+        ContynuConfig::ensure_exists(&path).unwrap();
+
+        let config = ContynuConfig::load(&path).unwrap();
+        assert!(config.find_llm_launcher("codex").is_some());
+        assert!(config.find_llm_launcher("claude").is_some());
+        assert!(config.find_llm_launcher("gemini").is_some());
     }
 }

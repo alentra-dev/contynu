@@ -24,6 +24,8 @@ Launches `gemini` inside Contynu’s runtime using the primary project by defaul
 
 Creates the local state layout and initializes the SQLite metadata store.
 
+This also writes `.contynu/config.json` when it does not already exist, pre-populated with editable launcher entries for `codex`, `claude`, and `gemini`.
+
 ### `contynu run -- <command...>`
 
 Continues the primary project by default, wraps the external command, captures process lifecycle plus stdout/stderr, diffs workspace files before and after execution, records artifacts for large or binary outputs, and creates a checkpoint by default.
@@ -91,6 +93,7 @@ Repairs a truncated journal tail if needed, then reconciles journal state back i
 - Raw project IDs remain available for exact scripting and advanced targeting.
 - Known LLM launchers now have dedicated top-level commands so users do not need to remember `run -- <tool>`.
 - Unknown future launchers can be configured in `.contynu/config.json`.
+- The generated config file is the preferred place to adjust known launcher behavior as upstream CLIs evolve.
 - Configured launchers can choose `hydration_delivery` as `env_only`, `stdin_only`, or `env_and_stdin`.
 - Configured launchers can also prepend `hydration_args` with placeholders such as `{prompt_file}`, `{packet_file}`, `{project_id}`, and `{schema_version}`.
 - Ordinary terminal commands can also be launched directly as `contynu <command...>`.

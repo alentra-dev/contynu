@@ -65,17 +65,13 @@ impl Adapter for TerminalAdapter {
 
 impl AdapterSpec {
     pub fn detect(program: &str, config: &ContynuConfig) -> Self {
-        match program {
-            "codex" | "codex-cli" => Self::builtin(AdapterKind::CodexCli, "codex_cli", true),
-            "claude" | "claude-code" => Self::builtin(AdapterKind::ClaudeCli, "claude_cli", true),
-            "gemini" | "gemini-cli" => Self::builtin(AdapterKind::GeminiCli, "gemini_cli", true),
-            _ => {
-                if let Some(launcher) = config.find_llm_launcher(program) {
-                    Self::configured(launcher)
-                } else {
-                    Self::builtin(AdapterKind::Terminal, "terminal", false)
-                }
-            }
+        if let Some(launcher) = config.find_llm_launcher(program) {
+            return Self::configured(program, launcher);
+        }
+
+        match builtin_kind_for_program(program) {
+            Some((kind, name)) => Self::builtin(kind, name, true),
+            None => Self::builtin(AdapterKind::Terminal, "terminal", false),
         }
     }
 
@@ -158,10 +154,13 @@ impl AdapterSpec {
         }
     }
 
-    fn configured(launcher: &ConfiguredLlmLauncher) -> Self {
+    fn configured(program: &str, launcher: &ConfiguredLlmLauncher) -> Self {
+        let (kind, default_name) = builtin_kind_for_program(program)
+            .or_else(|| builtin_kind_for_program(&launcher.command))
+            .unwrap_or((AdapterKind::ConfiguredLlm, launcher.command.as_str()));
         Self {
-            kind: AdapterKind::ConfiguredLlm,
-            name: launcher.command.clone(),
+            kind,
+            name: default_name.to_string(),
             should_hydrate: launcher.hydrate,
             hydration_delivery: launcher.hydration_delivery,
             hydration_args: launcher
@@ -172,6 +171,15 @@ impl AdapterSpec {
                 .collect(),
             extra_env: launcher.extra_env.clone(),
         }
+    }
+}
+
+fn builtin_kind_for_program(program: &str) -> Option<(AdapterKind, &'static str)> {
+    match program {
+        "codex" | "codex-cli" => Some((AdapterKind::CodexCli, "codex_cli")),
+        "claude" | "claude-code" => Some((AdapterKind::ClaudeCli, "claude_cli")),
+        "gemini" | "gemini-cli" => Some((AdapterKind::GeminiCli, "gemini_cli")),
+        _ => None,
     }
 }
 
@@ -212,7 +220,7 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{AdapterSpec, HydrationContext};
+    use super::{AdapterKind, AdapterSpec, HydrationContext};
     use crate::checkpoint::RehydrationPacket;
     use crate::config::ContynuConfig;
     use crate::ids::ProjectId;
@@ -331,6 +339,64 @@ mod tests {
                 "--schema".to_string(),
                 "7".to_string(),
                 "--interactive".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn config_overrides_builtin_launcher_behavior() {
+        let config = serde_json::from_value::<ContynuConfig>(json!({
+            "llm_launchers": [
+                {
+                    "command": "codex",
+                    "hydrate": true,
+                    "hydration_delivery": "env_only",
+                    "hydration_args": ["--context-file", "{prompt_file}"]
+                }
+            ]
+        }))
+        .unwrap();
+        let adapter = AdapterSpec::detect("codex", &config);
+        let project_id = ProjectId::new();
+        let packet = RehydrationPacket {
+            schema_version: 1,
+            project_id: project_id.clone(),
+            target_model: None,
+            mission: "Continue the project faithfully.".into(),
+            stable_facts: Vec::new(),
+            constraints: Vec::new(),
+            decisions: Vec::new(),
+            current_state: "No prior summary available.".into(),
+            open_loops: Vec::new(),
+            relevant_artifacts: Vec::new(),
+            relevant_files: Vec::new(),
+            recent_verbatim_context: Vec::new(),
+            retrieval_guidance: Vec::new(),
+        };
+        let hydration = HydrationContext {
+            project_id,
+            packet,
+            packet_path: PathBuf::from("/tmp/rehydration.json"),
+            prompt_path: PathBuf::from("/tmp/rehydration.txt"),
+        };
+
+        let plan = adapter
+            .build_launch_plan(OsString::from("codex"), Vec::new(), Some(&hydration))
+            .unwrap();
+
+        assert_eq!(adapter.kind(), AdapterKind::CodexCli);
+        assert_eq!(adapter.as_str(), "codex_cli");
+        assert!(plan.stdin_prelude.is_none());
+        let args = plan
+            .args
+            .iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "--context-file".to_string(),
+                "/tmp/rehydration.txt".to_string(),
             ]
         );
     }

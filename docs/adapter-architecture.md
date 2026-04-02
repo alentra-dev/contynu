@@ -27,6 +27,7 @@ Native provider-specific argument-level integration is still deferred until the 
 ## Configurable Launchers
 
 Contynu can be taught about future LLM tools through `.contynu/config.json`.
+That same config file is also the preferred override layer for the known launchers that Contynu seeds during `init`, so launcher-specific startup parameters can evolve without waiting for a new Contynu release.
 
 Example:
 

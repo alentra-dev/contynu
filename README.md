@@ -45,6 +45,7 @@ Known LLM launcher commands automatically attach to the current project memory a
 When a known LLM launcher is continuing an existing project, Contynu now materializes a rehydration packet and passes it into the launched process through both environment variables and a stdin startup prelude.
 
 Unknown future LLM CLIs can be taught to Contynu through `.contynu/config.json`. If a launcher is listed there, the normal direct path like `contynu myllm` will recognize it as hydratable.
+`contynu init` now writes a starter `.contynu/config.json` that already includes `codex`, `claude`, and `gemini`, so those integrations can be adjusted locally as upstream CLIs change.
 
 Example:
 

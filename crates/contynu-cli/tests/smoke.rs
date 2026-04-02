@@ -19,6 +19,10 @@ fn init_and_doctor_work() {
         "init failed: {}",
         String::from_utf8_lossy(&init.stderr)
     );
+    let config = fs::read_to_string(state_dir.join("config.json")).unwrap();
+    assert!(config.contains("\"command\": \"codex\""));
+    assert!(config.contains("\"command\": \"claude\""));
+    assert!(config.contains("\"command\": \"gemini\""));
 
     let doctor = Command::new(env!("CARGO_BIN_EXE_contynu"))
         .arg("--state-dir")
@@ -177,6 +181,83 @@ fn direct_passthrough_launches_regular_commands() {
         fs::read_to_string(dir.path().join("direct.txt")).unwrap(),
         "direct"
     );
+}
+
+#[test]
+fn builtin_launcher_config_can_override_known_launcher_behavior() {
+    let dir = tempdir().unwrap();
+    let state_dir = dir.path().join(".contynu");
+    let bin_dir = dir.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(
+        state_dir.join("config.json"),
+        r#"{
+          "llm_launchers": [
+            {
+              "command": "codex",
+              "aliases": ["codex-cli"],
+              "hydrate": true,
+              "hydration_delivery": "env_only",
+              "hydration_args": ["--context-file", "{prompt_file}"],
+              "extra_env": {"CODEX_PROFILE": "custom"}
+            }
+          ]
+        }"#,
+    )
+    .unwrap();
+
+    let codex_path = bin_dir.join("codex");
+    let capture_path = dir.path().join("codex-config-capture.txt");
+    fs::write(
+        &codex_path,
+        format!(
+            "#!/bin/sh\nprintf \"arg1:%s|arg2:%s|env:%s|profile:%s\\n\" \"$1\" \"$2\" \"$CONTYNU_REHYDRATION_PACKET_FILE\" \"$CODEX_PROFILE\" > \"{}\"\nprintf mocked-codex\n",
+            capture_path.display(),
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&codex_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&codex_path, perms).unwrap();
+    }
+    let path = env::var("PATH").unwrap_or_default();
+    let combined_path = format!("{}:{}", bin_dir.display(), path);
+
+    let start = Command::new(env!("CARGO_BIN_EXE_contynu"))
+        .env("PATH", &combined_path)
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("start-project")
+        .output()
+        .unwrap();
+    assert!(start.status.success());
+
+    let launch = Command::new(env!("CARGO_BIN_EXE_contynu"))
+        .env("PATH", &combined_path)
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("--cwd")
+        .arg(dir.path())
+        .arg("codex")
+        .output()
+        .unwrap();
+    assert!(
+        launch.status.success(),
+        "configured codex launcher failed: {}",
+        String::from_utf8_lossy(&launch.stderr)
+    );
+    let captured = fs::read_to_string(&capture_path).unwrap();
+    assert!(captured.contains("arg1:--context-file"));
+    assert!(captured.contains("arg2:"));
+    assert!(captured.contains("rehydration.txt"));
+    assert!(captured.contains("env:"));
+    assert!(captured.contains("rehydration.json"));
+    assert!(captured.contains("profile:custom"));
+    assert!(!captured.contains("CONTYNU REHYDRATION CONTEXT"));
 }
 
 #[test]
