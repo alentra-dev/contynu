@@ -24,7 +24,7 @@ struct Cli {
     new: bool,
 
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -154,49 +154,65 @@ enum ConfigCommand {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let state = StatePaths::new(&cli.state_dir);
-    maybe_reset_state_for_new(&state, &cli.command, cli.new)?;
+    maybe_reset_state_for_new(&state, cli.command.as_ref(), cli.new)?;
 
     match cli.command {
-        Command::Init => init(&state),
-        Command::Run(command) => run(&state, &cli.cwd, command),
-        Command::Codex(command) => launch_llm(&state, &cli.cwd, "codex", command),
-        Command::Claude(command) => launch_llm(&state, &cli.cwd, "claude", command),
-        Command::Gemini(command) => launch_llm(&state, &cli.cwd, "gemini", command),
-        Command::Status { project } => status(&state, project.as_deref()),
-        Command::Projects => projects(&state),
-        Command::Recent { limit } => recent(&state, limit),
-        Command::Config { command } => config_command(&state, command),
-        Command::StartProject => start_project(&state, &cli.cwd),
-        Command::Checkpoint { project, reason } => checkpoint(&state, project.as_deref(), &reason),
-        Command::Resume { project } => resume(&state, project.as_deref(), None),
-        Command::Handoff {
+        Some(Command::Init) => init(&state),
+        Some(Command::Run(command)) => run(&state, &cli.cwd, command),
+        Some(Command::Codex(command)) => launch_llm(&state, &cli.cwd, "codex", command),
+        Some(Command::Claude(command)) => launch_llm(&state, &cli.cwd, "claude", command),
+        Some(Command::Gemini(command)) => launch_llm(&state, &cli.cwd, "gemini", command),
+        Some(Command::Status { project }) => status(&state, project.as_deref()),
+        Some(Command::Projects) => projects(&state),
+        Some(Command::Recent { limit }) => recent(&state, limit),
+        Some(Command::Config { command }) => config_command(&state, command),
+        Some(Command::StartProject) => start_project(&state, &cli.cwd),
+        Some(Command::Checkpoint { project, reason }) => {
+            checkpoint(&state, project.as_deref(), &reason)
+        }
+        Some(Command::Resume { project }) => resume(&state, project.as_deref(), None),
+        Some(Command::Handoff {
             project,
             target_model,
-        } => resume(&state, project.as_deref(), Some(target_model)),
-        Command::Replay { project } => replay(&state, project.as_deref()),
-        Command::Inspect { command } => inspect(&state, command),
-        Command::Search { command } => search(&state, command),
-        Command::Artifacts { command } => artifacts(&state, command),
-        Command::Doctor => doctor(&state),
-        Command::Repair { project } => repair(&state, project.as_deref()),
-        Command::External(command) => passthrough(&state, &cli.cwd, command),
+        }) => resume(&state, project.as_deref(), Some(target_model)),
+        Some(Command::Replay { project }) => replay(&state, project.as_deref()),
+        Some(Command::Inspect { command }) => inspect(&state, command),
+        Some(Command::Search { command }) => search(&state, command),
+        Some(Command::Artifacts { command }) => artifacts(&state, command),
+        Some(Command::Doctor) => doctor(&state),
+        Some(Command::Repair { project }) => repair(&state, project.as_deref()),
+        Some(Command::External(command)) => passthrough(&state, &cli.cwd, command),
+        None if cli.new => {
+            println!("Started fresh. Launch a tool with `contynu codex`, `contynu claude`, `contynu gemini`, or `contynu <command...>`.");
+            Ok(())
+        }
+        None => Err(anyhow!(
+            "a command is required; run `contynu --help` for available subcommands"
+        )),
     }
 }
 
-fn maybe_reset_state_for_new(state: &StatePaths, command: &Command, reset: bool) -> Result<()> {
+fn maybe_reset_state_for_new(
+    state: &StatePaths,
+    command: Option<&Command>,
+    reset: bool,
+) -> Result<()> {
     if !reset {
         return Ok(());
     }
 
-    if !matches!(
-        command,
-        Command::Run(_)
-            | Command::Codex(_)
-            | Command::Claude(_)
-            | Command::Gemini(_)
-            | Command::StartProject
-            | Command::External(_)
-    ) {
+    if let Some(command) = command.filter(|command| {
+        !matches!(
+            command,
+            Command::Run(_)
+                | Command::Codex(_)
+                | Command::Claude(_)
+                | Command::Gemini(_)
+                | Command::StartProject
+                | Command::External(_)
+        )
+    }) {
+        let _ = command;
         return Err(anyhow!(
             "`--new` is only supported when starting a new run or launcher session"
         ));
