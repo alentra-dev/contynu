@@ -23,14 +23,16 @@ SQLite is treated as derived structured state. If SQLite is incomplete or stale 
 2. replay canonical events
 3. upsert indexed rows back into SQLite
 
-The `contynu repair --session <id>` command performs this recovery path.
+The `contynu repair --project <id>` command performs this recovery path. If no project is given, Contynu repairs the primary project.
 
 ## Streaming Runtime Durability
 
-For wrapped command execution, stdout and stderr are persisted as the process runs rather than only after exit. This reduces the amount of volatile work that can be lost if the runtime itself crashes mid-command.
+For wrapped command execution, Contynu persists captured stream output as the process runs rather than only after exit. This reduces the amount of volatile work that can be lost if the runtime itself crashes mid-command.
+
+For PTY-backed launchers, the merged PTY stream is captured incrementally through the same canonical event path.
 
 ## Current Limitations
 
 - Mid-file corruption is surfaced as an error rather than silently repaired.
 - Recovery events are not yet emitted automatically as separate canonical records.
-- Runtime interruption handling is best-effort and currently centered on subprocess termination plus canonical process exit recording.
+- PTY interruption handling is improved but still not a complete process-group choreography layer for every edge case.

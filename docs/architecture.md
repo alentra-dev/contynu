@@ -16,8 +16,8 @@ This document defines the production architecture for Contynu. It is intentional
 2. **Model agnostic by default**
    Contynu must not depend on any one vendor’s session semantics.
 
-3. **Exact recall plus intelligent recall**
-   The system must support both exact transcript replay and higher-level semantic retrieval.
+3. **Exact recall plus structured recall**
+   The system must support exact replay and higher-level structured memory. Semantic retrieval is an optional later layer, not the source of truth.
 
 4. **Local-first trust model**
    The canonical state must be able to live entirely on the user’s machine.
@@ -44,13 +44,13 @@ Contynu has five core subsystems:
    Stores the immutable append-only journal of all session events.
 
 3. **Derived Memory Engine**
-   Builds structured memory products from the journal: summaries, decisions, constraints, artifacts, open loops, and embeddings.
+   Builds structured memory products from the journal: summaries, decisions, constraints, artifacts, open loops, and file notes.
 
 4. **Rehydration Engine**
    Produces a deterministic state packet for resume, handoff, or model switch.
 
 5. **Adapter Layer**
-   Normalizes integration with different CLIs, agents, and tool ecosystems.
+   Normalizes integration with different CLIs, agents, and tool ecosystems through an explicit launcher config plus normalized runtime events.
 
 ---
 
@@ -66,7 +66,7 @@ User ↔ Contynu Runtime Wrapper ↔ Target LLM CLI / Agent
                 └── Rehydration Packet Generator
 ```
 
-The Contynu runtime sits between the user and the target LLM environment. It records the interaction stream, file/artifact changes, and relevant execution metadata into durable local storage.
+The Contynu runtime sits between the user and the target LLM environment. It records the interaction stream, file/artifact changes, execution metadata, and rehydration context into durable local storage.
 
 ---
 
@@ -140,8 +140,8 @@ Blobs are keyed by cryptographic digest.
 
 ## Data Model
 
-### Session
-Represents a single continuous execution instance.
+### Session / Project
+Represents the single continuous project memory timeline.
 
 Fields:
 - `session_id`
@@ -157,7 +157,7 @@ Fields:
 - `host_fingerprint`
 
 ### Turn
-Represents one user-driven interaction unit.
+Represents one command or interaction slice inside the long-lived project timeline.
 
 Fields:
 - `turn_id`
@@ -215,21 +215,21 @@ The runtime is responsible for capturing and normalizing inputs from heterogeneo
 
 ### Capture Sources
 1. Standard input/output stream capture
-2. Pseudo-terminal interception for interactive CLIs
+2. In-process pseudo-terminal capture for interactive CLIs on Unix
 3. Tool invocation capture where available
-4. File watch and diff capture inside the working directory
+4. File scan and diff capture inside the working directory
 5. Attachment and artifact capture
-6. Environment metadata capture
+6. Environment and launcher metadata capture
 
 ### Design Requirement
 The runtime must not block the target CLI unnecessarily. The hot path should:
 1. normalize the event
-2. enqueue it
-3. durably append it
-4. acknowledge completion
+2. durably append it
+3. index it into SQLite
+4. keep expensive enrichment off the append path
 
 ### Performance Goal
-The persistence path must be optimized for small deterministic writes. Expensive enrichment should happen asynchronously after the event is durably recorded.
+The persistence path must be optimized for small deterministic writes. Expensive enrichment belongs after the event is durably recorded.
 
 ---
 

@@ -4,6 +4,7 @@
 
 - Rust toolchain with `cargo`, `rustfmt`, and standard test tooling
 - a local filesystem where `.contynu/` state can be created
+- Unix-like environment for the current in-process PTY implementation
 
 ## Core Commands
 
@@ -12,9 +13,21 @@ cargo fmt
 cargo test
 ```
 
+## Useful Local Flows
+
+```bash
+contynu init
+contynu config validate
+contynu status
+contynu codex
+contynu doctor
+```
+
 ## Development Notes
 
 - the canonical journal is local JSONL and is safe to inspect manually
 - SQLite is derived state and can be repaired from the journal for a session
 - the hot path is intentionally explicit rather than hidden behind async infrastructure
-- native model-specific adapters are not the current implementation focus; preserve normalized canonical events first
+- launcher behavior is primarily controlled through `.contynu/config.json`
+- known launchers currently hydrate through workspace context files and runtime materialized packet files
+- the PTY runtime is implemented in-process on Unix; pipe transport remains the fallback path
