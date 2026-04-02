@@ -97,7 +97,16 @@ fn streamlined_launcher_reuses_primary_project() {
     let bin_dir = dir.path().join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
     let codex_path = bin_dir.join("codex");
-    fs::write(&codex_path, "#!/bin/sh\nprintf mocked-codex\n").unwrap();
+    let capture_path = dir.path().join("codex-capture.txt");
+    fs::write(
+        &codex_path,
+        format!(
+            "#!/bin/sh\nprintf \"env:%s\\n\" \"$CONTYNU_REHYDRATION_PACKET_FILE\" > \"{}\"\ncat >> \"{}\"\nprintf mocked-codex\n",
+            capture_path.display(),
+            capture_path.display()
+        ),
+    )
+    .unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -135,4 +144,9 @@ fn streamlined_launcher_reuses_primary_project() {
     );
     let stdout = String::from_utf8_lossy(&codex.stdout);
     assert!(stdout.contains(&project_id));
+    let captured = fs::read_to_string(&capture_path).unwrap();
+    assert!(captured.contains("env:"));
+    assert!(captured.contains("rehydration.json"));
+    assert!(captured.contains("CONTYNU REHYDRATION CONTEXT"));
+    assert!(captured.contains(&project_id));
 }

@@ -42,6 +42,7 @@ contynu gemini
 ```
 
 Known LLM launcher commands automatically attach to the current project memory and use the same durable capture path as `run`.
+When a known LLM launcher is continuing an existing project, Contynu now materializes a rehydration packet and passes it into the launched process through both environment variables and a stdin startup prelude.
 
 ### Initialize state
 

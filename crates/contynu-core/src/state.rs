@@ -41,6 +41,10 @@ impl StatePaths {
         self.root.join("blobs")
     }
 
+    pub fn runtime_root(&self) -> PathBuf {
+        self.root.join("runtime")
+    }
+
     pub fn checkpoints_root(&self) -> PathBuf {
         self.root.join("checkpoints")
     }
@@ -65,5 +69,9 @@ impl StatePaths {
         checkpoint_id: &CheckpointId,
     ) -> PathBuf {
         self.checkpoint_dir(project_id, checkpoint_id)
+    }
+
+    pub fn project_runtime_dir(&self, project_id: &ProjectId) -> PathBuf {
+        self.runtime_root().join(project_id.as_str())
     }
 }

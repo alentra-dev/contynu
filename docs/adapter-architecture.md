@@ -14,7 +14,15 @@ Contynu is built around normalized events rather than one provider's native sess
 
 ## Current State
 
-This pass implements the generic terminal wrapper end to end and includes detection/scaffolding for native adapters. Native provider-specific capture is intentionally deferred until the canonical event and storage contracts are stable.
+This pass implements the generic terminal wrapper end to end and includes a first hydration delivery layer for known LLM launchers. Contynu now:
+
+- detects known launcher commands
+- builds a normalized rehydration packet when continuing an existing project
+- materializes packet and prompt files under `.contynu/runtime/<project-id>/`
+- passes those file paths through environment variables
+- sends a startup prelude on stdin
+
+Native provider-specific argument-level integration is still deferred until the canonical event and storage contracts are stable.
 
 ## Extension Path
 

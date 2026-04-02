@@ -4,15 +4,15 @@
 
 ### `contynu codex [-- <args...>]`
 
-Launches `codex` inside Contynu’s runtime using the primary project by default.
+Launches `codex` inside Contynu’s runtime using the primary project by default. When continuing an existing project, Contynu writes the rehydration packet to runtime files, exposes their paths via environment variables, and sends a startup prelude on stdin.
 
 ### `contynu claude [-- <args...>]`
 
-Launches `claude` inside Contynu’s runtime using the primary project by default.
+Launches `claude` inside Contynu’s runtime using the primary project by default, with the same hydration delivery path as `codex`.
 
 ### `contynu gemini [-- <args...>]`
 
-Launches `gemini` inside Contynu’s runtime using the primary project by default.
+Launches `gemini` inside Contynu’s runtime using the primary project by default, with the same hydration delivery path as `codex`.
 
 ### `contynu init`
 
@@ -82,5 +82,6 @@ Repairs a truncated journal tail if needed, then reconciles journal state back i
 - Contynu now models one continuous project memory per state directory by default.
 - Raw project IDs remain available for exact scripting and advanced targeting.
 - Known LLM launchers now have dedicated top-level commands so users do not need to remember `run -- <tool>`.
+- Known LLM launchers receive continuity context via `CONTYNU_REHYDRATION_PACKET_FILE`, `CONTYNU_REHYDRATION_PROMPT_FILE`, and a startup stdin prelude when Contynu is continuing an existing project.
 - `contynu run` uses a generic subprocess wrapper with real-time pipe capture rather than full PTY emulation.
 - The adapter layer is model-agnostic and ready for native adapters, but only generic terminal wrapping is fully implemented in this pass.

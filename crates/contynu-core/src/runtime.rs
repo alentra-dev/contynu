@@ -1,5 +1,5 @@
 use std::ffi::OsString;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -13,7 +13,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::adapters::AdapterKind;
+use crate::adapters::{AdapterKind, HydrationContext};
 use crate::blobs::BlobStore;
 use crate::checkpoint::CheckpointManager;
 use crate::error::{ContynuError, Result};
@@ -130,6 +130,20 @@ impl RuntimeEngine {
                 }),
             ),
         )?;
+
+        let hydration = if adapter.should_hydrate() && continuing_session {
+            Some(Self::prepare_hydration(
+                &state,
+                &store,
+                &blob_store,
+                &journal,
+                &session_id,
+                &turn_id,
+                adapter,
+            )?)
+        } else {
+            None
+        };
         Self::persist(
             &journal,
             &store,
@@ -175,16 +189,34 @@ impl RuntimeEngine {
             ),
         )?;
 
-        let mut command = Command::new(&config.command[0]);
-        command.args(&config.command[1..]);
+        let launch_plan = adapter.build_launch_plan(
+            config.command[0].clone(),
+            config.command[1..].to_vec(),
+            hydration.as_ref(),
+        )?;
+
+        let mut command = Command::new(&launch_plan.executable);
+        command.args(&launch_plan.args);
         command.current_dir(&config.cwd);
-        command.stdin(Stdio::null());
+        if launch_plan.stdin_prelude.is_some() {
+            command.stdin(Stdio::piped());
+        } else {
+            command.stdin(Stdio::null());
+        }
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
+        command.envs(launch_plan.env.iter().map(|(key, value)| (key, value)));
 
         let mut child = command
             .spawn()
             .map_err(|error| ContynuError::CommandStart(error.to_string()))?;
+
+        if let Some(stdin_prelude) = launch_plan.stdin_prelude {
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(&stdin_prelude)?;
+                stdin.flush()?;
+            }
+        }
 
         let stdout = child
             .stdout
@@ -474,6 +506,57 @@ impl RuntimeEngine {
         }
 
         Ok(())
+    }
+
+    fn prepare_hydration(
+        state: &StatePaths,
+        store: &MetadataStore,
+        blob_store: &BlobStore,
+        journal: &Journal,
+        project_id: &ProjectId,
+        turn_id: &TurnId,
+        adapter: AdapterKind,
+    ) -> Result<HydrationContext> {
+        let manager = CheckpointManager::new(state, store, blob_store);
+        let packet = manager.build_packet(project_id, None)?;
+        let runtime_dir = state.project_runtime_dir(project_id);
+        std::fs::create_dir_all(&runtime_dir)?;
+        let packet_path = runtime_dir.join("rehydration.json");
+        let prompt_path = runtime_dir.join("rehydration.txt");
+        let packet_json = serde_json::to_string_pretty(&packet)?;
+        let prompt = format!(
+            "Project continuity context for {}.\nUse the JSON packet as authoritative state.\n{}",
+            adapter.as_str(),
+            packet_json
+        );
+        std::fs::write(&packet_path, &packet_json)?;
+        std::fs::write(&prompt_path, &prompt)?;
+
+        let packet_blob = blob_store.put_text(&packet_json)?;
+        store.register_blob(&packet_blob, Some("application/json"))?;
+        let prompt_blob = blob_store.put_text(&prompt)?;
+        store.register_blob(&prompt_blob, Some("text/plain"))?;
+        let (event, append) = journal.append(EventDraft::new(
+            project_id.clone(),
+            Some(turn_id.clone()),
+            Actor::System,
+            EventType::RehydrationPacketCreated,
+            json!({
+                "adapter_kind": adapter.as_str(),
+                "packet_sha256": packet_blob.sha256,
+                "prompt_sha256": prompt_blob.sha256,
+                "packet_path": packet_path.display().to_string(),
+                "prompt_path": prompt_path.display().to_string(),
+            }),
+        ))?;
+        store.record_event(&event, &journal.path().display().to_string(), append)?;
+
+        Ok(HydrationContext {
+            project_id: project_id.clone(),
+            packet,
+            packet_path,
+            prompt_path,
+        })
     }
 }
 
