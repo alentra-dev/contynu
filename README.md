@@ -33,6 +33,16 @@ The implementation in this repository is intentionally explicit and inspectable.
 
 ## CLI
 
+### Streamlined LLM launch
+
+```bash
+contynu codex
+contynu claude
+contynu gemini
+```
+
+Known LLM launcher commands automatically attach to the current project memory and use the same durable capture path as `run`.
+
 ### Initialize state
 
 ```bash

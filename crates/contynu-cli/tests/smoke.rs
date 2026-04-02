@@ -1,4 +1,5 @@
 use std::process::Command;
+use std::{env, fs};
 
 use tempfile::tempdir;
 
@@ -87,4 +88,51 @@ fn project_is_created_and_reused_by_default() {
     );
     let inspect_stdout = String::from_utf8_lossy(&inspect.stdout);
     assert!(inspect_stdout.contains("session_resumed"));
+}
+
+#[test]
+fn streamlined_launcher_reuses_primary_project() {
+    let dir = tempdir().unwrap();
+    let state_dir = dir.path().join(".contynu");
+    let bin_dir = dir.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let codex_path = bin_dir.join("codex");
+    fs::write(&codex_path, "#!/bin/sh\nprintf mocked-codex\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&codex_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&codex_path, perms).unwrap();
+    }
+    let path = env::var("PATH").unwrap_or_default();
+    let combined_path = format!("{}:{}", bin_dir.display(), path);
+
+    let start = Command::new(env!("CARGO_BIN_EXE_contynu"))
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("start-project")
+        .output()
+        .unwrap();
+    assert!(start.status.success());
+    let project_id = String::from_utf8_lossy(&start.stdout).trim().to_string();
+
+    let codex = Command::new(env!("CARGO_BIN_EXE_contynu"))
+        .env("PATH", &combined_path)
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("--cwd")
+        .arg(dir.path())
+        .arg("codex")
+        .arg("--")
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(
+        codex.status.success(),
+        "launcher execution failed: {}",
+        String::from_utf8_lossy(&codex.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&codex.stdout);
+    assert!(stdout.contains(&project_id));
 }

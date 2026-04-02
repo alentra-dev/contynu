@@ -26,6 +26,9 @@ struct Cli {
 enum Command {
     Init,
     Run(RunCommand),
+    Codex(LlmCommand),
+    Claude(LlmCommand),
+    Gemini(LlmCommand),
     #[command(name = "start-project", visible_alias = "start-session")]
     StartProject,
     Checkpoint {
@@ -82,6 +85,21 @@ struct RunCommand {
     command: Vec<String>,
 }
 
+#[derive(Debug, Args)]
+struct LlmCommand {
+    #[arg(long, alias = "session")]
+    project: Option<String>,
+
+    #[arg(long)]
+    no_checkpoint: bool,
+
+    #[arg(long = "ignore")]
+    ignore_patterns: Vec<String>,
+
+    #[arg(trailing_var_arg = true)]
+    args: Vec<String>,
+}
+
 #[derive(Debug, Subcommand)]
 enum InspectCommand {
     #[command(name = "project", visible_alias = "session")]
@@ -114,6 +132,9 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Init => init(&state),
         Command::Run(command) => run(&state, &cli.cwd, command),
+        Command::Codex(command) => launch_llm(&state, &cli.cwd, "codex", command),
+        Command::Claude(command) => launch_llm(&state, &cli.cwd, "claude", command),
+        Command::Gemini(command) => launch_llm(&state, &cli.cwd, "gemini", command),
         Command::StartProject => start_project(&state, &cli.cwd),
         Command::Checkpoint { project, reason } => checkpoint(&state, project.as_deref(), &reason),
         Command::Resume { project } => resume(&state, project.as_deref(), None),
@@ -189,6 +210,26 @@ fn run(state: &StatePaths, cwd: &PathBuf, command: RunCommand) -> Result<()> {
         state_dir: state.root().to_path_buf(),
         cwd: cwd.clone(),
         command: command.command.into_iter().map(Into::into).collect(),
+        ignore_patterns: command.ignore_patterns,
+        checkpoint_on_exit: !command.no_checkpoint,
+        project_id: command.project.map(ProjectId::parse).transpose()?,
+    })?;
+    print_json(&outcome)
+}
+
+fn launch_llm(
+    state: &StatePaths,
+    cwd: &PathBuf,
+    executable: &str,
+    command: LlmCommand,
+) -> Result<()> {
+    ensure_state(state)?;
+    let mut argv = vec![executable.to_string()];
+    argv.extend(command.args);
+    let outcome = RuntimeEngine::run(RunConfig {
+        state_dir: state.root().to_path_buf(),
+        cwd: cwd.clone(),
+        command: argv.into_iter().map(Into::into).collect(),
         ignore_patterns: command.ignore_patterns,
         checkpoint_on_exit: !command.no_checkpoint,
         project_id: command.project.map(ProjectId::parse).transpose()?,

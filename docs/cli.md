@@ -2,6 +2,18 @@
 
 ## Commands
 
+### `contynu codex [-- <args...>]`
+
+Launches `codex` inside Contynu’s runtime using the primary project by default.
+
+### `contynu claude [-- <args...>]`
+
+Launches `claude` inside Contynu’s runtime using the primary project by default.
+
+### `contynu gemini [-- <args...>]`
+
+Launches `gemini` inside Contynu’s runtime using the primary project by default.
+
 ### `contynu init`
 
 Creates the local state layout and initializes the SQLite metadata store.
@@ -69,5 +81,6 @@ Repairs a truncated journal tail if needed, then reconciles journal state back i
 
 - Contynu now models one continuous project memory per state directory by default.
 - Raw project IDs remain available for exact scripting and advanced targeting.
+- Known LLM launchers now have dedicated top-level commands so users do not need to remember `run -- <tool>`.
 - `contynu run` uses a generic subprocess wrapper with real-time pipe capture rather than full PTY emulation.
 - The adapter layer is model-agnostic and ready for native adapters, but only generic terminal wrapping is fully implemented in this pass.
