@@ -1,0 +1,100 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target_name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            target_name: linux-x86_64
+            archive_ext: tar.gz
+            bin_name: contynu
+          - runner: macos-latest
+            target: x86_64-apple-darwin
+            target_name: macos-x86_64
+            archive_ext: tar.gz
+            bin_name: contynu
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            target_name: macos-aarch64
+            archive_ext: tar.gz
+            bin_name: contynu
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            target_name: windows-x86_64
+            archive_ext: zip
+            bin_name: contynu.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} -p contynu-cli
+
+      - name: Package archive (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ matrix.bin_name }} dist/
+          tar -czf contynu-${{ matrix.target_name }}.${{ matrix.archive_ext }} -C dist ${{ matrix.bin_name }}
+
+      - name: Package archive (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/${{ matrix.bin_name }} dist/${{ matrix.bin_name }}
+          Compress-Archive -Path dist/${{ matrix.bin_name }} -DestinationPath contynu-${{ matrix.target_name }}.${{ matrix.archive_ext }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: contynu-${{ matrix.target_name }}
+          path: contynu-${{ matrix.target_name }}.${{ matrix.archive_ext }}
+
+  release:
+    name: Publish release
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts
+        shell: bash
+        run: |
+          mkdir -p release
+          find artifacts -type f -maxdepth 2 -exec cp {} release/ \;
+          cp scripts/install.sh release/install.sh
+          cp scripts/install.ps1 release/install.ps1
+          cd release
+          sha256sum * > checksums.txt
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*

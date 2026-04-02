@@ -23,6 +23,16 @@ contynu codex
 contynu doctor
 ```
 
+## Build and Release
+
+```bash
+cargo build --release -p contynu-cli
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Tagged releases publish prebuilt binaries and the user-facing installer scripts through the GitHub Actions release workflow.
+
 ## Development Notes
 
 - the canonical journal is local JSONL and is safe to inspect manually

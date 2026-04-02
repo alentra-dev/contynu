@@ -4,6 +4,43 @@ Contynu is a model-agnostic persistent memory layer for LLM workflows.
 
 It captures prompts, responses, tool activity, artifacts, file changes, and execution metadata into a durable local continuity layer so work can resume cleanly across crashes, restarts, and model handoffs.
 
+## Install
+
+### macOS and Linux
+
+```bash
+curl -fsSL https://github.com/alentra-dev/contynu/releases/latest/download/install.sh | sh
+```
+
+### Windows PowerShell
+
+```powershell
+irm https://github.com/alentra-dev/contynu/releases/latest/download/install.ps1 | iex
+```
+
+The release installers download a prebuilt `contynu` binary from GitHub Releases and install it into a user-local bin directory.
+
+- macOS/Linux default install dir: `~/.local/bin`
+- Windows default install dir: `%USERPROFILE%\AppData\Local\Programs\Contynu\bin`
+
+You can override the target directory or version with environment variables:
+
+```bash
+CONTYNU_INSTALL_DIR="$HOME/bin" CONTYNU_VERSION="v0.1.0" sh ./scripts/install.sh
+```
+
+```powershell
+$env:CONTYNU_INSTALL_DIR="$HOME\bin"
+$env:CONTYNU_VERSION="v0.1.0"
+.\scripts\install.ps1
+```
+
+Source installs are still available for developers:
+
+```bash
+cargo install --path crates/contynu-cli
+```
+
 ## Current Architecture
 
 - Canonical truth: append-only JSONL journal
@@ -146,6 +183,7 @@ More detailed docs:
 - [`docs/crash-recovery.md`](docs/crash-recovery.md)
 - [`docs/rehydration.md`](docs/rehydration.md)
 - [`docs/handoff-summary.md`](docs/handoff-summary.md)
+- [`docs/release-distribution.md`](docs/release-distribution.md)
 
 ## License
 

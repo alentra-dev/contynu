@@ -36,6 +36,14 @@ Use this checklist before cutting a serious Contynu release.
 
 All should be exercised against a real local state directory before release.
 
+## Distribution
+
+- GitHub release workflow succeeds for all supported targets
+- release artifacts include installers and checksums
+- `scripts/install.sh` installs correctly on Linux and macOS
+- `scripts/install.ps1` installs correctly on Windows
+- README install instructions match the published release assets
+
 ## Documentation
 
 - README reflects actual behavior
