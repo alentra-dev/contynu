@@ -795,7 +795,6 @@ impl RuntimeEngine {
         command.arg(&stdout_log);
         command.arg("--command");
         command.arg(command_text);
-        command.arg("/dev/null");
 
         let child = command
             .spawn()
