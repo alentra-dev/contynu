@@ -19,14 +19,13 @@ use crate::checkpoint::CheckpointManager;
 use crate::config::ContynuConfig;
 use crate::error::{ContynuError, Result};
 use crate::event::{Actor, EventDraft, EventType};
-use crate::files::{FileChange, FileChangeKind, FileRole, FileTracker};
-use crate::ids::{ArtifactId, FileId, MemoryId, ProjectId, SessionId, TurnId};
+use crate::ids::{ArtifactId, MemoryId, ProjectId, SessionId, TurnId};
 use crate::journal::Journal;
 use crate::pty::PtyChild;
 use crate::state::StatePaths;
 use crate::store::{
-    ArtifactRecord, EventRecord, FileRecord, MemoryObject, MemoryObjectKind, MetadataStore,
-    SessionRecord, TurnRecord,
+    ArtifactRecord, EventRecord, MemoryObject, MemoryObjectKind, MetadataStore, SessionRecord,
+    TurnRecord,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,9 +147,6 @@ impl RuntimeEngine {
         let journal = Journal::open(state.journal_path_for_session(&session_id))?;
         let adapter = AdapterSpec::detect(&config.command[0].to_string_lossy(), &config_file);
         let transport = resolve_transport(&adapter);
-        let tracker = FileTracker::new(&config.cwd, &config.ignore_patterns)?;
-        let before = tracker.snapshot()?;
-
         if continuing_session {
             store.update_session_status(&session_id, "active", None)?;
         } else {
@@ -316,122 +312,6 @@ impl RuntimeEngine {
             ),
         )?;
 
-        let after = tracker.snapshot()?;
-        let changes = tracker.diff(&before, &after);
-        let mut change_event_ids = Vec::new();
-        for change in &changes {
-            let snapshot_event_type = match change.kind {
-                FileChangeKind::Added | FileChangeKind::Modified => EventType::FileSnapshot,
-                FileChangeKind::Deleted => EventType::FileDeleted,
-            };
-            let payload = json!({
-                "path": change.path,
-                "role": change.role.as_str(),
-                "kind": match change.kind {
-                    FileChangeKind::Added => "added",
-                    FileChangeKind::Modified => "modified",
-                    FileChangeKind::Deleted => "deleted",
-                },
-                "before_sha256": change.before_sha256,
-                "after_sha256": change.after_sha256,
-                "diff": change.diff,
-            });
-            let (event, append) = journal.append(EventDraft::new(
-                session_id.clone(),
-                Some(turn_id.clone()),
-                Actor::Filesystem,
-                snapshot_event_type,
-                payload,
-            ))?;
-            store.record_event(&event, &journal.path().display().to_string(), append)?;
-            change_event_ids.push(event.event_id.clone());
-
-            let mut diff_event_id = None;
-            if let Some(diff) = &change.diff {
-                let (diff_event, diff_append) = journal.append(EventDraft::new(
-                    session_id.clone(),
-                    Some(turn_id.clone()),
-                    Actor::Filesystem,
-                    EventType::FileDiff,
-                    json!({
-                        "path": change.path,
-                        "role": change.role.as_str(),
-                        "diff": diff,
-                    }),
-                ))?;
-                store.record_event(
-                    &diff_event,
-                    &journal.path().display().to_string(),
-                    diff_append,
-                )?;
-                change_event_ids.push(diff_event.event_id.clone());
-                diff_event_id = Some(diff_event.event_id.clone());
-            }
-
-            if let Some(snapshot) = &change.snapshot {
-                let bytes = std::fs::read(&snapshot.absolute_path)?;
-                let blob = blob_store.put_bytes(&bytes)?;
-                store.register_blob(&blob, None)?;
-                store.register_file(&FileRecord {
-                    file_id: FileId::new(),
-                    session_id: session_id.clone(),
-                    workspace_relative_path: snapshot.relative_path.clone(),
-                    kind: format!(
-                        "{}_{}",
-                        snapshot.role.as_str(),
-                        if snapshot.is_text { "text" } else { "binary" }
-                    ),
-                    last_known_sha256: Some(snapshot.sha256.clone()),
-                    last_snapshot_event_id: Some(event.event_id.clone()),
-                    last_diff_event_id: diff_event_id,
-                    observed_at: Utc::now(),
-                    is_generated: snapshot.role != FileRole::Source,
-                })?;
-
-                if snapshot.role != FileRole::Source
-                    || !snapshot.is_text
-                    || snapshot.size_bytes > 128 * 1024
-                {
-                    store.register_artifact(&ArtifactRecord {
-                        artifact_id: ArtifactId::new(),
-                        session_id: session_id.clone(),
-                        source_event_id: event.event_id.clone(),
-                        path: Some(snapshot.relative_path.clone()),
-                        kind: match snapshot.role {
-                            FileRole::Source => "source_snapshot",
-                            FileRole::Generated => "generated_file_output",
-                            FileRole::Artifact => "artifact_output",
-                        }
-                        .into(),
-                        mime_type: None,
-                        sha256: blob.sha256.clone(),
-                        blob_relative_path: blob.relative_path,
-                        size_bytes: blob.size_bytes,
-                        created_at: Utc::now(),
-                    })?;
-                }
-            } else if change.kind == FileChangeKind::Deleted {
-                store.register_file(&FileRecord {
-                    file_id: FileId::new(),
-                    session_id: session_id.clone(),
-                    workspace_relative_path: change.path.clone(),
-                    kind: format!("{}_deleted", change.role.as_str()),
-                    last_known_sha256: None,
-                    last_snapshot_event_id: Some(event.event_id.clone()),
-                    last_diff_event_id: diff_event_id,
-                    observed_at: Utc::now(),
-                    is_generated: change.role != FileRole::Source,
-                })?;
-            }
-        }
-        Self::persist_workspace_scan_summary(
-            &journal,
-            &store,
-            &session_id,
-            &turn_id,
-            &changes,
-            transport,
-        )?;
         Self::derive_memory_objects(
             &journal,
             &store,
@@ -442,8 +322,6 @@ impl RuntimeEngine {
             transport,
             capture.exit_code,
             interrupted.load(Ordering::SeqCst),
-            &changes,
-            &change_event_ids,
         )?;
 
         Self::persist(
@@ -767,45 +645,6 @@ impl RuntimeEngine {
         Ok(())
     }
 
-    fn persist_workspace_scan_summary(
-        journal: &Journal,
-        store: &MetadataStore,
-        session_id: &SessionId,
-        turn_id: &TurnId,
-        changes: &[FileChange],
-        transport: ExecutionTransport,
-    ) -> Result<()> {
-        let source = changes
-            .iter()
-            .filter(|change| change.role == FileRole::Source)
-            .count();
-        let generated = changes
-            .iter()
-            .filter(|change| change.role == FileRole::Generated)
-            .count();
-        let artifacts = changes
-            .iter()
-            .filter(|change| change.role == FileRole::Artifact)
-            .count();
-        Self::persist(
-            journal,
-            store,
-            EventDraft::new(
-                session_id.clone(),
-                Some(turn_id.clone()),
-                Actor::Filesystem,
-                EventType::WorkspaceScanCompleted,
-                json!({
-                    "transport": transport.as_str(),
-                    "changed_files": changes.len(),
-                    "source_changes": source,
-                    "generated_changes": generated,
-                    "artifact_changes": artifacts,
-                }),
-            ),
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn derive_memory_objects(
         journal: &Journal,
@@ -817,29 +656,23 @@ impl RuntimeEngine {
         transport: ExecutionTransport,
         exit_code: Option<i32>,
         interrupted: bool,
-        changes: &[FileChange],
-        change_event_ids: &[crate::ids::EventId],
     ) -> Result<()> {
         let source_events = store.list_events_for_turn(session_id, turn_id)?;
-        let mut source_event_ids = source_events
+        let source_event_ids = source_events
             .iter()
             .map(|event| event.event_id.clone())
             .collect::<Vec<_>>();
-        source_event_ids.extend(change_event_ids.iter().cloned());
-        source_event_ids.sort();
-        source_event_ids.dedup();
         let command_text = command
             .iter()
             .map(|item| item.to_string_lossy().into_owned())
             .collect::<Vec<_>>()
             .join(" ");
         let summary = format!(
-            "Last turn used `{}` via `{}` over `{}` and exited with {:?}. Changed {} files.",
+            "Last turn used `{}` via `{}` over `{}` and exited with {:?}.",
             command_text,
             adapter_name,
             transport.as_str(),
             exit_code,
-            changes.len()
         );
         Self::insert_memory_object(
             journal,
@@ -892,24 +725,6 @@ impl RuntimeEngine {
                     command_text, exit_code
                 ),
                 Some(0.85),
-                false,
-                source_event_ids.clone(),
-            )?;
-        }
-        for change in changes {
-            let note = match change.role {
-                FileRole::Source => format!("Changed source file {}.", change.path),
-                FileRole::Generated => format!("Produced generated file {}.", change.path),
-                FileRole::Artifact => format!("Produced artifact file {}.", change.path),
-            };
-            Self::insert_memory_object(
-                journal,
-                store,
-                session_id,
-                turn_id,
-                MemoryObjectKind::FileNote,
-                note,
-                Some(0.7),
                 false,
                 source_event_ids.clone(),
             )?;
@@ -1339,9 +1154,6 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| event.event_type == "stderr_captured"));
-        assert!(events
-            .iter()
-            .any(|event| event.event_type == "workspace_scan_completed"));
         assert!(workspace.join("output.txt").exists());
 
         let memory = store
@@ -1350,9 +1162,6 @@ mod tests {
         assert!(memory
             .iter()
             .any(|item| item.kind == MemoryObjectKind::Summary));
-        assert!(memory
-            .iter()
-            .any(|item| item.kind == MemoryObjectKind::FileNote));
         assert!(memory.iter().all(|item| !item.source_event_ids.is_empty()));
 
         let turn_events = store

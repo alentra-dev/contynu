@@ -28,7 +28,7 @@ This also writes `.contynu/config.json` when it does not already exist, pre-popu
 
 ### `contynu run -- <command...>`
 
-Continues the primary project by default, wraps the external command, captures process lifecycle plus stdout/stderr, diffs workspace files before and after execution, records artifacts for large or binary outputs, and creates a checkpoint by default.
+Continues the primary project by default, wraps the external command, captures process lifecycle plus stdout/stderr, records stream artifacts, and creates a checkpoint by default.
 
 This remains available as the explicit form of the generic wrapper when users want a more self-documenting command.
 
@@ -40,8 +40,7 @@ Runtime behavior in this pass:
 - configured LLM launchers can use PTY transport when `use_pty` is enabled and `script` is available
 - configured LLM launchers can use Contynu's built-in PTY transport when `use_pty` is enabled
 - configured launchers can install a temporary provider-native workspace context file when `context_file` is set
-- workspace files are diffed before and after the run, classified as source/generated/artifact outputs, and recorded as canonical file events
-- lightweight memory objects are derived after each turn for summary, facts, todos, and file notes
+- lightweight memory objects are derived after each turn for summary, facts, constraints, decisions, and todos
 
 ### `contynu start-project`
 

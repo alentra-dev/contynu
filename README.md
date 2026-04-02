@@ -2,7 +2,7 @@
 
 Contynu is a model-agnostic persistent memory layer for LLM workflows.
 
-It captures prompts, responses, tool activity, artifacts, file changes, and execution metadata into a durable local continuity layer so work can resume cleanly across crashes, restarts, and model handoffs.
+It captures prompts, responses, tool activity, command output, artifacts, and execution metadata into a durable local continuity layer so work can resume cleanly across crashes, restarts, and model handoffs.
 
 ## Install
 
@@ -126,7 +126,7 @@ contynu init
 contynu run -- cargo test
 ```
 
-`contynu run` is still available as the explicit generic wrapper form. It captures streams incrementally while the process is running, durably appends them to the journal in real time, classifies changed files as source/generated/artifact outputs, and derives lightweight structured memory after each turn.
+`contynu run` is still available as the explicit generic wrapper form. It captures streams incrementally while the process is running, durably appends them to the journal in real time, and derives lightweight structured memory after each turn.
 
 ### Create or inspect recovery state
 

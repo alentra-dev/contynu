@@ -8,7 +8,7 @@
 - content-addressed blob store with deduplication and integrity verification
 - checkpoint manager with manifest and rehydration packet generation
 - config-authoritative launcher layer seeded with known LLM entries
-- runtime wrapper with adapter detection, PTY-or-pipe transport selection, provider-native workspace context injection, real-time stream capture, file classification, and post-turn memory derivation
+- runtime wrapper with adapter detection, PTY-or-pipe transport selection, provider-native workspace context injection, real-time stream capture, and post-turn memory derivation
 - one primary continuous project memory per state directory by default
 
 ## Commands Available
@@ -49,6 +49,5 @@
 
 1. replace the `script`-based PTY path with a first-class PTY implementation and stronger stdin/signal choreography
 2. add native adapter event mapping for Codex, Claude-style, and Gemini-style tools
-3. deepen file tracking with better mime typing and artifact/source policy controls
-4. evolve memory derivation from heuristics into richer deterministic extraction and supersession policies
-5. add more integration coverage around resume/handoff workflows and repair semantics
+3. evolve memory derivation from heuristics into richer deterministic extraction and supersession policies
+4. add more integration coverage around resume/handoff workflows and repair semantics

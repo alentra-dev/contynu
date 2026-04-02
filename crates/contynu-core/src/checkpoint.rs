@@ -165,14 +165,7 @@ impl<'a> CheckpointManager<'a> {
         let constraints = memory_texts(&memory, MemoryObjectKind::Constraint);
         let decisions = memory_texts(&memory, MemoryObjectKind::Decision);
         let open_loops = memory_texts(&memory, MemoryObjectKind::Todo);
-        let relevant_files = self
-            .store
-            .list_current_files(session_id)?
-            .into_iter()
-            .filter(|file| file.last_known_sha256.is_some())
-            .map(|file| file.workspace_relative_path)
-            .take(10)
-            .collect::<Vec<_>>();
+        let relevant_files = Vec::new();
         let recent_verbatim_context = events
             .iter()
             .rev()
