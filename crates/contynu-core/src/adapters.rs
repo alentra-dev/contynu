@@ -155,8 +155,8 @@ impl AdapterSpec {
             name: name.into(),
             should_hydrate,
             use_pty: should_hydrate,
-            hydration_delivery: HydrationDelivery::EnvAndStdin,
-            hydration_args: Vec::new(),
+            hydration_delivery: HydrationDelivery::EnvOnly,
+            hydration_args: builtin_hydration_args(kind),
             extra_env: BTreeMap::new(),
         }
     }
@@ -206,8 +206,24 @@ fn expand_arg_template(value: &OsString, hydration: &HydrationContext) -> OsStri
         .replace(
             "{schema_version}",
             &hydration.packet.schema_version.to_string(),
-        );
+        )
+        .replace("{prompt_text}", &hydration.prompt_text);
     OsString::from(expanded)
+}
+
+fn builtin_hydration_args(kind: AdapterKind) -> Vec<OsString> {
+    match kind {
+        AdapterKind::CodexCli => vec![OsString::from("{prompt_text}")],
+        AdapterKind::ClaudeCli => vec![
+            OsString::from("--append-system-prompt"),
+            OsString::from("{prompt_text}"),
+        ],
+        AdapterKind::GeminiCli => vec![
+            OsString::from("--prompt-interactive"),
+            OsString::from("{prompt_text}"),
+        ],
+        AdapterKind::Terminal | AdapterKind::ConfiguredLlm => Vec::new(),
+    }
 }
 
 fn render_stdin_prelude(adapter_name: &str, packet: &RehydrationPacket) -> String {

@@ -119,8 +119,8 @@ fn builtin_launchers() -> Vec<ConfiguredLlmLauncher> {
             aliases: vec!["codex-cli".into()],
             hydrate: true,
             use_pty: true,
-            hydration_delivery: HydrationDelivery::EnvAndStdin,
-            hydration_args: Vec::new(),
+            hydration_delivery: HydrationDelivery::EnvOnly,
+            hydration_args: vec!["{prompt_text}".into()],
             extra_env: BTreeMap::new(),
         },
         ConfiguredLlmLauncher {
@@ -128,8 +128,8 @@ fn builtin_launchers() -> Vec<ConfiguredLlmLauncher> {
             aliases: vec!["claude-code".into()],
             hydrate: true,
             use_pty: true,
-            hydration_delivery: HydrationDelivery::EnvAndStdin,
-            hydration_args: Vec::new(),
+            hydration_delivery: HydrationDelivery::EnvOnly,
+            hydration_args: vec!["--append-system-prompt".into(), "{prompt_text}".into()],
             extra_env: BTreeMap::new(),
         },
         ConfiguredLlmLauncher {
@@ -137,8 +137,8 @@ fn builtin_launchers() -> Vec<ConfiguredLlmLauncher> {
             aliases: vec!["gemini-cli".into()],
             hydrate: true,
             use_pty: true,
-            hydration_delivery: HydrationDelivery::EnvAndStdin,
-            hydration_args: Vec::new(),
+            hydration_delivery: HydrationDelivery::EnvOnly,
+            hydration_args: vec!["--prompt-interactive".into(), "{prompt_text}".into()],
             extra_env: BTreeMap::new(),
         },
     ]
@@ -227,21 +227,21 @@ mod tests {
                 .find_llm_launcher("codex")
                 .unwrap()
                 .hydration_delivery,
-            HydrationDelivery::EnvAndStdin
+            HydrationDelivery::EnvOnly
         );
         assert_eq!(
             config
                 .find_llm_launcher("claude")
                 .unwrap()
                 .hydration_delivery,
-            HydrationDelivery::EnvAndStdin
+            HydrationDelivery::EnvOnly
         );
         assert_eq!(
             config
                 .find_llm_launcher("gemini")
                 .unwrap()
                 .hydration_delivery,
-            HydrationDelivery::EnvAndStdin
+            HydrationDelivery::EnvOnly
         );
     }
 
