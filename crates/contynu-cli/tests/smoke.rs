@@ -150,3 +150,31 @@ fn streamlined_launcher_reuses_primary_project() {
     assert!(captured.contains("CONTYNU REHYDRATION CONTEXT"));
     assert!(captured.contains(&project_id));
 }
+
+#[test]
+fn direct_passthrough_launches_regular_commands() {
+    let dir = tempdir().unwrap();
+    let state_dir = dir.path().join(".contynu");
+
+    let command = Command::new(env!("CARGO_BIN_EXE_contynu"))
+        .arg("--state-dir")
+        .arg(&state_dir)
+        .arg("--cwd")
+        .arg(dir.path())
+        .arg("bash")
+        .arg("-lc")
+        .arg("printf direct > direct.txt")
+        .output()
+        .unwrap();
+    assert!(
+        command.status.success(),
+        "direct passthrough failed: {}",
+        String::from_utf8_lossy(&command.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&command.stdout);
+    assert!(stdout.contains("\"project_id\""));
+    assert_eq!(
+        fs::read_to_string(dir.path().join("direct.txt")).unwrap(),
+        "direct"
+    );
+}

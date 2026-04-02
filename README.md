@@ -44,6 +44,15 @@ contynu gemini
 Known LLM launcher commands automatically attach to the current project memory and use the same durable capture path as `run`.
 When a known LLM launcher is continuing an existing project, Contynu now materializes a rehydration packet and passes it into the launched process through both environment variables and a stdin startup prelude.
 
+### Streamlined Generic Launch
+
+```bash
+contynu cargo test
+contynu bash -lc "make build"
+```
+
+Ordinary terminal commands can also be launched directly. Contynu treats them as generic wrapped commands inside the same project continuity stream.
+
 ### Initialize state
 
 ```bash
@@ -56,7 +65,7 @@ contynu init
 contynu run -- cargo test
 ```
 
-`contynu run` now captures stdout/stderr incrementally while the process is running, durably appends stream events to the journal in real time, and registers stream output artifacts in the blob store after exit.
+`contynu run` is still available as the explicit generic wrapper form. It captures stdout/stderr incrementally while the process is running, durably appends stream events to the journal in real time, and registers stream output artifacts in the blob store after exit.
 
 ### Create or inspect recovery state
 

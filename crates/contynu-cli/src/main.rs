@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
@@ -68,6 +69,8 @@ enum Command {
         #[arg(long, alias = "session")]
         project: Option<String>,
     },
+    #[command(external_subcommand)]
+    External(Vec<OsString>),
 }
 
 #[derive(Debug, Args)]
@@ -148,6 +151,7 @@ fn main() -> Result<()> {
         Command::Artifacts { command } => artifacts(&state, command),
         Command::Doctor => doctor(&state),
         Command::Repair { project } => repair(&state, project.as_deref()),
+        Command::External(command) => passthrough(&state, &cli.cwd, command),
     }
 }
 
@@ -233,6 +237,19 @@ fn launch_llm(
         ignore_patterns: command.ignore_patterns,
         checkpoint_on_exit: !command.no_checkpoint,
         project_id: command.project.map(ProjectId::parse).transpose()?,
+    })?;
+    print_json(&outcome)
+}
+
+fn passthrough(state: &StatePaths, cwd: &PathBuf, command: Vec<OsString>) -> Result<()> {
+    ensure_state(state)?;
+    let outcome = RuntimeEngine::run(RunConfig {
+        state_dir: state.root().to_path_buf(),
+        cwd: cwd.clone(),
+        command,
+        ignore_patterns: Vec::new(),
+        checkpoint_on_exit: true,
+        project_id: None,
     })?;
     print_json(&outcome)
 }
