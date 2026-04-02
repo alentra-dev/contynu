@@ -42,7 +42,13 @@ contynu gemini
 ```
 
 Known LLM launcher commands automatically attach to the current project memory and use the same durable capture path as `run`.
-When a known LLM launcher is continuing an existing project, Contynu now materializes a rehydration packet and passes it into the launched process through configurable startup surfaces. The seeded known-launcher config also opts those launchers into PTY transport by default so interactive CLIs can run against a real terminal.
+When a known LLM launcher is continuing an existing project, Contynu now materializes a rehydration packet and injects continuity through the launcher’s configured startup surface. The seeded config uses:
+
+- `AGENTS.md` for `codex`
+- `CLAUDE.md` for `claude`
+- `GEMINI.md` for `gemini`
+
+Those launchers also request PTY transport by default so interactive sessions run against a real terminal.
 
 Unknown future LLM CLIs can be taught to Contynu through `.contynu/config.json`. If a launcher is listed there, the normal direct path like `contynu myllm` will recognize it as hydratable.
 `contynu init` now writes a starter `.contynu/config.json` that already includes `codex`, `claude`, and `gemini`, so those integrations can be adjusted locally as upstream CLIs change.
@@ -57,6 +63,7 @@ Example:
       "aliases": ["futurellm-cli"],
       "hydrate": true,
       "use_pty": true,
+      "context_file": "FUTURELLM.md",
       "hydration_delivery": "env_only",
       "hydration_args": ["--context-file", "{prompt_file}", "--project", "{project_id}"],
       "extra_env": {
@@ -70,6 +77,7 @@ Example:
 `hydration_delivery` supports `env_only`, `stdin_only`, or `env_and_stdin`.
 `hydration_args` lets a configured launcher receive rehydration context through adapter-specific CLI flags using placeholders like `{prompt_file}`, `{packet_file}`, `{project_id}`, and `{schema_version}`.
 `use_pty` lets a launcher request PTY transport when available.
+`context_file` lets a launcher use a provider-native workspace instruction file that Contynu installs for the duration of the run and then restores.
 
 ### Streamlined Generic Launch
 

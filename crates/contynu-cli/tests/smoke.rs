@@ -105,8 +105,7 @@ fn streamlined_launcher_reuses_primary_project() {
     fs::write(
         &codex_path,
         format!(
-            "#!/bin/sh\nprintf \"env:%s\\n\" \"$CONTYNU_REHYDRATION_PACKET_FILE\" > \"{}\"\ncat >> \"{}\"\nprintf mocked-codex\n",
-            capture_path.display(),
+            "#!/bin/sh\nprintf \"env:%s|ctx:%s\\n\" \"$CONTYNU_REHYDRATION_PACKET_FILE\" \"$(grep -c CONTYNU_BEGIN AGENTS.md 2>/dev/null || true)\" > \"{}\"\ngrep -q CONTYNU_BEGIN AGENTS.md && grep -q CONTYNU_END AGENTS.md && grep -q authoritative AGENTS.md\nprintf mocked-codex\n",
             capture_path.display()
         ),
     )
@@ -151,8 +150,8 @@ fn streamlined_launcher_reuses_primary_project() {
     let captured = fs::read_to_string(&capture_path).unwrap();
     assert!(captured.contains("env:"));
     assert!(captured.contains("rehydration.json"));
-    assert!(captured.contains("CONTYNU REHYDRATION CONTEXT"));
-    assert!(captured.contains(&project_id));
+    assert!(captured.contains("ctx:1"));
+    assert!(!dir.path().join("AGENTS.md").exists());
 }
 
 #[test]

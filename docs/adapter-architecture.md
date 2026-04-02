@@ -19,12 +19,11 @@ This pass implements the generic terminal wrapper end to end and includes a firs
 - detects known launcher commands
 - builds a normalized rehydration packet when continuing an existing project
 - materializes packet and prompt files under `.contynu/runtime/<project-id>/`
+- can install a temporary provider-native workspace context file
 - passes those file paths through environment variables
 - can prepend adapter-specific hydration arguments
 - can send a startup prelude on stdin
 - can switch configured launchers onto PTY transport when requested
-
-Native provider-specific argument-level integration is still deferred until the canonical event and storage contracts are stable.
 
 ## Configurable Launchers
 
@@ -41,6 +40,7 @@ Example:
       "aliases": ["futurellm-cli"],
       "hydrate": true,
       "use_pty": true,
+      "context_file": "FUTURELLM.md",
       "hydration_delivery": "env_only",
       "hydration_args": ["--context-file", "{prompt_file}", "--project", "{project_id}"],
       "extra_env": {
@@ -59,6 +59,7 @@ Configured launchers can choose how rehydration is delivered:
 - `stdin_only`: send the startup prelude on stdin only
 - `env_and_stdin`: do both
 - `use_pty`: run the launcher under PTY transport when available
+- `context_file`: install a temporary workspace instruction file for the launcher during the run and restore the original file afterward
 
 Configured launchers can also define `hydration_args`, which are prepended to the launcher command when hydration is active. Supported placeholders are:
 

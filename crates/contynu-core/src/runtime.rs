@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -87,6 +87,21 @@ struct ProcessCapture {
     status: std::process::ExitStatus,
     stdout_bytes: Vec<u8>,
     stderr_bytes: Vec<u8>,
+}
+
+struct WorkspaceContextGuard {
+    path: PathBuf,
+    original: Option<Vec<u8>>,
+}
+
+impl Drop for WorkspaceContextGuard {
+    fn drop(&mut self) {
+        if let Some(original) = &self.original {
+            let _ = std::fs::write(&self.path, original);
+        } else {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -237,6 +252,21 @@ impl RuntimeEngine {
             config.command[1..].to_vec(),
             hydration.as_ref(),
         )?;
+        let _context_guard = if let (Some(hydration), Some(context_file)) =
+            (hydration.as_ref(), adapter.context_file())
+        {
+            Some(Self::install_workspace_context(
+                &config.cwd,
+                context_file,
+                hydration,
+                &journal,
+                &store,
+                &session_id,
+                &turn_id,
+            )?)
+        } else {
+            None
+        };
 
         let interrupted = Arc::new(AtomicBool::new(false));
         let capture = Self::execute_launch_plan(
@@ -508,11 +538,7 @@ impl RuntimeEngine {
         let mut command = Command::new(&launch_plan.executable);
         command.args(&launch_plan.args);
         command.current_dir(cwd);
-        if launch_plan.stdin_prelude.is_some() {
-            command.stdin(Stdio::piped());
-        } else {
-            command.stdin(Stdio::null());
-        }
+        command.stdin(Stdio::piped());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         command.envs(launch_plan.env.iter().map(|(key, value)| (key, value)));
@@ -521,11 +547,16 @@ impl RuntimeEngine {
             .spawn()
             .map_err(|error| ContynuError::CommandStart(error.to_string()))?;
 
-        if let Some(stdin_prelude) = &launch_plan.stdin_prelude {
-            if let Some(mut stdin) = child.stdin.take() {
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Some(stdin_prelude) = &launch_plan.stdin_prelude {
                 stdin.write_all(stdin_prelude)?;
                 stdin.flush()?;
             }
+            thread::spawn(move || {
+                let mut input = std::io::stdin();
+                let _ = std::io::copy(&mut input, &mut stdin);
+                let _ = stdin.flush();
+            });
         }
 
         let stdout = child
@@ -1001,7 +1032,39 @@ impl RuntimeEngine {
             packet,
             packet_path,
             prompt_path,
+            prompt_text: prompt,
         })
+    }
+
+    fn install_workspace_context(
+        cwd: &Path,
+        context_file: &str,
+        hydration: &HydrationContext,
+        journal: &Journal,
+        store: &MetadataStore,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+    ) -> Result<WorkspaceContextGuard> {
+        let path = cwd.join(context_file);
+        let original = std::fs::read(&path).ok();
+        let merged = merge_workspace_context(original.as_deref(), &hydration.prompt_text);
+        std::fs::write(&path, merged.as_bytes())?;
+        Self::persist(
+            journal,
+            store,
+            EventDraft::new(
+                session_id.clone(),
+                Some(turn_id.clone()),
+                Actor::System,
+                EventType::ArtifactMaterialized,
+                json!({
+                    "kind": "workspace_context_file",
+                    "path": path.display().to_string(),
+                    "created": original.is_none(),
+                }),
+            ),
+        )?;
+        Ok(WorkspaceContextGuard { path, original })
     }
 }
 
@@ -1035,6 +1098,34 @@ fn shell_escape(value: &OsString) -> String {
         return value.into_owned();
     }
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn merge_workspace_context(original: Option<&[u8]>, prompt_text: &str) -> String {
+    const BEGIN: &str = "\n<!-- CONTYNU_BEGIN -->\n";
+    const END: &str = "\n<!-- CONTYNU_END -->\n";
+
+    let base = original
+        .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+        .unwrap_or_default();
+    let cleaned = if let (Some(start), Some(end)) = (base.find(BEGIN), base.find(END)) {
+        let end = end + END.len();
+        let mut merged = String::new();
+        merged.push_str(&base[..start]);
+        merged.push_str(&base[end..]);
+        merged
+    } else {
+        base
+    };
+    let mut merged = cleaned.trim_end().to_string();
+    if !merged.is_empty() {
+        merged.push_str("\n\n");
+    }
+    merged
+        .push_str("Contynu continuity context. Use this as authoritative current project state.\n");
+    merged.push_str(BEGIN.trim_start_matches('\n'));
+    merged.push_str(prompt_text);
+    merged.push_str(END);
+    merged
 }
 
 fn spawn_reader<R: Read + Send + 'static>(

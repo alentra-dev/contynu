@@ -10,15 +10,15 @@ If the executable matches a configured LLM launcher in `.contynu/config.json`, C
 
 ### `contynu codex [-- <args...>]`
 
-Launches `codex` inside Contynu’s runtime using the primary project by default. When continuing an existing project, Contynu writes the rehydration packet to runtime files, exposes their paths via environment variables, and sends a startup prelude on stdin.
+Launches `codex` inside Contynu’s runtime using the primary project by default. The seeded launcher config injects continuity through a temporary `AGENTS.md` file in the workspace, along with runtime files and environment variables.
 
 ### `contynu claude [-- <args...>]`
 
-Launches `claude` inside Contynu’s runtime using the primary project by default, with the same hydration delivery path as `codex`.
+Launches `claude` inside Contynu’s runtime using the primary project by default. The seeded launcher config injects continuity through a temporary `CLAUDE.md` file in the workspace.
 
 ### `contynu gemini [-- <args...>]`
 
-Launches `gemini` inside Contynu’s runtime using the primary project by default, with the same hydration delivery path as `codex`.
+Launches `gemini` inside Contynu’s runtime using the primary project by default. The seeded launcher config injects continuity through a temporary `GEMINI.md` file in the workspace.
 
 ### `contynu init`
 
@@ -38,6 +38,7 @@ Runtime behavior in this pass:
 - each captured chunk is durably appended to the journal before the runtime continues
 - accumulated stdout/stderr are registered as blob-backed artifacts after process exit
 - configured LLM launchers can use PTY transport when `use_pty` is enabled and `script` is available
+- configured launchers can install a temporary provider-native workspace context file when `context_file` is set
 - workspace files are diffed before and after the run, classified as source/generated/artifact outputs, and recorded as canonical file events
 - lightweight memory objects are derived after each turn for summary, facts, todos, and file notes
 
@@ -97,9 +98,10 @@ Repairs a truncated journal tail if needed, then reconciles journal state back i
 - Unknown future launchers can be configured in `.contynu/config.json`.
 - The generated config file is the preferred place to adjust known launcher behavior as upstream CLIs evolve.
 - Configured launchers can request PTY transport with `use_pty`.
+- Configured launchers can request provider-native workspace file injection with `context_file`.
 - Configured launchers can choose `hydration_delivery` as `env_only`, `stdin_only`, or `env_and_stdin`.
 - Configured launchers can also prepend `hydration_args` with placeholders such as `{prompt_file}`, `{packet_file}`, `{project_id}`, and `{schema_version}`.
 - Ordinary terminal commands can also be launched directly as `contynu <command...>`.
-- Known LLM launchers receive continuity context via `CONTYNU_REHYDRATION_PACKET_FILE`, `CONTYNU_REHYDRATION_PROMPT_FILE`, and a startup stdin prelude when Contynu is continuing an existing project.
+- Known LLM launchers now primarily receive continuity through their configured provider-native workspace files plus runtime env/file materialization. Generic stdin/env delivery remains available through config.
 - `contynu run` uses PTY transport for launchers that request it and a pipe-based fallback otherwise.
 - The adapter layer remains model-agnostic, but the launcher config is now the authoritative place to tune startup surfaces for known and future tools.

@@ -22,6 +22,8 @@ pub struct ConfiguredLlmLauncher {
     #[serde(default)]
     pub use_pty: bool,
     #[serde(default)]
+    pub context_file: Option<String>,
+    #[serde(default)]
     pub hydration_delivery: HydrationDelivery,
     #[serde(default)]
     pub hydration_args: Vec<String>,
@@ -98,7 +100,8 @@ fn builtin_launchers() -> Vec<ConfiguredLlmLauncher> {
             aliases: vec!["codex-cli".into()],
             hydrate: true,
             use_pty: true,
-            hydration_delivery: HydrationDelivery::EnvAndStdin,
+            context_file: Some("AGENTS.md".into()),
+            hydration_delivery: HydrationDelivery::EnvOnly,
             hydration_args: Vec::new(),
             extra_env: BTreeMap::new(),
         },
@@ -107,7 +110,8 @@ fn builtin_launchers() -> Vec<ConfiguredLlmLauncher> {
             aliases: vec!["claude-code".into()],
             hydrate: true,
             use_pty: true,
-            hydration_delivery: HydrationDelivery::EnvAndStdin,
+            context_file: Some("CLAUDE.md".into()),
+            hydration_delivery: HydrationDelivery::EnvOnly,
             hydration_args: Vec::new(),
             extra_env: BTreeMap::new(),
         },
@@ -116,7 +120,8 @@ fn builtin_launchers() -> Vec<ConfiguredLlmLauncher> {
             aliases: vec!["gemini-cli".into()],
             hydrate: true,
             use_pty: true,
-            hydration_delivery: HydrationDelivery::EnvAndStdin,
+            context_file: Some("GEMINI.md".into()),
+            hydration_delivery: HydrationDelivery::EnvOnly,
             hydration_args: Vec::new(),
             extra_env: BTreeMap::new(),
         },
@@ -167,6 +172,7 @@ mod tests {
                   "command": "futurellm",
                   "hydrate": true,
                   "use_pty": true,
+                  "context_file": "FUTURELLM.md",
                   "hydration_delivery": "env_only",
                   "hydration_args": ["--context-file", "{prompt_file}"]
                 }
@@ -185,6 +191,10 @@ mod tests {
         );
         assert!(config.find_llm_launcher("futurellm").unwrap().use_pty);
         assert_eq!(
+            config.find_llm_launcher("futurellm").unwrap().context_file,
+            Some("FUTURELLM.md".into())
+        );
+        assert_eq!(
             config
                 .find_llm_launcher("futurellm")
                 .unwrap()
@@ -201,8 +211,29 @@ mod tests {
         ContynuConfig::ensure_exists(&path).unwrap();
 
         let config = ContynuConfig::load(&path).unwrap();
-        assert!(config.find_llm_launcher("codex").is_some());
-        assert!(config.find_llm_launcher("claude").is_some());
-        assert!(config.find_llm_launcher("gemini").is_some());
+        assert_eq!(
+            config
+                .find_llm_launcher("codex")
+                .unwrap()
+                .context_file
+                .as_deref(),
+            Some("AGENTS.md")
+        );
+        assert_eq!(
+            config
+                .find_llm_launcher("claude")
+                .unwrap()
+                .context_file
+                .as_deref(),
+            Some("CLAUDE.md")
+        );
+        assert_eq!(
+            config
+                .find_llm_launcher("gemini")
+                .unwrap()
+                .context_file
+                .as_deref(),
+            Some("GEMINI.md")
+        );
     }
 }

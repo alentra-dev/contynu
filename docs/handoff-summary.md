@@ -8,12 +8,15 @@
 - content-addressed blob store with deduplication and integrity verification
 - checkpoint manager with manifest and rehydration packet generation
 - config-authoritative launcher layer seeded with known LLM entries
-- runtime wrapper with adapter detection, PTY-or-pipe transport selection, real-time stream capture, file classification, and post-turn memory derivation
+- runtime wrapper with adapter detection, PTY-or-pipe transport selection, provider-native workspace context injection, real-time stream capture, file classification, and post-turn memory derivation
 - one primary continuous project memory per state directory by default
 
 ## Commands Available
 
 - `contynu init`
+- `contynu codex [-- <args...>]`
+- `contynu claude [-- <args...>]`
+- `contynu gemini [-- <args...>]`
 - `contynu run -- <command...>`
 - `contynu start-project`
 - `contynu checkpoint [--project <id>]`
@@ -34,7 +37,7 @@
 - interruption handling is best-effort rather than full signal choreography
 - structured memory derivation is heuristic and intentionally lightweight rather than model-assisted
 - checkpoint packets are deterministic but still heuristic in how mission and recent context are selected
-- automatic rehydration injection exists through config-driven env/stdin/arg surfaces, but not yet through richer provider-native session APIs
+- provider-native rehydration currently targets workspace instruction files (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`) rather than deeper session-native APIs
 - exact search is implemented; semantic retrieval remains intentionally deferred
 
 ## Next Best Steps
