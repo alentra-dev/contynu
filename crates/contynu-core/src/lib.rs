@@ -7,6 +7,7 @@ pub mod event;
 pub mod files;
 pub mod ids;
 pub mod journal;
+pub mod pty;
 pub mod runtime;
 pub mod state;
 pub mod store;

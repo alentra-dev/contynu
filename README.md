@@ -48,7 +48,7 @@ When a known LLM launcher is continuing an existing project, Contynu now materia
 - `CLAUDE.md` for `claude`
 - `GEMINI.md` for `gemini`
 
-Those launchers also request PTY transport by default so interactive sessions run against a real terminal.
+Those launchers also request Contynu’s built-in PTY transport by default so interactive sessions run against a real terminal.
 
 Unknown future LLM CLIs can be taught to Contynu through `.contynu/config.json`. If a launcher is listed there, the normal direct path like `contynu myllm` will recognize it as hydratable.
 `contynu init` now writes a starter `.contynu/config.json` that already includes `codex`, `claude`, and `gemini`, so those integrations can be adjusted locally as upstream CLIs change.

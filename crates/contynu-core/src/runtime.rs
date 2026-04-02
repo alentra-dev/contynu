@@ -22,6 +22,7 @@ use crate::event::{Actor, EventDraft, EventType};
 use crate::files::{FileChange, FileChangeKind, FileRole, FileTracker};
 use crate::ids::{ArtifactId, FileId, MemoryId, ProjectId, SessionId, TurnId};
 use crate::journal::Journal;
+use crate::pty::PtyChild;
 use crate::state::StatePaths;
 use crate::store::{
     ArtifactRecord, FileRecord, MemoryObject, MemoryObjectKind, MetadataStore, SessionRecord,
@@ -84,7 +85,8 @@ impl ExecutionTransport {
 
 #[derive(Debug)]
 struct ProcessCapture {
-    status: std::process::ExitStatus,
+    exit_code: Option<i32>,
+    success: bool,
     stdout_bytes: Vec<u8>,
     stderr_bytes: Vec<u8>,
 }
@@ -300,8 +302,8 @@ impl RuntimeEngine {
                 Actor::Runtime,
                 EventType::ProcessExited,
                 json!({
-                    "exit_code": capture.status.code(),
-                    "success": capture.status.success(),
+                    "exit_code": capture.exit_code,
+                    "success": capture.success,
                     "interrupted": interrupted.load(Ordering::SeqCst),
                     "transport": transport.as_str(),
                 }),
@@ -432,7 +434,7 @@ impl RuntimeEngine {
             &config.command,
             adapter.as_str(),
             transport,
-            capture.status.code(),
+            capture.exit_code,
             interrupted.load(Ordering::SeqCst),
             &changes,
             &change_event_ids,
@@ -446,7 +448,7 @@ impl RuntimeEngine {
                 Some(turn_id.clone()),
                 Actor::Runtime,
                 EventType::TurnCompleted,
-                json!({"exit_code": capture.status.code(), "interrupted": interrupted.load(Ordering::SeqCst), "transport": transport.as_str()}),
+                json!({"exit_code": capture.exit_code, "interrupted": interrupted.load(Ordering::SeqCst), "transport": transport.as_str()}),
             ),
         )?;
         Self::persist(
@@ -461,7 +463,7 @@ impl RuntimeEngine {
                 } else {
                     EventType::SessionEnded
                 },
-                json!({"exit_code": capture.status.code(), "transport": transport.as_str()}),
+                json!({"exit_code": capture.exit_code, "transport": transport.as_str()}),
             ),
         )?;
         store.update_turn_status(&turn_id, "completed", Some(Utc::now()))?;
@@ -483,7 +485,7 @@ impl RuntimeEngine {
         Ok(RunOutcome {
             project_id: session_id,
             turn_id,
-            exit_code: capture.status.code(),
+            exit_code: capture.exit_code,
             interrupted: interrupted.load(Ordering::SeqCst),
         })
     }
@@ -589,7 +591,8 @@ impl RuntimeEngine {
             .wait()?;
 
         Ok(ProcessCapture {
-            status,
+            exit_code: status.code(),
+            success: status.success(),
             stdout_bytes,
             stderr_bytes,
         })
@@ -604,50 +607,29 @@ impl RuntimeEngine {
         turn_id: &TurnId,
         interrupted: Arc<AtomicBool>,
     ) -> Result<ProcessCapture> {
-        let mut script_command = Command::new("script");
-        let command_text = std::iter::once(&launch_plan.executable)
-            .chain(launch_plan.args.iter())
-            .map(shell_escape)
-            .collect::<Vec<_>>()
-            .join(" ");
-        script_command.args(["-qefc", &command_text, "/dev/null"]);
-        script_command.current_dir(cwd);
-        script_command.stdin(Stdio::piped());
-        script_command.stdout(Stdio::piped());
-        script_command.stderr(Stdio::piped());
-        script_command.envs(launch_plan.env.iter().map(|(key, value)| (key, value)));
-
-        let mut child = script_command
-            .spawn()
-            .map_err(|error| ContynuError::CommandStart(error.to_string()))?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            if let Some(stdin_prelude) = &launch_plan.stdin_prelude {
-                stdin.write_all(stdin_prelude)?;
-                stdin.flush()?;
-            }
-            thread::spawn(move || {
-                let mut input = std::io::stdin();
-                let _ = std::io::copy(&mut input, &mut stdin);
-                let _ = stdin.flush();
-            });
+        let child = PtyChild::spawn(
+            cwd,
+            &launch_plan.executable,
+            &launch_plan.args,
+            &launch_plan.env,
+        )?;
+        let mut stdin = child.try_clone_writer()?;
+        if let Some(stdin_prelude) = &launch_plan.stdin_prelude {
+            stdin.write_all(stdin_prelude)?;
+            stdin.flush()?;
         }
+        thread::spawn(move || {
+            let mut input = std::io::stdin();
+            let _ = std::io::copy(&mut input, &mut stdin);
+            let _ = stdin.flush();
+        });
 
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| ContynuError::InvalidState("missing pty stdout pipe".into()))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| ContynuError::InvalidState("missing pty stderr pipe".into()))?;
-
-        let child = Arc::new(Mutex::new(child));
-        install_ctrlc_handler(Arc::clone(&child), interrupted);
+        let stdout = child.try_clone_reader()?;
+        install_pty_ctrlc_handler(&child, interrupted);
 
         let (sender, receiver) = mpsc::channel();
         let stdout_handle = spawn_reader(stdout, StreamKind::Pty, sender.clone());
-        let stderr_handle = spawn_reader(stderr, StreamKind::Stderr, sender);
+        let stderr_handle = spawn_closed(StreamKind::Stderr, sender);
 
         let (stdout_bytes, stderr_bytes) =
             Self::capture_streams(receiver, journal, store, session_id, turn_id)?;
@@ -657,13 +639,11 @@ impl RuntimeEngine {
         stderr_handle.join().map_err(|_| {
             ContynuError::InvalidState("pty stderr reader thread panicked".into())
         })??;
-        let status = child
-            .lock()
-            .map_err(|_| ContynuError::Validation("child process mutex poisoned".into()))?
-            .wait()?;
+        let status = child.wait()?;
 
         Ok(ProcessCapture {
-            status,
+            exit_code: status.code(),
+            success: status.success(),
             stdout_bytes,
             stderr_bytes,
         })
@@ -1069,35 +1049,11 @@ impl RuntimeEngine {
 }
 
 fn resolve_transport(adapter: &AdapterSpec) -> ExecutionTransport {
-    if adapter.use_pty() && cfg!(unix) && script_available() {
+    if adapter.use_pty() && cfg!(unix) {
         ExecutionTransport::Pty
     } else {
         ExecutionTransport::Pipes
     }
-}
-
-fn script_available() -> bool {
-    Command::new("script")
-        .arg("-V")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok()
-}
-
-fn shell_escape(value: &OsString) -> String {
-    let value = value.to_string_lossy();
-    if value.is_empty() {
-        return "''".into();
-    }
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':'))
-    {
-        return value.into_owned();
-    }
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn merge_workspace_context(original: Option<&[u8]>, prompt_text: &str) -> String {
@@ -1135,7 +1091,16 @@ fn spawn_reader<R: Read + Send + 'static>(
 ) -> thread::JoinHandle<Result<()>> {
     thread::spawn(move || loop {
         let mut buffer = vec![0_u8; STREAM_CHUNK_SIZE];
-        let read = reader.read(&mut buffer)?;
+        let read = match reader.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error)
+                if matches!(kind, StreamKind::Pty) && error.raw_os_error() == Some(libc::EIO) =>
+            {
+                let _ = sender.send(StreamMessage::Closed { kind });
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        };
         if read == 0 {
             let _ = sender.send(StreamMessage::Closed { kind });
             return Ok(());
@@ -1150,11 +1115,30 @@ fn spawn_reader<R: Read + Send + 'static>(
     })
 }
 
+fn spawn_closed(kind: StreamKind, sender: Sender<StreamMessage>) -> thread::JoinHandle<Result<()>> {
+    thread::spawn(move || {
+        let _ = sender.send(StreamMessage::Closed { kind });
+        Ok(())
+    })
+}
+
 fn install_ctrlc_handler(child: Arc<Mutex<std::process::Child>>, interrupted: Arc<AtomicBool>) {
     ctrlc::set_handler(move || {
         interrupted.store(true, Ordering::SeqCst);
         if let Ok(mut child) = child.lock() {
             let _ = child.kill();
+        }
+    })
+    .ok();
+}
+
+fn install_pty_ctrlc_handler(child: &PtyChild, interrupted: Arc<AtomicBool>) {
+    let pid = child.pid();
+    ctrlc::set_handler(move || {
+        interrupted.store(true, Ordering::SeqCst);
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(-pid, libc::SIGTERM);
         }
     })
     .ok();
@@ -1310,7 +1294,7 @@ mod tests {
 
     #[test]
     fn runtime_can_use_pty_transport_for_configured_launcher() {
-        if !super::script_available() {
+        if !cfg!(unix) {
             return;
         }
 

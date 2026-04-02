@@ -38,6 +38,7 @@ Runtime behavior in this pass:
 - each captured chunk is durably appended to the journal before the runtime continues
 - accumulated stdout/stderr are registered as blob-backed artifacts after process exit
 - configured LLM launchers can use PTY transport when `use_pty` is enabled and `script` is available
+- configured LLM launchers can use Contynu's built-in PTY transport when `use_pty` is enabled
 - configured launchers can install a temporary provider-native workspace context file when `context_file` is set
 - workspace files are diffed before and after the run, classified as source/generated/artifact outputs, and recorded as canonical file events
 - lightweight memory objects are derived after each turn for summary, facts, todos, and file notes
@@ -124,4 +125,5 @@ Repairs a truncated journal tail if needed, then reconciles journal state back i
 - Ordinary terminal commands can also be launched directly as `contynu <command...>`.
 - Known LLM launchers now primarily receive continuity through their configured provider-native workspace files plus runtime env/file materialization. Generic stdin/env delivery remains available through config.
 - `contynu run` uses PTY transport for launchers that request it and a pipe-based fallback otherwise.
+- `contynu run` uses Contynu's in-process PTY transport for launchers that request it and a pipe-based fallback otherwise.
 - The adapter layer remains model-agnostic, but the launcher config is now the authoritative place to tune startup surfaces for known and future tools.

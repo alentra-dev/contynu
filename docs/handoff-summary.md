@@ -38,7 +38,7 @@
 
 ## Known Limitations
 
-- PTY transport currently uses the local `script` utility as the Unix implementation path
+- PTY transport is implemented in-process on Unix, but still needs deeper signal/process-group polish
 - interruption handling is best-effort rather than full signal choreography
 - structured memory derivation is heuristic and intentionally lightweight rather than model-assisted
 - checkpoint packets are deterministic but still heuristic in how mission and recent context are selected
