@@ -3,6 +3,14 @@ use std::{env, fs};
 
 use tempfile::tempdir;
 
+fn extract_prefixed_id(output: &str, prefix: &str) -> String {
+    output
+        .split_whitespace()
+        .find(|token| token.starts_with(prefix))
+        .unwrap_or_else(|| panic!("missing {prefix} in output: {output}"))
+        .to_string()
+}
+
 #[test]
 fn init_and_doctor_work() {
     let dir = tempdir().unwrap();
@@ -36,7 +44,8 @@ fn init_and_doctor_work() {
         String::from_utf8_lossy(&doctor.stderr)
     );
     let stdout = String::from_utf8_lossy(&doctor.stdout);
-    assert!(stdout.contains("state_root"));
+    assert!(stdout.contains("Contynu doctor"));
+    assert!(stdout.contains("State root:"));
 }
 
 #[test]
@@ -55,7 +64,7 @@ fn project_is_created_and_reused_by_default() {
         "start-project failed: {}",
         String::from_utf8_lossy(&start.stderr)
     );
-    let project_id = String::from_utf8_lossy(&start.stdout).trim().to_string();
+    let project_id = extract_prefixed_id(&String::from_utf8_lossy(&start.stdout), "prj_");
     assert!(project_id.starts_with("prj_"));
 
     let run = Command::new(env!("CARGO_BIN_EXE_contynu"))
@@ -131,7 +140,7 @@ fn streamlined_launcher_reuses_primary_project() {
         .output()
         .unwrap();
     assert!(start.status.success());
-    let project_id = String::from_utf8_lossy(&start.stdout).trim().to_string();
+    let project_id = extract_prefixed_id(&String::from_utf8_lossy(&start.stdout), "prj_");
 
     let codex = Command::new(env!("CARGO_BIN_EXE_contynu"))
         .env("PATH", &combined_path)
@@ -230,8 +239,8 @@ fn status_projects_recent_and_config_commands_work() {
         .unwrap();
     assert!(status.status.success());
     let status_stdout = String::from_utf8_lossy(&status.stdout);
-    assert!(status_stdout.contains("\"project_id\""));
-    assert!(status_stdout.contains("\"counts\""));
+    assert!(status_stdout.contains("Project status"));
+    assert!(status_stdout.contains("Counts"));
 
     let projects = Command::new(env!("CARGO_BIN_EXE_contynu"))
         .arg("--state-dir")
@@ -241,7 +250,8 @@ fn status_projects_recent_and_config_commands_work() {
         .unwrap();
     assert!(projects.status.success());
     let projects_stdout = String::from_utf8_lossy(&projects.stdout);
-    assert!(projects_stdout.contains("\"primary\": true"));
+    assert!(projects_stdout.contains("Projects"));
+    assert!(projects_stdout.contains("primary"));
 
     let recent = Command::new(env!("CARGO_BIN_EXE_contynu"))
         .arg("--state-dir")
@@ -251,7 +261,8 @@ fn status_projects_recent_and_config_commands_work() {
         .unwrap();
     assert!(recent.status.success());
     let recent_stdout = String::from_utf8_lossy(&recent.stdout);
-    assert!(recent_stdout.contains("\"latest_turn\""));
+    assert!(recent_stdout.contains("Recent activity"));
+    assert!(recent_stdout.contains("latest turn:"));
 
     let config_validate = Command::new(env!("CARGO_BIN_EXE_contynu"))
         .arg("--state-dir")
@@ -262,8 +273,8 @@ fn status_projects_recent_and_config_commands_work() {
         .unwrap();
     assert!(config_validate.status.success());
     let config_validate_stdout = String::from_utf8_lossy(&config_validate.stdout);
-    assert!(config_validate_stdout.contains("\"launcher_count\""));
-    assert!(config_validate_stdout.contains("\"context_file\""));
+    assert!(config_validate_stdout.contains("Config is valid."));
+    assert!(config_validate_stdout.contains("context file:"));
 
     let config_show = Command::new(env!("CARGO_BIN_EXE_contynu"))
         .arg("--state-dir")
@@ -274,6 +285,7 @@ fn status_projects_recent_and_config_commands_work() {
         .unwrap();
     assert!(config_show.status.success());
     let config_show_stdout = String::from_utf8_lossy(&config_show.stdout);
+    assert!(config_show_stdout.contains("Config file:"));
     assert!(config_show_stdout.contains("\"command\": \"codex\""));
 }
 
@@ -406,7 +418,7 @@ fn configured_custom_llm_launcher_is_hydrated() {
         .output()
         .unwrap();
     assert!(start.status.success());
-    let project_id = String::from_utf8_lossy(&start.stdout).trim().to_string();
+    let project_id = extract_prefixed_id(&String::from_utf8_lossy(&start.stdout), "prj_");
 
     let launch = Command::new(env!("CARGO_BIN_EXE_contynu"))
         .env("PATH", &combined_path)

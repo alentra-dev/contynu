@@ -485,7 +485,8 @@ impl RuntimeEngine {
             if let Some(path) = transcript.stdin.as_ref() {
                 if !has_stdin {
                     let bytes = std::fs::read(path).unwrap_or_default();
-                    if !bytes.is_empty() {
+                    let normalized = normalize_script_transcript(&bytes);
+                    if !normalized.is_empty() {
                         Self::persist(
                             journal,
                             store,
@@ -495,7 +496,7 @@ impl RuntimeEngine {
                                 Actor::Runtime,
                                 EventType::StdinCaptured,
                                 json!({
-                                    "text": String::from_utf8_lossy(&bytes).into_owned(),
+                                    "text": normalized,
                                     "stream": "stdin",
                                     "bytes": bytes.len(),
                                     "recovered": true,
@@ -510,7 +511,8 @@ impl RuntimeEngine {
             if let Some(path) = transcript.stdout.as_ref() {
                 if !has_stdout {
                     let bytes = std::fs::read(path).unwrap_or_default();
-                    if !bytes.is_empty() {
+                    let normalized = normalize_script_transcript(&bytes);
+                    if !normalized.is_empty() {
                         Self::persist(
                             journal,
                             store,
@@ -520,7 +522,7 @@ impl RuntimeEngine {
                                 Actor::Runtime,
                                 EventType::StdoutCaptured,
                                 json!({
-                                    "text": String::from_utf8_lossy(&bytes).into_owned(),
+                                    "text": normalized,
                                     "stream": "stdout",
                                     "bytes": bytes.len(),
                                     "recovered": true,
@@ -807,8 +809,12 @@ impl RuntimeEngine {
             .map_err(|_| ContynuError::Validation("child process mutex poisoned".into()))?
             .wait()?;
 
-        let stdin_bytes = std::fs::read(&stdin_log).unwrap_or_default();
-        let stdout_bytes = std::fs::read(&stdout_log).unwrap_or_default();
+        let stdin_log_bytes = std::fs::read(&stdin_log).unwrap_or_default();
+        let stdout_log_bytes = std::fs::read(&stdout_log).unwrap_or_default();
+        let stdin_text = normalize_script_transcript(&stdin_log_bytes);
+        let stdout_text = normalize_script_transcript(&stdout_log_bytes);
+        let stdin_bytes = stdin_text.as_bytes().to_vec();
+        let stdout_bytes = stdout_text.as_bytes().to_vec();
 
         if !stdin_bytes.is_empty() {
             Self::persist(
@@ -820,7 +826,7 @@ impl RuntimeEngine {
                     Actor::Runtime,
                     EventType::StdinCaptured,
                     json!({
-                        "text": String::from_utf8_lossy(&stdin_bytes).into_owned(),
+                        "text": stdin_text,
                         "stream": "stdin",
                         "bytes": stdin_bytes.len(),
                     }),
@@ -837,7 +843,7 @@ impl RuntimeEngine {
                     Actor::Runtime,
                     EventType::StdoutCaptured,
                     json!({
-                        "text": String::from_utf8_lossy(&stdout_bytes).into_owned(),
+                        "text": stdout_text,
                         "stream": "stdout",
                         "bytes": stdout_bytes.len(),
                     }),
@@ -1313,6 +1319,89 @@ fn parse_transcript_log_name(
     TurnId::parse(turn_text.to_string())
         .ok()
         .map(|turn_id| (turn_id, suffix))
+}
+
+fn normalize_script_transcript(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(&strip_ansi_escape_bytes(bytes)).into_owned();
+    let mut normalized_lines = Vec::new();
+    let mut previous_blank = false;
+
+    for raw_line in text.replace('\r', "\n").lines() {
+        let cleaned = raw_line
+            .chars()
+            .filter(|ch| {
+                !matches!(*ch, '\u{0000}'..='\u{0008}' | '\u{000B}'..='\u{001F}' | '\u{007F}')
+                    || *ch == '\n'
+                    || *ch == '\t'
+            })
+            .collect::<String>();
+        let line = cleaned.trim_end();
+        if line.starts_with("Script started on ") || line.starts_with("Script done on ") {
+            continue;
+        }
+        if line.trim().is_empty() {
+            if previous_blank {
+                continue;
+            }
+            previous_blank = true;
+            normalized_lines.push(String::new());
+            continue;
+        }
+        previous_blank = false;
+        normalized_lines.push(line.to_string());
+    }
+
+    normalized_lines.join("\n").trim().to_string()
+}
+
+fn strip_ansi_escape_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] != 0x1b {
+            out.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+
+        index += 1;
+        if index >= bytes.len() {
+            break;
+        }
+
+        match bytes[index] {
+            b'[' => {
+                index += 1;
+                while index < bytes.len() {
+                    let byte = bytes[index];
+                    index += 1;
+                    if (0x40..=0x7e).contains(&byte) {
+                        break;
+                    }
+                }
+            }
+            b']' => {
+                index += 1;
+                while index < bytes.len() {
+                    let byte = bytes[index];
+                    index += 1;
+                    if byte == 0x07 {
+                        break;
+                    }
+                    if byte == 0x1b && index < bytes.len() && bytes[index] == b'\\' {
+                        index += 1;
+                        break;
+                    }
+                }
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+
+    out
 }
 
 fn derive_structured_candidates(
