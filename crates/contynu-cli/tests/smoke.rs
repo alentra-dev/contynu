@@ -76,7 +76,10 @@ fn project_is_created_and_reused_by_default() {
         String::from_utf8_lossy(&run.stderr)
     );
     let run_stdout = String::from_utf8_lossy(&run.stdout);
+    let run_stderr = String::from_utf8_lossy(&run.stderr);
     assert!(run_stdout.contains("smoke"));
+    assert!(run_stderr.contains("Let's contynu another time."));
+    assert!(run_stderr.contains("Saved turn trn_"));
 
     let inspect = Command::new(env!("CARGO_BIN_EXE_contynu"))
         .arg("--state-dir")
@@ -147,7 +150,9 @@ fn streamlined_launcher_reuses_primary_project() {
         String::from_utf8_lossy(&codex.stderr)
     );
     let stdout = String::from_utf8_lossy(&codex.stdout);
+    let stderr = String::from_utf8_lossy(&codex.stderr);
     assert!(stdout.contains("mocked-codex"));
+    assert!(stderr.contains("Let's contynu another time."));
     let captured = fs::read_to_string(&capture_path).unwrap();
     assert!(captured.contains("env:"));
     assert!(captured.contains("rehydration.json"));
@@ -187,7 +192,9 @@ fn direct_passthrough_launches_regular_commands() {
         String::from_utf8_lossy(&command.stderr)
     );
     let stdout = String::from_utf8_lossy(&command.stdout);
+    let stderr = String::from_utf8_lossy(&command.stderr);
     assert!(stdout.contains("direct"));
+    assert!(stderr.contains("Let's contynu another time."));
     assert_eq!(
         fs::read_to_string(dir.path().join("direct.txt")).unwrap(),
         "direct"

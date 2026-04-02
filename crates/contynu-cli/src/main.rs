@@ -5,7 +5,7 @@ use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
 use contynu_core::{
     BlobStore, CheckpointManager, ContynuConfig, EventDraft, EventId, EventType, Journal,
-    MetadataStore, ProjectId, RunConfig, RuntimeEngine, StatePaths,
+    MetadataStore, ProjectId, RunConfig, RunOutcome, RuntimeEngine, StatePaths,
 };
 use serde::Serialize;
 
@@ -234,7 +234,7 @@ fn start_project(state: &StatePaths, cwd: &PathBuf) -> Result<()> {
 
 fn run(state: &StatePaths, cwd: &PathBuf, command: RunCommand) -> Result<()> {
     ensure_state(state)?;
-    RuntimeEngine::run(RunConfig {
+    let outcome = RuntimeEngine::run(RunConfig {
         state_dir: state.root().to_path_buf(),
         cwd: cwd.clone(),
         command: command.command.into_iter().map(Into::into).collect(),
@@ -242,6 +242,7 @@ fn run(state: &StatePaths, cwd: &PathBuf, command: RunCommand) -> Result<()> {
         checkpoint_on_exit: !command.no_checkpoint,
         project_id: command.project.map(ProjectId::parse).transpose()?,
     })?;
+    print_run_footer(&outcome);
     Ok(())
 }
 
@@ -254,7 +255,7 @@ fn launch_llm(
     ensure_state(state)?;
     let mut argv = vec![executable.to_string()];
     argv.extend(command.args);
-    RuntimeEngine::run(RunConfig {
+    let outcome = RuntimeEngine::run(RunConfig {
         state_dir: state.root().to_path_buf(),
         cwd: cwd.clone(),
         command: argv.into_iter().map(Into::into).collect(),
@@ -262,12 +263,13 @@ fn launch_llm(
         checkpoint_on_exit: !command.no_checkpoint,
         project_id: command.project.map(ProjectId::parse).transpose()?,
     })?;
+    print_run_footer(&outcome);
     Ok(())
 }
 
 fn passthrough(state: &StatePaths, cwd: &PathBuf, command: Vec<OsString>) -> Result<()> {
     ensure_state(state)?;
-    RuntimeEngine::run(RunConfig {
+    let outcome = RuntimeEngine::run(RunConfig {
         state_dir: state.root().to_path_buf(),
         cwd: cwd.clone(),
         command,
@@ -275,6 +277,7 @@ fn passthrough(state: &StatePaths, cwd: &PathBuf, command: Vec<OsString>) -> Res
         checkpoint_on_exit: true,
         project_id: None,
     })?;
+    print_run_footer(&outcome);
     Ok(())
 }
 
@@ -530,4 +533,36 @@ fn resolve_primary_project(store: &MetadataStore) -> Result<ProjectId> {
 fn print_json<T: Serialize>(value: &T) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+fn print_run_footer(outcome: &RunOutcome) {
+    let exit_text = match outcome.exit_code {
+        Some(code) => format!("exit {code}"),
+        None => "no exit code".to_string(),
+    };
+    let footer = if outcome.interrupted {
+        format!(
+            "Contynu paused here.\nSaved turn {} in project {} before exit with {}.",
+            short_id(outcome.turn_id.as_str()),
+            short_id(outcome.project_id.as_str()),
+            exit_text
+        )
+    } else {
+        format!(
+            "Let's contynu another time. Goodbye for now.\nSaved turn {} in project {} with {}.",
+            short_id(outcome.turn_id.as_str()),
+            short_id(outcome.project_id.as_str()),
+            exit_text
+        )
+    };
+    eprintln!("{footer}");
+}
+
+fn short_id(value: &str) -> &str {
+    let keep = 12;
+    if value.len() <= keep {
+        value
+    } else {
+        &value[..keep]
+    }
 }
