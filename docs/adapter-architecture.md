@@ -38,6 +38,7 @@ Example:
       "aliases": ["futurellm-cli"],
       "hydrate": true,
       "hydration_delivery": "env_only",
+      "hydration_args": ["--context-file", "{prompt_file}", "--project", "{project_id}"],
       "extra_env": {
         "FUTURELLM_MODE": "enabled"
       }
@@ -53,6 +54,13 @@ Configured launchers can choose how rehydration is delivered:
 - `env_only`: materialize packet/prompt files and export their paths via environment variables only
 - `stdin_only`: send the startup prelude on stdin only
 - `env_and_stdin`: do both
+
+Configured launchers can also define `hydration_args`, which are prepended to the launcher command when hydration is active. Supported placeholders are:
+
+- `{prompt_file}`
+- `{packet_file}`
+- `{project_id}`
+- `{schema_version}`
 
 ## Extension Path
 

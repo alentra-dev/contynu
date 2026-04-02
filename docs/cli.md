@@ -92,6 +92,7 @@ Repairs a truncated journal tail if needed, then reconciles journal state back i
 - Known LLM launchers now have dedicated top-level commands so users do not need to remember `run -- <tool>`.
 - Unknown future launchers can be configured in `.contynu/config.json`.
 - Configured launchers can choose `hydration_delivery` as `env_only`, `stdin_only`, or `env_and_stdin`.
+- Configured launchers can also prepend `hydration_args` with placeholders such as `{prompt_file}`, `{packet_file}`, `{project_id}`, and `{schema_version}`.
 - Ordinary terminal commands can also be launched directly as `contynu <command...>`.
 - Known LLM launchers receive continuity context via `CONTYNU_REHYDRATION_PACKET_FILE`, `CONTYNU_REHYDRATION_PROMPT_FILE`, and a startup stdin prelude when Contynu is continuing an existing project.
 - `contynu run` uses a generic subprocess wrapper with real-time pipe capture rather than full PTY emulation.

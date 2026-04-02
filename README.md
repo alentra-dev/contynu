@@ -56,6 +56,7 @@ Example:
       "aliases": ["futurellm-cli"],
       "hydrate": true,
       "hydration_delivery": "env_only",
+      "hydration_args": ["--context-file", "{prompt_file}", "--project", "{project_id}"],
       "extra_env": {
         "FUTURELLM_MODE": "enabled"
       }
@@ -65,6 +66,7 @@ Example:
 ```
 
 `hydration_delivery` supports `env_only`, `stdin_only`, or `env_and_stdin`.
+`hydration_args` lets a configured launcher receive rehydration context through adapter-specific CLI flags using placeholders like `{prompt_file}`, `{packet_file}`, `{project_id}`, and `{schema_version}`.
 
 ### Streamlined Generic Launch
 

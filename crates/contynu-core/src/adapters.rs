@@ -30,6 +30,7 @@ pub struct AdapterSpec {
     name: String,
     should_hydrate: bool,
     hydration_delivery: HydrationDelivery,
+    hydration_args: Vec<OsString>,
     extra_env: BTreeMap<String, String>,
 }
 
@@ -102,8 +103,18 @@ impl AdapterSpec {
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect::<Vec<_>>();
         let mut stdin_prelude = None;
+        let mut args = args;
 
         if let Some(hydration) = hydration {
+            if !self.hydration_args.is_empty() {
+                let mut expanded = self
+                    .hydration_args
+                    .iter()
+                    .map(|value| expand_arg_template(value, hydration))
+                    .collect::<Vec<_>>();
+                expanded.extend(args);
+                args = expanded;
+            }
             if self.hydration_delivery.includes_env() {
                 env.push((
                     "CONTYNU_PROJECT_ID".into(),
@@ -142,6 +153,7 @@ impl AdapterSpec {
             name: name.into(),
             should_hydrate,
             hydration_delivery: HydrationDelivery::EnvAndStdin,
+            hydration_args: Vec::new(),
             extra_env: BTreeMap::new(),
         }
     }
@@ -152,9 +164,34 @@ impl AdapterSpec {
             name: launcher.command.clone(),
             should_hydrate: launcher.hydrate,
             hydration_delivery: launcher.hydration_delivery,
+            hydration_args: launcher
+                .hydration_args
+                .iter()
+                .cloned()
+                .map(OsString::from)
+                .collect(),
             extra_env: launcher.extra_env.clone(),
         }
     }
+}
+
+fn expand_arg_template(value: &OsString, hydration: &HydrationContext) -> OsString {
+    let template = value.to_string_lossy();
+    let expanded = template
+        .replace("{project_id}", hydration.project_id.as_str())
+        .replace(
+            "{packet_file}",
+            &hydration.packet_path.display().to_string(),
+        )
+        .replace(
+            "{prompt_file}",
+            &hydration.prompt_path.display().to_string(),
+        )
+        .replace(
+            "{schema_version}",
+            &hydration.packet.schema_version.to_string(),
+        );
+    OsString::from(expanded)
 }
 
 fn render_stdin_prelude(adapter_name: &str, packet: &RehydrationPacket) -> String {
@@ -226,5 +263,75 @@ mod tests {
             .iter()
             .any(|(key, value)| key == "CONTYNU_REHYDRATION_PACKET_FILE"
                 && value == "/tmp/rehydration.json"));
+    }
+
+    #[test]
+    fn configured_launcher_can_expand_hydration_arg_templates() {
+        let config = serde_json::from_value::<ContynuConfig>(json!({
+            "llm_launchers": [
+                {
+                    "command": "futurellm",
+                    "hydrate": true,
+                    "hydration_args": [
+                        "--context-file",
+                        "{prompt_file}",
+                        "--project",
+                        "{project_id}",
+                        "--schema",
+                        "{schema_version}"
+                    ]
+                }
+            ]
+        }))
+        .unwrap();
+        let adapter = AdapterSpec::detect("futurellm", &config);
+        let project_id = ProjectId::new();
+        let packet = RehydrationPacket {
+            schema_version: 7,
+            project_id: project_id.clone(),
+            target_model: None,
+            mission: "Continue the project faithfully.".into(),
+            stable_facts: Vec::new(),
+            constraints: Vec::new(),
+            decisions: Vec::new(),
+            current_state: "No prior summary available.".into(),
+            open_loops: Vec::new(),
+            relevant_artifacts: Vec::new(),
+            relevant_files: Vec::new(),
+            recent_verbatim_context: Vec::new(),
+            retrieval_guidance: Vec::new(),
+        };
+        let hydration = HydrationContext {
+            project_id,
+            packet,
+            packet_path: PathBuf::from("/tmp/rehydration.json"),
+            prompt_path: PathBuf::from("/tmp/rehydration.txt"),
+        };
+
+        let plan = adapter
+            .build_launch_plan(
+                OsString::from("futurellm"),
+                vec![OsString::from("--interactive")],
+                Some(&hydration),
+            )
+            .unwrap();
+
+        let args = plan
+            .args
+            .iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "--context-file".to_string(),
+                "/tmp/rehydration.txt".to_string(),
+                "--project".to_string(),
+                hydration.project_id.to_string(),
+                "--schema".to_string(),
+                "7".to_string(),
+                "--interactive".to_string(),
+            ]
+        );
     }
 }

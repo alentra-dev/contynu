@@ -195,6 +195,7 @@ fn configured_custom_llm_launcher_is_hydrated() {
               "aliases": ["futurellm-cli"],
               "hydrate": true,
               "hydration_delivery": "env_only",
+              "hydration_args": ["--context-file", "{prompt_file}", "--project", "{project_id}"],
               "extra_env": {"FUTURELLM_MODE": "enabled"}
             }
           ]
@@ -207,9 +208,8 @@ fn configured_custom_llm_launcher_is_hydrated() {
     fs::write(
         &future_path,
         format!(
-            "#!/bin/sh\nprintf \"env:%s|extra:%s\\n\" \"$CONTYNU_REHYDRATION_PACKET_FILE\" \"$FUTURELLM_MODE\" > \"{}\"\ncat >> \"{}\"\nprintf futurellm\n",
+            "#!/bin/sh\nprintf \"arg1:%s|arg2:%s|env:%s|extra:%s\\n\" \"$1\" \"$2\" \"$CONTYNU_REHYDRATION_PACKET_FILE\" \"$FUTURELLM_MODE\" > \"{}\"\nprintf futurellm\n",
             capture_path.display(),
-            capture_path.display()
         ),
     )
     .unwrap();
@@ -248,6 +248,9 @@ fn configured_custom_llm_launcher_is_hydrated() {
         String::from_utf8_lossy(&launch.stderr)
     );
     let captured = fs::read_to_string(&capture_path).unwrap();
+    assert!(captured.contains("arg1:--context-file"));
+    assert!(captured.contains("arg2:"));
+    assert!(captured.contains("rehydration.txt"));
     assert!(captured.contains("rehydration.json"));
     assert!(captured.contains("extra:enabled"));
     assert!(!captured.contains("CONTYNU REHYDRATION CONTEXT"));

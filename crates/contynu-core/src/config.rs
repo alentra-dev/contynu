@@ -22,6 +22,8 @@ pub struct ConfiguredLlmLauncher {
     #[serde(default)]
     pub hydration_delivery: HydrationDelivery,
     #[serde(default)]
+    pub hydration_args: Vec<String>,
+    #[serde(default)]
     pub extra_env: BTreeMap<String, String>,
 }
 
@@ -107,7 +109,8 @@ mod tests {
                 {
                   "command": "futurellm",
                   "hydrate": true,
-                  "hydration_delivery": "env_only"
+                  "hydration_delivery": "env_only",
+                  "hydration_args": ["--context-file", "{prompt_file}"]
                 }
               ]
             }"#,
@@ -121,6 +124,13 @@ mod tests {
                 .unwrap()
                 .hydration_delivery,
             HydrationDelivery::EnvOnly
+        );
+        assert_eq!(
+            config
+                .find_llm_launcher("futurellm")
+                .unwrap()
+                .hydration_args,
+            vec!["--context-file", "{prompt_file}"]
         );
     }
 }
