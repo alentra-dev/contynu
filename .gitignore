@@ -1,0 +1,12 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Local state
+.contynu/
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
