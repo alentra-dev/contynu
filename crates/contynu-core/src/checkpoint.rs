@@ -324,6 +324,64 @@ pub fn render_rehydration_prompt(packet: &RehydrationPacket, adapter_name: &str)
     prompt
 }
 
+pub fn render_launcher_prompt(packet: &RehydrationPacket) -> String {
+    let mut sections = Vec::new();
+
+    sections.push(format!(
+        "Continue this Contynu project with prior memory. Project: {}.",
+        packet.project_id
+    ));
+    sections.push(format!("Mission: {}", one_line(&packet.mission)));
+    sections.push(format!(
+        "Current state: {}",
+        one_line(&packet.current_state)
+    ));
+
+    if !packet.recent_verbatim_context.is_empty() {
+        let recent = packet
+            .recent_verbatim_context
+            .iter()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|item| one_line(item))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        sections.push(format!("Recent conversation: {}", recent));
+    }
+
+    if !packet.stable_facts.is_empty() {
+        let facts = packet
+            .stable_facts
+            .iter()
+            .take(3)
+            .map(|item| one_line(item))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        sections.push(format!("Stable facts: {}", facts));
+    }
+
+    if !packet.open_loops.is_empty() {
+        let open_loops = packet
+            .open_loops
+            .iter()
+            .take(3)
+            .map(|item| one_line(item))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        sections.push(format!("Open loops: {}", open_loops));
+    }
+
+    sections.push(
+        "Use this as prior context, but do not restate it unless relevant. If exact history is needed, use the Contynu rehydration files from the environment."
+            .into(),
+    );
+
+    sections.join("\n")
+}
+
 fn memory_texts(memory: &[crate::store::MemoryObject], kind: MemoryObjectKind) -> Vec<String> {
     memory
         .iter()

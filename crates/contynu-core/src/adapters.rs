@@ -50,6 +50,7 @@ pub struct HydrationContext {
     pub packet_path: PathBuf,
     pub prompt_path: PathBuf,
     pub prompt_text: String,
+    pub launcher_prompt_text: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -208,19 +209,20 @@ fn expand_arg_template(value: &OsString, hydration: &HydrationContext) -> OsStri
             &hydration.packet.schema_version.to_string(),
         )
         .replace("{prompt_text}", &hydration.prompt_text);
+    let expanded = expanded.replace("{launcher_prompt}", &hydration.launcher_prompt_text);
     OsString::from(expanded)
 }
 
 fn builtin_hydration_args(kind: AdapterKind) -> Vec<OsString> {
     match kind {
-        AdapterKind::CodexCli => vec![OsString::from("{prompt_text}")],
+        AdapterKind::CodexCli => vec![OsString::from("{launcher_prompt}")],
         AdapterKind::ClaudeCli => vec![
             OsString::from("--append-system-prompt"),
-            OsString::from("{prompt_text}"),
+            OsString::from("{launcher_prompt}"),
         ],
         AdapterKind::GeminiCli => vec![
             OsString::from("--prompt-interactive"),
-            OsString::from("{prompt_text}"),
+            OsString::from("{launcher_prompt}"),
         ],
         AdapterKind::Terminal | AdapterKind::ConfiguredLlm => Vec::new(),
     }
@@ -286,6 +288,7 @@ mod tests {
             packet_path: PathBuf::from("/tmp/rehydration.json"),
             prompt_path: PathBuf::from("/tmp/rehydration.txt"),
             prompt_text: "prompt".into(),
+            launcher_prompt_text: "launcher prompt".into(),
         };
 
         let plan = adapter
@@ -342,6 +345,7 @@ mod tests {
             packet_path: PathBuf::from("/tmp/rehydration.json"),
             prompt_path: PathBuf::from("/tmp/rehydration.txt"),
             prompt_text: "prompt".into(),
+            launcher_prompt_text: "launcher prompt".into(),
         };
 
         let plan = adapter
@@ -408,6 +412,7 @@ mod tests {
             packet_path: PathBuf::from("/tmp/rehydration.json"),
             prompt_path: PathBuf::from("/tmp/rehydration.txt"),
             prompt_text: "prompt".into(),
+            launcher_prompt_text: "launcher prompt".into(),
         };
 
         let plan = adapter

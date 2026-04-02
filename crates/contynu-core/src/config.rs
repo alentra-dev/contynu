@@ -120,7 +120,7 @@ fn builtin_launchers() -> Vec<ConfiguredLlmLauncher> {
             hydrate: true,
             use_pty: true,
             hydration_delivery: HydrationDelivery::EnvOnly,
-            hydration_args: vec!["{prompt_text}".into()],
+            hydration_args: vec!["{launcher_prompt}".into()],
             extra_env: BTreeMap::new(),
         },
         ConfiguredLlmLauncher {
@@ -129,7 +129,7 @@ fn builtin_launchers() -> Vec<ConfiguredLlmLauncher> {
             hydrate: true,
             use_pty: true,
             hydration_delivery: HydrationDelivery::EnvOnly,
-            hydration_args: vec!["--append-system-prompt".into(), "{prompt_text}".into()],
+            hydration_args: vec!["--append-system-prompt".into(), "{launcher_prompt}".into()],
             extra_env: BTreeMap::new(),
         },
         ConfiguredLlmLauncher {
@@ -138,7 +138,7 @@ fn builtin_launchers() -> Vec<ConfiguredLlmLauncher> {
             hydrate: true,
             use_pty: true,
             hydration_delivery: HydrationDelivery::EnvOnly,
-            hydration_args: vec!["--prompt-interactive".into(), "{prompt_text}".into()],
+            hydration_args: vec!["--prompt-interactive".into(), "{launcher_prompt}".into()],
             extra_env: BTreeMap::new(),
         },
     ]

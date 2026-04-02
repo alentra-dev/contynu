@@ -71,6 +71,7 @@ impl StreamKind {
 enum ExecutionTransport {
     Pipes,
     Pty,
+    InheritTerminal,
 }
 
 impl ExecutionTransport {
@@ -78,6 +79,7 @@ impl ExecutionTransport {
         match self {
             Self::Pipes => "pipes",
             Self::Pty => "pty",
+            Self::InheritTerminal => "inherit_terminal",
         }
     }
 }
@@ -309,6 +311,7 @@ impl RuntimeEngine {
 
         let interrupted = Arc::new(AtomicBool::new(false));
         let capture = Self::execute_launch_plan(
+            &state,
             &config.cwd,
             &launch_plan,
             transport,
@@ -522,6 +525,7 @@ impl RuntimeEngine {
     }
 
     fn execute_launch_plan(
+        state: &StatePaths,
         cwd: &std::path::Path,
         launch_plan: &crate::adapters::LaunchPlan,
         transport: ExecutionTransport,
@@ -533,6 +537,16 @@ impl RuntimeEngine {
     ) -> Result<ProcessCapture> {
         match transport {
             ExecutionTransport::Pipes => Self::execute_with_pipes(
+                cwd,
+                launch_plan,
+                journal,
+                store,
+                session_id,
+                turn_id,
+                interrupted,
+            ),
+            ExecutionTransport::InheritTerminal => Self::execute_with_inherited_terminal(
+                state,
                 cwd,
                 launch_plan,
                 journal,
@@ -624,33 +638,16 @@ impl RuntimeEngine {
         })
     }
 
-    #[allow(dead_code)]
     fn execute_with_inherited_terminal(
-        state: &StatePaths,
+        _state: &StatePaths,
         cwd: &std::path::Path,
         launch_plan: &crate::adapters::LaunchPlan,
-        journal: &Journal,
-        store: &MetadataStore,
-        session_id: &SessionId,
-        turn_id: &TurnId,
+        _journal: &Journal,
+        _store: &MetadataStore,
+        _session_id: &SessionId,
+        _turn_id: &TurnId,
         interrupted: Arc<AtomicBool>,
     ) -> Result<ProcessCapture> {
-        #[cfg(unix)]
-        {
-            if launch_plan.stdin_prelude.is_none() {
-                return Self::execute_with_script_logging(
-                    state,
-                    cwd,
-                    launch_plan,
-                    journal,
-                    store,
-                    session_id,
-                    turn_id,
-                    interrupted,
-                );
-            }
-        }
-
         let mut command = Command::new(&launch_plan.executable);
         command.args(&launch_plan.args);
         command.current_dir(cwd);
@@ -1289,6 +1286,7 @@ impl RuntimeEngine {
         let prompt_path = runtime_dir.join("rehydration.txt");
         let packet_json = serde_json::to_string_pretty(&packet)?;
         let prompt = crate::checkpoint::render_rehydration_prompt(&packet, adapter_name);
+        let launcher_prompt = crate::checkpoint::render_launcher_prompt(&packet);
         std::fs::write(&packet_path, &packet_json)?;
         std::fs::write(&prompt_path, &prompt)?;
 
@@ -1317,12 +1315,15 @@ impl RuntimeEngine {
             packet_path,
             prompt_path,
             prompt_text: prompt,
+            launcher_prompt_text: launcher_prompt,
         })
     }
 }
 
 fn resolve_transport(adapter: &AdapterSpec) -> ExecutionTransport {
-    if adapter.use_pty() && cfg!(unix) {
+    if adapter.use_pty() && std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        ExecutionTransport::InheritTerminal
+    } else if adapter.use_pty() && cfg!(unix) {
         ExecutionTransport::Pty
     } else {
         ExecutionTransport::Pipes
