@@ -8,6 +8,7 @@ pub mod files;
 pub mod ids;
 pub mod journal;
 pub mod pty;
+pub mod rendering;
 pub mod runtime;
 pub mod state;
 pub mod store;
@@ -15,9 +16,11 @@ pub mod store;
 pub use adapters::{Adapter, AdapterKind};
 pub use blobs::{BlobDescriptor, BlobStore};
 pub use checkpoint::{
-    CheckpointManager, CheckpointManifest, RehydrationArtifact, RehydrationPacket,
+    CheckpointManager, CheckpointManifest, MemoryProvenance, PacketBudget, RehydrationArtifact,
+    RehydrationPacket,
 };
-pub use config::{ConfiguredLlmLauncher, ContynuConfig, HydrationDelivery};
+pub use config::{ConfiguredLlmLauncher, ContynuConfig, HydrationDelivery, PacketBudgetConfig};
+pub use rendering::PromptFormat;
 pub use error::{ContynuError, Result};
 pub use event::{Actor, EventDraft, EventEnvelope, EventType};
 pub use files::{FileChange, FileChangeKind, FileTracker};

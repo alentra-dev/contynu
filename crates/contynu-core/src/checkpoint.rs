@@ -1,6 +1,6 @@
+use std::collections::VecDeque;
 use std::fs;
 use std::path::Path;
-use std::{collections::VecDeque, fmt::Write as _};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -9,16 +9,43 @@ use serde_json::json;
 use crate::blobs::BlobStore;
 use crate::error::Result;
 use crate::event::{Actor, EventDraft, EventType};
-use crate::ids::{CheckpointId, ProjectId, SessionId};
+use crate::ids::{CheckpointId, MemoryId, ProjectId, SessionId};
 use crate::journal::Journal;
 use crate::state::StatePaths;
-use crate::store::{CheckpointRecord, MemoryObjectKind, MetadataStore};
+use crate::store::{CheckpointRecord, MemoryObject, MemoryObjectKind, MetadataStore};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RehydrationArtifact {
     pub path: String,
     pub kind: String,
     pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryProvenance {
+    pub memory_id: String,
+    pub kind: String,
+    pub source_adapter: Option<String>,
+    pub source_model: Option<String>,
+    pub importance: f64,
+}
+
+pub struct PacketBudget {
+    pub max_total_tokens: usize,
+    pub max_per_category: usize,
+    pub min_per_category: usize,
+    pub dialogue_turns: usize,
+}
+
+impl Default for PacketBudget {
+    fn default() -> Self {
+        Self {
+            max_total_tokens: 4000,
+            max_per_category: 20,
+            min_per_category: 2,
+            dialogue_turns: 5,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +63,8 @@ pub struct RehydrationPacket {
     pub relevant_files: Vec<String>,
     pub recent_verbatim_context: Vec<String>,
     pub retrieval_guidance: Vec<String>,
+    #[serde(default)]
+    pub memory_provenance: Vec<MemoryProvenance>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,8 +175,17 @@ impl<'a> CheckpointManager<'a> {
         session_id: &SessionId,
         target_model: Option<String>,
     ) -> Result<RehydrationPacket> {
+        self.build_packet_with_budget(session_id, target_model, &PacketBudget::default())
+    }
+
+    pub fn build_packet_with_budget(
+        &self,
+        session_id: &SessionId,
+        target_model: Option<String>,
+        budget: &PacketBudget,
+    ) -> Result<RehydrationPacket> {
         let events = self.store.list_events_for_session(session_id)?;
-        let memory = self.store.list_memory_objects(session_id, None)?;
+        let memory = self.store.list_active_memory_objects(session_id, None)?;
         let artifacts = self.store.list_artifacts(Some(session_id))?;
         let dialogue_turns = extract_dialogue_turns(&events);
         let latest_dialogue = dialogue_turns.last();
@@ -172,16 +210,44 @@ impl<'a> CheckpointManager<'a> {
             })
             .unwrap_or_else(|| "Continue the session faithfully from canonical state.".into());
 
-        let stable_facts = trim_list(memory_texts(&memory, MemoryObjectKind::Fact), 8);
-        let constraints = trim_list(memory_texts(&memory, MemoryObjectKind::Constraint), 8);
-        let decisions = trim_list(memory_texts(&memory, MemoryObjectKind::Decision), 8);
-        let open_loops = trim_list(memory_texts(&memory, MemoryObjectKind::Todo), 8);
+        let mut provenance = Vec::new();
+        let mut accessed_ids = Vec::new();
+
+        let (stable_facts, fact_ids) =
+            score_and_select(&memory, MemoryObjectKind::Fact, budget);
+        let (constraints, constraint_ids) =
+            score_and_select(&memory, MemoryObjectKind::Constraint, budget);
+        let (decisions, decision_ids) =
+            score_and_select(&memory, MemoryObjectKind::Decision, budget);
+        let (open_loops, todo_ids) =
+            score_and_select(&memory, MemoryObjectKind::Todo, budget);
+
+        for ids in [&fact_ids, &constraint_ids, &decision_ids, &todo_ids] {
+            accessed_ids.extend(ids.iter().cloned());
+        }
+
+        // Build provenance from the selected memories
+        for mem in &memory {
+            if accessed_ids.contains(&mem.memory_id) {
+                provenance.push(MemoryProvenance {
+                    memory_id: mem.memory_id.to_string(),
+                    kind: mem.kind.as_str().to_string(),
+                    source_adapter: mem.source_adapter.clone(),
+                    source_model: mem.source_model.clone(),
+                    importance: mem.importance,
+                });
+            }
+        }
+
+        // Track access for included memories
+        let _ = self.store.increment_memory_access(&accessed_ids);
+
         let relevant_files = Vec::new();
         let recent_verbatim_context = if !dialogue_turns.is_empty() {
             dialogue_turns
                 .iter()
                 .rev()
-                .take(3)
+                .take(budget.dialogue_turns)
                 .collect::<Vec<_>>()
                 .into_iter()
                 .rev()
@@ -209,7 +275,7 @@ impl<'a> CheckpointManager<'a> {
                         None
                     }
                 })
-                .take(8)
+                .take(budget.dialogue_turns * 2)
                 .collect::<Vec<_>>()
                 .into_iter()
                 .rev()
@@ -222,7 +288,6 @@ impl<'a> CheckpointManager<'a> {
             )
         } else if let Some(summary) = memory
             .iter()
-            .rev()
             .find(|item| item.kind == MemoryObjectKind::Summary)
         {
             summary.text.clone()
@@ -235,8 +300,9 @@ impl<'a> CheckpointManager<'a> {
             )
         };
 
+        let max_artifacts = budget.max_per_category;
         Ok(RehydrationPacket {
-            schema_version: 1,
+            schema_version: 2,
             project_id: session_id.clone(),
             target_model,
             mission,
@@ -248,7 +314,7 @@ impl<'a> CheckpointManager<'a> {
             relevant_artifacts: artifacts
                 .into_iter()
                 .rev()
-                .take(8)
+                .take(max_artifacts)
                 .collect::<Vec<_>>()
                 .into_iter()
                 .rev()
@@ -265,161 +331,72 @@ impl<'a> CheckpointManager<'a> {
                 "Use structured memory objects for durable facts, constraints, and decisions.".into(),
                 "Prefer artifacts and tracked files over regenerated summaries when recovering work.".into(),
             ],
+            memory_provenance: provenance,
         })
     }
 }
 
+/// Backward-compatible wrapper: renders using StructuredText format.
 pub fn render_rehydration_prompt(packet: &RehydrationPacket, adapter_name: &str) -> String {
-    let mut prompt = String::new();
-    let _ = writeln!(prompt, "Contynu continuity context for {}.", adapter_name);
-    prompt
-        .push_str("Use this as authoritative project memory carried forward from prior work.\n\n");
-    prompt.push_str("Project\n\n");
-    let _ = writeln!(prompt, "- ID: {}", packet.project_id);
-    if let Some(target_model) = packet.target_model.as_deref() {
-        let _ = writeln!(prompt, "- Target model: {}", target_model);
-    }
-    let _ = writeln!(prompt, "- Schema version: {}", packet.schema_version);
-    prompt.push('\n');
-
-    prompt.push_str("Mission\n\n");
-    let _ = writeln!(prompt, "- {}", packet.mission);
-    prompt.push('\n');
-
-    prompt.push_str("Current State\n\n");
-    let _ = writeln!(prompt, "- {}", packet.current_state);
-    prompt.push('\n');
-
-    write_bullets(
-        &mut prompt,
-        "Recent Conversation",
-        &packet.recent_verbatim_context,
-    );
-    write_bullets(&mut prompt, "Stable Facts", &packet.stable_facts);
-    write_bullets(&mut prompt, "Constraints", &packet.constraints);
-    write_bullets(&mut prompt, "Decisions", &packet.decisions);
-    write_bullets(&mut prompt, "Open Loops", &packet.open_loops);
-    write_bullets(&mut prompt, "Relevant Files", &packet.relevant_files);
-
-    let artifact_lines = packet
-        .relevant_artifacts
-        .iter()
-        .map(|artifact| {
-            format!(
-                "{} | {} | {}",
-                artifact.kind, artifact.path, artifact.sha256
-            )
-        })
-        .collect::<Vec<_>>();
-    write_bullets(&mut prompt, "Relevant Artifacts", &artifact_lines);
-    write_bullets(
-        &mut prompt,
-        "Retrieval Guidance",
-        &packet.retrieval_guidance,
-    );
-
-    prompt.push_str(
-        "Carry this continuity forward naturally. If the user asks about prior work, answer from this memory instead of claiming there is no earlier context.\n",
-    );
-    prompt
+    crate::rendering::render_rehydration(
+        packet,
+        crate::rendering::PromptFormat::StructuredText,
+        adapter_name,
+    )
 }
 
+/// Backward-compatible wrapper: renders using StructuredText format.
 pub fn render_launcher_prompt(packet: &RehydrationPacket) -> String {
-    let mut sections = Vec::new();
-
-    sections.push(format!(
-        "Continue this Contynu project with prior memory. Project: {}.",
-        packet.project_id
-    ));
-    sections.push(format!("Mission: {}", one_line(&packet.mission)));
-    sections.push(format!(
-        "Current state: {}",
-        one_line(&packet.current_state)
-    ));
-
-    if !packet.recent_verbatim_context.is_empty() {
-        let recent = packet
-            .recent_verbatim_context
-            .iter()
-            .rev()
-            .take(4)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .map(|item| one_line(item))
-            .collect::<Vec<_>>()
-            .join(" | ");
-        sections.push(format!("Recent conversation: {}", recent));
-    }
-
-    if !packet.stable_facts.is_empty() {
-        let facts = packet
-            .stable_facts
-            .iter()
-            .take(3)
-            .map(|item| one_line(item))
-            .collect::<Vec<_>>()
-            .join(" | ");
-        sections.push(format!("Stable facts: {}", facts));
-    }
-
-    if !packet.open_loops.is_empty() {
-        let open_loops = packet
-            .open_loops
-            .iter()
-            .take(3)
-            .map(|item| one_line(item))
-            .collect::<Vec<_>>()
-            .join(" | ");
-        sections.push(format!("Open loops: {}", open_loops));
-    }
-
-    sections.push(
-        "Use this as prior context, but do not restate it unless relevant. If exact history is needed, use the Contynu rehydration files from the environment."
-            .into(),
-    );
-
-    sections.join("\n")
+    crate::rendering::render_launcher(packet, crate::rendering::PromptFormat::StructuredText)
 }
 
-fn memory_texts(memory: &[crate::store::MemoryObject], kind: MemoryObjectKind) -> Vec<String> {
-    memory
+/// Scores memories by importance, recency, and confidence, then selects the top items
+/// within the budget. Returns (selected texts, selected memory IDs).
+fn score_and_select(
+    memories: &[MemoryObject],
+    kind: MemoryObjectKind,
+    budget: &PacketBudget,
+) -> (Vec<String>, Vec<MemoryId>) {
+    let now = Utc::now();
+    let mut scored: Vec<(f64, &MemoryObject)> = memories
         .iter()
-        .filter(|item| item.kind == kind)
-        .map(|item| item.text.clone())
-        .collect()
+        .filter(|m| m.kind == kind)
+        .map(|m| {
+            let days_old = (now - m.created_at).num_hours().max(0) as f64 / 24.0;
+            let recency = 1.0 / (1.0 + days_old * 0.1);
+            let confidence = m.confidence.unwrap_or(0.5);
+            let score = m.importance * 0.5 + recency * 0.3 + confidence * 0.2;
+            (score, m)
+        })
+        .collect();
+
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let limit = budget.max_per_category.max(budget.min_per_category);
+    let selected: Vec<&MemoryObject> = scored.into_iter().take(limit).map(|(_, m)| m).collect();
+
+    // Estimate tokens and trim if over budget share (budget / 4 categories)
+    let token_budget = budget.max_total_tokens / 4;
+    let mut texts = Vec::new();
+    let mut ids = Vec::new();
+    let mut token_estimate = 0usize;
+
+    for m in &selected {
+        let word_count = m.text.split_whitespace().count();
+        let tokens = (word_count as f64 * 1.3) as usize;
+        if token_estimate + tokens > token_budget && texts.len() >= budget.min_per_category {
+            break;
+        }
+        texts.push(m.text.clone());
+        ids.push(m.memory_id.clone());
+        token_estimate += tokens;
+    }
+
+    (texts, ids)
 }
 
 fn path_string(path: &Path) -> String {
     path.display().to_string()
-}
-
-fn write_bullets(buffer: &mut String, title: &str, items: &[String]) {
-    buffer.push_str(title);
-    buffer.push_str("\n\n");
-    if items.is_empty() {
-        buffer.push_str("- None recorded.\n\n");
-        return;
-    }
-    for item in items {
-        let _ = writeln!(buffer, "- {}", one_line(item));
-    }
-    buffer.push('\n');
-}
-
-fn trim_list(items: Vec<String>, limit: usize) -> Vec<String> {
-    if items.len() <= limit {
-        items
-    } else {
-        items
-            .into_iter()
-            .rev()
-            .take(limit)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect()
-    }
 }
 
 fn one_line(text: &str) -> String {
@@ -624,13 +601,64 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::CheckpointManager;
+    use super::{render_launcher_prompt, CheckpointManager, RehydrationPacket};
     use crate::blobs::BlobStore;
     use crate::event::{Actor, EventDraft, EventType};
-    use crate::ids::{MemoryId, SessionId};
+    use crate::ids::{MemoryId, ProjectId, SessionId};
     use crate::journal::Journal;
     use crate::state::StatePaths;
     use crate::store::{MemoryObject, MemoryObjectKind, MetadataStore, SessionRecord};
+
+    fn prompt_packet() -> RehydrationPacket {
+        RehydrationPacket {
+            schema_version: 1,
+            project_id: ProjectId::parse("prj_019d503680a475a3ae465200a90cd4fa").unwrap(),
+            target_model: None,
+            mission: "Continue the session faithfully from canonical state.".into(),
+            stable_facts: vec![
+                "Command `codex` exited with Some(0) using pty transport.".into(),
+                "Frank secret santa is Dun".into(),
+                "Command `gemini` exited with Some(0) using pty transport.".into(),
+            ],
+            constraints: Vec::new(),
+            decisions: vec!["Keep this in continuity memory".into()],
+            current_state:
+                "Last turn used `gemini` via `gemini_cli` over `pty` and exited with Some(0)."
+                    .into(),
+            open_loops: vec!["Confirm the next model can recall Frank's secret santa.".into()],
+            relevant_artifacts: Vec::new(),
+            relevant_files: Vec::new(),
+            recent_verbatim_context: vec![
+                "User: what is the name of Frank's secret santa?".into(),
+                "Assistant: Frank's secret santa is Dun.".into(),
+            ],
+            retrieval_guidance: Vec::new(),
+            memory_provenance: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn launcher_prompt_filters_operational_noise() {
+        let prompt = render_launcher_prompt(&prompt_packet());
+        assert!(prompt.contains("Frank secret santa is Dun"));
+        assert!(prompt.contains("User: what is the name of Frank's secret santa?"));
+        assert!(prompt.contains("Assistant: Frank's secret santa is Dun."));
+        assert!(prompt.contains("Decisions: Keep this in continuity memory"));
+        assert!(!prompt.contains("Command `codex` exited"));
+        assert!(!prompt.contains("Command `gemini` exited"));
+        assert!(!prompt.contains("Last turn used `gemini`"));
+    }
+
+    #[test]
+    fn launcher_prompt_keeps_meaningful_current_state() {
+        let mut packet = prompt_packet();
+        packet.current_state =
+            "The user corrected the spelling of Frank's name and wants that remembered.".into();
+        let prompt = render_launcher_prompt(&packet);
+        assert!(prompt.contains(
+            "Current focus: The user corrected the spelling of Frank's name and wants that remembered."
+        ));
+    }
 
     #[test]
     fn checkpoint_generation_produces_packet() {
@@ -681,6 +709,13 @@ mod tests {
                 source_event_ids: vec![event.event_id.clone()],
                 created_at: chrono::Utc::now(),
                 superseded_by: None,
+                source_adapter: None,
+                source_model: None,
+                importance: 0.85,
+                access_count: 0,
+                last_accessed_at: None,
+                consolidated_from: Vec::new(),
+                text_hash: None,
             })
             .unwrap();
 

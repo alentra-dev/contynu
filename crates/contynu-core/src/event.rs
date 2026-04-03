@@ -74,6 +74,8 @@ pub enum EventType {
     RehydrationPacketCreated,
     MemoryObjectDerived,
     MemoryObjectSuperseded,
+    MemoryConsolidated,
+    HandoffAssessed,
 }
 
 impl EventType {
@@ -115,6 +117,8 @@ impl EventType {
             Self::RehydrationPacketCreated => "rehydration_packet_created",
             Self::MemoryObjectDerived => "memory_object_derived",
             Self::MemoryObjectSuperseded => "memory_object_superseded",
+            Self::MemoryConsolidated => "memory_consolidated",
+            Self::HandoffAssessed => "handoff_assessed",
         }
     }
 }

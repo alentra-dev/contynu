@@ -10,7 +10,44 @@ use crate::error::Result;
 pub struct ContynuConfig {
     #[serde(default)]
     pub llm_launchers: Vec<ConfiguredLlmLauncher>,
+    #[serde(default)]
+    pub packet_budget: PacketBudgetConfig,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PacketBudgetConfig {
+    #[serde(default = "default_4000")]
+    pub max_total_tokens: usize,
+    #[serde(default = "default_20")]
+    pub max_per_category: usize,
+    #[serde(default = "default_5")]
+    pub dialogue_turns: usize,
+}
+
+impl Default for PacketBudgetConfig {
+    fn default() -> Self {
+        Self {
+            max_total_tokens: 4000,
+            max_per_category: 20,
+            dialogue_turns: 5,
+        }
+    }
+}
+
+impl PacketBudgetConfig {
+    pub fn to_budget(&self) -> crate::checkpoint::PacketBudget {
+        crate::checkpoint::PacketBudget {
+            max_total_tokens: self.max_total_tokens,
+            max_per_category: self.max_per_category,
+            min_per_category: 2,
+            dialogue_turns: self.dialogue_turns,
+        }
+    }
+}
+
+fn default_4000() -> usize { 4000 }
+fn default_20() -> usize { 20 }
+fn default_5() -> usize { 5 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConfiguredLlmLauncher {
@@ -27,6 +64,8 @@ pub struct ConfiguredLlmLauncher {
     pub hydration_args: Vec<String>,
     #[serde(default)]
     pub extra_env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub prompt_format: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -104,6 +143,7 @@ impl ContynuConfig {
     pub fn with_builtin_launchers() -> Self {
         Self {
             llm_launchers: builtin_launchers(),
+            packet_budget: PacketBudgetConfig::default(),
         }
     }
 }
@@ -119,9 +159,10 @@ fn builtin_launchers() -> Vec<ConfiguredLlmLauncher> {
             aliases: vec!["codex-cli".into()],
             hydrate: true,
             use_pty: true,
-            hydration_delivery: HydrationDelivery::EnvOnly,
-            hydration_args: vec!["{launcher_prompt}".into()],
+            hydration_delivery: HydrationDelivery::EnvAndStdin,
+            hydration_args: Vec::new(),
             extra_env: BTreeMap::new(),
+            prompt_format: None,
         },
         ConfiguredLlmLauncher {
             command: "claude".into(),
@@ -129,17 +170,22 @@ fn builtin_launchers() -> Vec<ConfiguredLlmLauncher> {
             hydrate: true,
             use_pty: true,
             hydration_delivery: HydrationDelivery::EnvOnly,
-            hydration_args: vec!["--append-system-prompt".into(), "{launcher_prompt}".into()],
+            hydration_args: vec!["--append-system-prompt".into(), "{prompt_text}".into()],
             extra_env: BTreeMap::new(),
+            prompt_format: None,
         },
         ConfiguredLlmLauncher {
             command: "gemini".into(),
             aliases: vec!["gemini-cli".into()],
             hydrate: true,
             use_pty: true,
-            hydration_delivery: HydrationDelivery::EnvOnly,
-            hydration_args: vec!["--prompt-interactive".into(), "{launcher_prompt}".into()],
+            hydration_delivery: HydrationDelivery::EnvAndStdin,
+            hydration_args: vec![
+                "--prompt-interactive".into(),
+                "Silently read GEMINI.md in the working directory and remember its contents. Do NOT summarize it, do NOT search for anything, do NOT take any other action. Just read it and wait for the user's next message.".into(),
+            ],
             extra_env: BTreeMap::new(),
+            prompt_format: None,
         },
     ]
 }
@@ -227,7 +273,7 @@ mod tests {
                 .find_llm_launcher("codex")
                 .unwrap()
                 .hydration_delivery,
-            HydrationDelivery::EnvOnly
+            HydrationDelivery::EnvAndStdin
         );
         assert_eq!(
             config
@@ -241,7 +287,7 @@ mod tests {
                 .find_llm_launcher("gemini")
                 .unwrap()
                 .hydration_delivery,
-            HydrationDelivery::EnvOnly
+            HydrationDelivery::EnvAndStdin
         );
     }
 

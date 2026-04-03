@@ -250,7 +250,7 @@ impl RuntimeEngine {
                 &journal,
                 &session_id,
                 &turn_id,
-                adapter.as_str(),
+                &adapter,
             )?)
         } else {
             None
@@ -307,6 +307,14 @@ impl RuntimeEngine {
             config.command[1..].to_vec(),
             hydration.as_ref(),
         )?;
+
+        // Write context files for adapters that read project instructions from files.
+        let context_file = if let Some(ref hydration) = hydration {
+            write_context_file(&config.cwd, &adapter, &hydration.prompt_text)?
+        } else {
+            None
+        };
+
         startup_indicator.stop();
 
         let interrupted = Arc::new(AtomicBool::new(false));
@@ -321,6 +329,11 @@ impl RuntimeEngine {
             &turn_id,
             Arc::clone(&interrupted),
         )?;
+
+        // Restore original context file after execution.
+        if let Some(ref path) = context_file {
+            cleanup_context_file(path);
+        }
 
         Self::register_stream_artifacts(
             &journal,
@@ -545,16 +558,34 @@ impl RuntimeEngine {
                 turn_id,
                 interrupted,
             ),
-            ExecutionTransport::InheritTerminal => Self::execute_with_inherited_terminal(
-                state,
-                cwd,
-                launch_plan,
-                journal,
-                store,
-                session_id,
-                turn_id,
-                interrupted,
-            ),
+            ExecutionTransport::InheritTerminal => {
+                #[cfg(unix)]
+                {
+                    Self::execute_with_script_logging(
+                        state,
+                        cwd,
+                        launch_plan,
+                        journal,
+                        store,
+                        session_id,
+                        turn_id,
+                        interrupted,
+                    )
+                }
+                #[cfg(not(unix))]
+                {
+                    Self::execute_with_inherited_terminal(
+                        state,
+                        cwd,
+                        launch_plan,
+                        journal,
+                        store,
+                        session_id,
+                        turn_id,
+                        interrupted,
+                    )
+                }
+            }
             ExecutionTransport::Pty => Self::execute_with_pty(
                 cwd,
                 launch_plan,
@@ -638,6 +669,7 @@ impl RuntimeEngine {
         })
     }
 
+    #[allow(dead_code)]
     fn execute_with_inherited_terminal(
         _state: &StatePaths,
         cwd: &std::path::Path,
@@ -696,18 +728,22 @@ impl RuntimeEngine {
         let (prelude_sender, prelude_receiver) = mpsc::channel::<()>();
         let stdin_prelude = launch_plan.stdin_prelude.clone();
         let stdin_capture_thread = Arc::clone(&stdin_capture);
+        let stdin_is_tty = std::io::stdin().is_terminal();
         let stdin_handle = thread::spawn(move || {
             if let Some(stdin_prelude) = stdin_prelude.as_ref() {
-                match prelude_receiver.recv_timeout(std::time::Duration::from_secs(8)) {
-                    Ok(()) | Err(RecvTimeoutError::Timeout) => {
-                        if stdin.write_all(stdin_prelude).is_ok() {
-                            let _ = stdin.flush();
-                            if let Ok(mut captured) = stdin_capture_thread.lock() {
-                                captured.extend_from_slice(stdin_prelude);
-                            }
-                        }
+                if stdin_is_tty {
+                    // Interactive: wait for launcher readiness before injecting prelude.
+                    match prelude_receiver.recv_timeout(std::time::Duration::from_secs(8)) {
+                        Ok(()) | Err(RecvTimeoutError::Timeout) => {}
+                        Err(RecvTimeoutError::Disconnected) => return,
                     }
-                    Err(RecvTimeoutError::Disconnected) => {}
+                }
+                // Non-interactive (piped): send prelude immediately.
+                if stdin.write_all(stdin_prelude).is_ok() {
+                    let _ = stdin.flush();
+                    if let Ok(mut captured) = stdin_capture_thread.lock() {
+                        captured.extend_from_slice(stdin_prelude);
+                    }
                 }
             }
             let mut input = std::io::stdin();
@@ -1127,6 +1163,14 @@ impl RuntimeEngine {
             .collect::<Vec<_>>()
             .join(" ");
         let latest_dialogue = latest_dialogue_from_events(&source_events);
+
+        let source_adapter = Some(adapter_name.to_string());
+        let source_model = store
+            .get_session(session_id)
+            .ok()
+            .flatten()
+            .and_then(|session| session.model_name);
+
         let summary = if let Some((prompt, response)) = latest_dialogue.as_ref() {
             format!(
                 "Most recent exchange: user asked \"{}\" and the assistant answered \"{}\".",
@@ -1149,8 +1193,11 @@ impl RuntimeEngine {
             MemoryObjectKind::Summary,
             summary,
             Some(0.9),
+            0.4, // summaries are replaceable
             true,
             source_event_ids.clone(),
+            source_adapter.clone(),
+            source_model.clone(),
         )?;
         if latest_dialogue.is_none() || interrupted || exit_code.unwrap_or_default() != 0 {
             Self::insert_memory_object(
@@ -1166,8 +1213,11 @@ impl RuntimeEngine {
                     transport.as_str()
                 ),
                 Some(0.8),
+                0.7,
                 false,
                 source_event_ids.clone(),
+                source_adapter.clone(),
+                source_model.clone(),
             )?;
         }
         if interrupted {
@@ -1179,8 +1229,11 @@ impl RuntimeEngine {
                 MemoryObjectKind::Todo,
                 "The previous turn was interrupted and may need manual continuation.".into(),
                 Some(0.8),
+                0.75,
                 false,
                 source_event_ids.clone(),
+                source_adapter.clone(),
+                source_model.clone(),
             )?;
         } else if exit_code.unwrap_or_default() != 0 {
             Self::insert_memory_object(
@@ -1194,11 +1247,21 @@ impl RuntimeEngine {
                     command_text, exit_code
                 ),
                 Some(0.85),
+                0.75,
                 false,
                 source_event_ids.clone(),
+                source_adapter.clone(),
+                source_model.clone(),
             )?;
         }
         for candidate in derive_structured_candidates(&source_events, exit_code) {
+            let importance = match candidate.kind {
+                MemoryObjectKind::Constraint => 0.9,
+                MemoryObjectKind::Decision => 0.85,
+                MemoryObjectKind::Todo => 0.75,
+                MemoryObjectKind::Fact => 0.7,
+                _ => 0.6,
+            };
             Self::insert_memory_object(
                 journal,
                 store,
@@ -1207,10 +1270,170 @@ impl RuntimeEngine {
                 candidate.kind,
                 candidate.text,
                 Some(candidate.confidence),
+                importance,
                 false,
                 source_event_ids.clone(),
+                source_adapter.clone(),
+                source_model.clone(),
             )?;
         }
+
+        // When there's no dialogue pairing (e.g. non-interactive -p mode), extract
+        // the actual LLM response from stdout_captured as a Fact so it persists
+        // across handoffs.
+        if latest_dialogue.is_none() && exit_code == Some(0) {
+            let stdout_text = extract_captured_response(&source_events);
+            if let Some(response) = stdout_text {
+                let truncated = if response.len() > 500 {
+                    format!("{}...", &response[..500])
+                } else {
+                    response
+                };
+                Self::insert_memory_object(
+                    journal,
+                    store,
+                    session_id,
+                    turn_id,
+                    MemoryObjectKind::Fact,
+                    format!("LLM response: {}", truncated),
+                    Some(0.85),
+                    0.8,
+                    false,
+                    source_event_ids.clone(),
+                    source_adapter.clone(),
+                    source_model.clone(),
+                )?;
+            }
+        }
+
+        // Trigger consolidation if active memory count is high
+        let active_count = store.count_active_memories(session_id, None)?;
+        if active_count > 50 {
+            Self::consolidate_memories(journal, store, session_id, turn_id)?;
+        }
+
+        Ok(())
+    }
+
+    fn consolidate_memories(
+        journal: &Journal,
+        store: &MetadataStore,
+        session_id: &SessionId,
+        turn_id: &TurnId,
+    ) -> Result<()> {
+        let consolidation_kinds = [
+            MemoryObjectKind::Fact,
+            MemoryObjectKind::Todo,
+            MemoryObjectKind::Summary,
+        ];
+        let mut total_consolidated = 0usize;
+
+        for kind in consolidation_kinds {
+            let active = store.list_active_memory_objects(session_id, Some(kind))?;
+            if active.len() <= 20 {
+                continue;
+            }
+
+            // Sort by importance ASC -- take the bottom 50% for consolidation
+            let mut sorted = active;
+            sorted.sort_by(|a, b| a.importance.partial_cmp(&b.importance).unwrap_or(std::cmp::Ordering::Equal));
+            let consolidation_count = sorted.len() / 2;
+            let candidates = &sorted[..consolidation_count];
+
+            // Group by simple word overlap (3+ shared content words)
+            let mut groups: Vec<Vec<usize>> = Vec::new();
+            let mut assigned = vec![false; candidates.len()];
+
+            for i in 0..candidates.len() {
+                if assigned[i] { continue; }
+                let words_i: std::collections::HashSet<_> = candidates[i].text
+                    .to_ascii_lowercase()
+                    .split_whitespace()
+                    .filter(|w| w.len() > 3)
+                    .map(String::from)
+                    .collect();
+                let mut group = vec![i];
+                assigned[i] = true;
+
+                for j in (i + 1)..candidates.len() {
+                    if assigned[j] { continue; }
+                    let words_j: std::collections::HashSet<_> = candidates[j].text
+                        .to_ascii_lowercase()
+                        .split_whitespace()
+                        .filter(|w| w.len() > 3)
+                        .map(String::from)
+                        .collect();
+                    let shared = words_i.intersection(&words_j).count();
+                    if shared >= 3 {
+                        group.push(j);
+                        assigned[j] = true;
+                    }
+                }
+
+                if group.len() >= 2 {
+                    groups.push(group);
+                }
+            }
+
+            for group in &groups {
+                let members: Vec<&MemoryObject> = group.iter().map(|&i| &candidates[i]).collect();
+                let max_importance = members.iter().map(|m| m.importance).fold(0.0_f64, f64::max);
+                let combined_text = members.iter()
+                    .map(|m| m.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                let consolidated_from: Vec<MemoryId> = members.iter()
+                    .map(|m| m.memory_id.clone())
+                    .collect();
+
+                let memory_id = MemoryId::new();
+                // Supersede the originals
+                for member in &members {
+                    store.supersede_memory_kind_single(session_id, &member.memory_id, &memory_id)?;
+                }
+
+                let text_hash = Some(crate::event::sha256_hex(
+                    combined_text.trim().to_lowercase().as_bytes(),
+                ));
+                let memory = MemoryObject {
+                    memory_id: memory_id.clone(),
+                    session_id: session_id.clone(),
+                    kind,
+                    status: "active".into(),
+                    text: format!("[Consolidated] {}", combined_text),
+                    confidence: Some(0.85),
+                    source_event_ids: Vec::new(),
+                    created_at: Utc::now(),
+                    superseded_by: None,
+                    source_adapter: Some("contynu_consolidation".into()),
+                    source_model: None,
+                    importance: max_importance,
+                    access_count: 0,
+                    last_accessed_at: None,
+                    consolidated_from,
+                    text_hash,
+                };
+                store.insert_memory_object(&memory)?;
+                total_consolidated += group.len();
+            }
+        }
+
+        if total_consolidated > 0 {
+            Self::persist(
+                journal,
+                store,
+                EventDraft::new(
+                    session_id.clone(),
+                    Some(turn_id.clone()),
+                    Actor::System,
+                    EventType::MemoryConsolidated,
+                    json!({
+                        "memories_consolidated": total_consolidated,
+                    }),
+                ),
+            )?;
+        }
+
         Ok(())
     }
 
@@ -1222,8 +1445,11 @@ impl RuntimeEngine {
         kind: MemoryObjectKind,
         text: String,
         confidence: Option<f64>,
+        importance: f64,
         supersede_kind: bool,
         source_event_ids: Vec<crate::ids::EventId>,
+        source_adapter: Option<String>,
+        source_model: Option<String>,
     ) -> Result<Option<MemoryId>> {
         if store
             .find_active_memory_by_text(session_id, kind, &text)?
@@ -1235,6 +1461,9 @@ impl RuntimeEngine {
         if supersede_kind {
             store.supersede_memory_kind(session_id, kind, &memory_id)?;
         }
+        let text_hash = Some(crate::event::sha256_hex(
+            text.trim().to_lowercase().as_bytes(),
+        ));
         let memory = MemoryObject {
             memory_id: memory_id.clone(),
             session_id: session_id.clone(),
@@ -1245,6 +1474,13 @@ impl RuntimeEngine {
             source_event_ids,
             created_at: Utc::now(),
             superseded_by: None,
+            source_adapter: source_adapter.clone(),
+            source_model: source_model.clone(),
+            importance,
+            access_count: 0,
+            last_accessed_at: None,
+            consolidated_from: Vec::new(),
+            text_hash,
         };
         store.insert_memory_object(&memory)?;
         if kind == MemoryObjectKind::Summary {
@@ -1263,6 +1499,9 @@ impl RuntimeEngine {
                     "kind": kind.as_str(),
                     "text": text,
                     "confidence": confidence,
+                    "importance": importance,
+                    "source_adapter": source_adapter,
+                    "source_model": source_model,
                 }),
             ),
         )?;
@@ -1276,7 +1515,7 @@ impl RuntimeEngine {
         journal: &Journal,
         project_id: &ProjectId,
         turn_id: &TurnId,
-        adapter_name: &str,
+        adapter: &AdapterSpec,
     ) -> Result<HydrationContext> {
         let manager = CheckpointManager::new(state, store, blob_store);
         let packet = manager.build_packet(project_id, None)?;
@@ -1285,8 +1524,10 @@ impl RuntimeEngine {
         let packet_path = runtime_dir.join("rehydration.json");
         let prompt_path = runtime_dir.join("rehydration.txt");
         let packet_json = serde_json::to_string_pretty(&packet)?;
-        let prompt = crate::checkpoint::render_rehydration_prompt(&packet, adapter_name);
-        let launcher_prompt = crate::checkpoint::render_launcher_prompt(&packet);
+        let format = adapter.prompt_format();
+        let adapter_name = adapter.as_str();
+        let prompt = crate::rendering::render_rehydration(&packet, format, adapter_name);
+        let launcher_prompt = crate::rendering::render_launcher(&packet, format);
         std::fs::write(&packet_path, &packet_json)?;
         std::fs::write(&prompt_path, &prompt)?;
 
@@ -1320,10 +1561,74 @@ impl RuntimeEngine {
     }
 }
 
+/// Write a context file (AGENTS.md, GEMINI.md) in the working directory so that
+/// LLM CLIs pick up the rehydration context automatically. Returns the path if
+/// a file was written, so it can be cleaned up after the session.
+fn write_context_file(
+    cwd: &std::path::Path,
+    adapter: &AdapterSpec,
+    prompt_text: &str,
+) -> crate::error::Result<Option<std::path::PathBuf>> {
+    let filename = match adapter.kind() {
+        crate::AdapterKind::CodexCli => "AGENTS.md",
+        crate::AdapterKind::GeminiCli => "GEMINI.md",
+        // Claude uses --append-system-prompt; no file needed.
+        // ConfiguredLlm and Terminal: no standard file.
+        _ => return Ok(None),
+    };
+
+    let path = cwd.join(filename);
+
+    // If the file already exists, prepend our context with a clear separator
+    // and save the original so we can restore it.
+    let backup_path = cwd.join(format!(".{}.contynu-backup", filename));
+    if path.exists() {
+        std::fs::copy(&path, &backup_path)?;
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n\n---\n# Original {} content below\n---\n\n{}",
+                prompt_text, filename, existing
+            ),
+        )?;
+    } else {
+        std::fs::write(&path, prompt_text)?;
+    }
+
+    Ok(Some(path))
+}
+
+/// Restore the original context file after session ends.
+fn cleanup_context_file(path: &std::path::Path) {
+    let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+    let backup = path
+        .parent()
+        .unwrap_or(path)
+        .join(format!(".{}.contynu-backup", filename));
+
+    if backup.exists() {
+        // Restore original
+        let _ = std::fs::copy(&backup, path);
+        let _ = std::fs::remove_file(&backup);
+    } else {
+        // We created it fresh, just remove
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 fn resolve_transport(adapter: &AdapterSpec) -> ExecutionTransport {
-    if adapter.use_pty() && std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+    let stdin_is_tty = std::io::stdin().is_terminal();
+    let stdout_is_tty = std::io::stdout().is_terminal();
+
+    if adapter.use_pty() && stdin_is_tty && stdout_is_tty {
+        // Real terminal: use script-based logging to capture while preserving UX.
         ExecutionTransport::InheritTerminal
     } else if adapter.use_pty() && cfg!(unix) {
+        // PTY requested and on Unix: use PTY even without a real terminal.
+        // This covers configured launchers that explicitly need PTY, and
+        // also non-interactive runs where the stdin prelude will be injected
+        // into the PTY's stdin after a short delay.
         ExecutionTransport::Pty
     } else {
         ExecutionTransport::Pipes
@@ -1728,6 +2033,34 @@ fn dedupe_lines(lines: Vec<String>) -> Vec<String> {
     deduped
 }
 
+/// Extract the meaningful text from stdout_captured events, filtering UI noise.
+fn extract_captured_response(events: &[EventRecord]) -> Option<String> {
+    let mut parts = Vec::new();
+    for event in events {
+        if event.event_type == "stdout_captured" || event.event_type == "message_output" {
+            if let Some(text) = event
+                .payload_json
+                .get("text")
+                .and_then(|v| v.as_str())
+            {
+                // Filter out lines that are terminal UI noise
+                let clean: Vec<&str> = text
+                    .lines()
+                    .map(|l| l.trim())
+                    .filter(|l| !l.is_empty())
+                    .filter(|l| !is_terminal_ui_line(l))
+                    .filter(|l| l.chars().any(|c| c.is_alphabetic()))
+                    .collect();
+                if !clean.is_empty() {
+                    parts.push(clean.join(" "));
+                }
+            }
+        }
+    }
+    let combined = parts.join(" ");
+    if combined.is_empty() { None } else { Some(combined) }
+}
+
 fn latest_dialogue_from_events(events: &[EventRecord]) -> Option<(String, String)> {
     let mut prompts = Vec::new();
     let mut responses = Vec::new();
@@ -1767,8 +2100,10 @@ fn derive_structured_candidates(
     let mut candidates = Vec::new();
     for event in events {
         if let Some(text) = extract_event_text(event) {
-            for line in text.lines() {
-                let line = line.trim();
+            let lines: Vec<&str> = text.lines().map(|l| l.trim()).collect();
+
+            // Strategy 1: Explicit prefix matching (highest confidence)
+            for line in &lines {
                 if line.is_empty() {
                     continue;
                 }
@@ -1776,7 +2111,7 @@ fn derive_structured_candidates(
                     candidates.push(MemoryCandidate {
                         kind: MemoryObjectKind::Fact,
                         text: value.to_string(),
-                        confidence: 0.92,
+                        confidence: 0.95,
                     });
                 } else if let Some(value) = strip_prefix_case_insensitive(line, "constraint:") {
                     candidates.push(MemoryCandidate {
@@ -1795,6 +2130,74 @@ fn derive_structured_candidates(
                         kind: MemoryObjectKind::Todo,
                         text: value.to_string(),
                         confidence: 0.9,
+                    });
+                }
+            }
+
+            // Strategy 2: Markdown header sections (### Facts, ### Decisions, etc.)
+            let mut current_header_kind: Option<MemoryObjectKind> = None;
+            for line in &lines {
+                if let Some(header) = line.strip_prefix("### ").or_else(|| line.strip_prefix("## ")) {
+                    let lower = header.to_ascii_lowercase();
+                    current_header_kind = if lower.starts_with("fact") {
+                        Some(MemoryObjectKind::Fact)
+                    } else if lower.starts_with("constraint") {
+                        Some(MemoryObjectKind::Constraint)
+                    } else if lower.starts_with("decision") {
+                        Some(MemoryObjectKind::Decision)
+                    } else if lower.starts_with("todo") || lower.starts_with("task") || lower.starts_with("open") {
+                        Some(MemoryObjectKind::Todo)
+                    } else {
+                        None
+                    };
+                } else if let Some(kind) = current_header_kind {
+                    if let Some(item) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+                        let item = item.trim();
+                        if !item.is_empty() {
+                            candidates.push(MemoryCandidate {
+                                kind,
+                                text: item.to_string(),
+                                confidence: 0.90,
+                            });
+                        }
+                    } else if line.is_empty() || line.starts_with('#') {
+                        current_header_kind = None;
+                    }
+                }
+            }
+
+            // Strategy 3: Key phrase detection (lower confidence)
+            for line in &lines {
+                if line.is_empty() || line.len() < 10 {
+                    continue;
+                }
+                let lower = line.to_ascii_lowercase();
+                if lower.starts_with("we decided") || lower.starts_with("the decision was") || lower.starts_with("decided to ") {
+                    candidates.push(MemoryCandidate {
+                        kind: MemoryObjectKind::Decision,
+                        text: line.to_string(),
+                        confidence: 0.75,
+                    });
+                } else if lower.contains("must ") && (lower.contains("always") || lower.contains("never")) {
+                    candidates.push(MemoryCandidate {
+                        kind: MemoryObjectKind::Constraint,
+                        text: line.to_string(),
+                        confidence: 0.75,
+                    });
+                } else if lower.starts_with("note:") || lower.starts_with("important:") || lower.starts_with("remember:") {
+                    let value = line.splitn(2, ':').nth(1).unwrap_or("").trim();
+                    if !value.is_empty() {
+                        candidates.push(MemoryCandidate {
+                            kind: MemoryObjectKind::Fact,
+                            text: value.to_string(),
+                            confidence: 0.75,
+                        });
+                    }
+                } else if lower.starts_with("still need to ") || lower.starts_with("next step") || lower.starts_with("remaining:") {
+                    candidates.push(MemoryCandidate {
+                        kind: MemoryObjectKind::Todo,
+                        text: line.to_string(),
+                        confidence: 0.75,
                     });
                 }
             }

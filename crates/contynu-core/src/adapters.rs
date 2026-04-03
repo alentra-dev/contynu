@@ -8,6 +8,7 @@ use crate::checkpoint::RehydrationPacket;
 use crate::config::{ConfiguredLlmLauncher, ContynuConfig, HydrationDelivery};
 use crate::error::Result;
 use crate::ids::ProjectId;
+use crate::rendering::PromptFormat;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -33,6 +34,7 @@ pub struct AdapterSpec {
     hydration_delivery: HydrationDelivery,
     hydration_args: Vec<OsString>,
     extra_env: BTreeMap<String, String>,
+    prompt_format: PromptFormat,
 }
 
 #[derive(Debug, Clone)]
@@ -109,7 +111,13 @@ impl AdapterSpec {
         let mut args = args;
 
         if let Some(hydration) = hydration {
-            if !self.hydration_args.is_empty() {
+            // Skip hydration args if the user passed conflicting flags
+            // (e.g. -p/--prompt conflicts with --prompt-interactive for Gemini).
+            let user_has_prompt_flag = args.iter().any(|a| {
+                let s = a.to_string_lossy();
+                s == "-p" || s == "--prompt"
+            });
+            if !self.hydration_args.is_empty() && !user_has_prompt_flag {
                 let mut expanded = self
                     .hydration_args
                     .iter()
@@ -137,8 +145,15 @@ impl AdapterSpec {
                 ));
             }
             if self.hydration_delivery.includes_stdin() {
-                stdin_prelude =
-                    Some(render_stdin_prelude(self.as_str(), &hydration.packet).into_bytes());
+                // Use the full rendered rehydration prompt as stdin prelude
+                // so the LLM receives human-readable context, not raw JSON.
+                stdin_prelude = Some(
+                    format!(
+                        "{}\n\n",
+                        hydration.prompt_text
+                    )
+                    .into_bytes(),
+                );
             }
         }
 
@@ -150,7 +165,17 @@ impl AdapterSpec {
         })
     }
 
+    pub fn prompt_format(&self) -> PromptFormat {
+        self.prompt_format
+    }
+
     fn builtin(kind: AdapterKind, name: &str, should_hydrate: bool) -> Self {
+        let prompt_format = match kind {
+            AdapterKind::ClaudeCli => PromptFormat::Xml,
+            AdapterKind::CodexCli => PromptFormat::Markdown,
+            AdapterKind::GeminiCli => PromptFormat::StructuredText,
+            _ => PromptFormat::StructuredText,
+        };
         Self {
             kind,
             name: name.into(),
@@ -159,6 +184,7 @@ impl AdapterSpec {
             hydration_delivery: HydrationDelivery::EnvOnly,
             hydration_args: builtin_hydration_args(kind),
             extra_env: BTreeMap::new(),
+            prompt_format,
         }
     }
 
@@ -166,6 +192,16 @@ impl AdapterSpec {
         let (kind, default_name) = builtin_kind_for_program(program)
             .or_else(|| builtin_kind_for_program(&launcher.command))
             .unwrap_or((AdapterKind::ConfiguredLlm, launcher.command.as_str()));
+        let prompt_format = launcher
+            .prompt_format
+            .as_deref()
+            .and_then(parse_prompt_format)
+            .unwrap_or_else(|| match kind {
+                AdapterKind::ClaudeCli => PromptFormat::Xml,
+                AdapterKind::CodexCli => PromptFormat::Markdown,
+                AdapterKind::GeminiCli => PromptFormat::StructuredText,
+                _ => PromptFormat::StructuredText,
+            });
         Self {
             kind,
             name: default_name.to_string(),
@@ -179,7 +215,17 @@ impl AdapterSpec {
                 .map(OsString::from)
                 .collect(),
             extra_env: launcher.extra_env.clone(),
+            prompt_format,
         }
+    }
+}
+
+fn parse_prompt_format(s: &str) -> Option<PromptFormat> {
+    match s {
+        "xml" => Some(PromptFormat::Xml),
+        "markdown" => Some(PromptFormat::Markdown),
+        "structured_text" => Some(PromptFormat::StructuredText),
+        _ => None,
     }
 }
 
@@ -215,14 +261,14 @@ fn expand_arg_template(value: &OsString, hydration: &HydrationContext) -> OsStri
 
 fn builtin_hydration_args(kind: AdapterKind) -> Vec<OsString> {
     match kind {
-        AdapterKind::CodexCli => vec![OsString::from("{launcher_prompt}")],
+        AdapterKind::CodexCli => Vec::new(),
         AdapterKind::ClaudeCli => vec![
             OsString::from("--append-system-prompt"),
-            OsString::from("{launcher_prompt}"),
+            OsString::from("{prompt_text}"),
         ],
         AdapterKind::GeminiCli => vec![
             OsString::from("--prompt-interactive"),
-            OsString::from("{launcher_prompt}"),
+            OsString::from("Silently read GEMINI.md in the working directory and remember its contents. Do NOT summarize it, do NOT search for anything, do NOT take any other action. Just read it and wait for the user's next message."),
         ],
         AdapterKind::Terminal | AdapterKind::ConfiguredLlm => Vec::new(),
     }
@@ -281,6 +327,7 @@ mod tests {
             relevant_files: Vec::new(),
             recent_verbatim_context: Vec::new(),
             retrieval_guidance: Vec::new(),
+            memory_provenance: Vec::new(),
         };
         let hydration = HydrationContext {
             project_id,
@@ -338,6 +385,7 @@ mod tests {
             relevant_files: Vec::new(),
             recent_verbatim_context: Vec::new(),
             retrieval_guidance: Vec::new(),
+            memory_provenance: Vec::new(),
         };
         let hydration = HydrationContext {
             project_id,
@@ -405,6 +453,7 @@ mod tests {
             relevant_files: Vec::new(),
             recent_verbatim_context: Vec::new(),
             retrieval_guidance: Vec::new(),
+            memory_provenance: Vec::new(),
         };
         let hydration = HydrationContext {
             project_id,

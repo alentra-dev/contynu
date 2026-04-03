@@ -132,6 +132,13 @@ pub struct MemoryObject {
     pub source_event_ids: Vec<EventId>,
     pub created_at: DateTime<Utc>,
     pub superseded_by: Option<MemoryId>,
+    pub source_adapter: Option<String>,
+    pub source_model: Option<String>,
+    pub importance: f64,
+    pub access_count: u32,
+    pub last_accessed_at: Option<DateTime<Utc>>,
+    pub consolidated_from: Vec<MemoryId>,
+    pub text_hash: Option<String>,
 }
 
 pub struct MetadataStore {
@@ -185,9 +192,42 @@ impl MetadataStore {
             )?;
         }
 
+        let applied_v2 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 2",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        if applied_v2 == 0 {
+            self.conn.execute_batch(
+                r#"
+                ALTER TABLE memory_objects ADD COLUMN source_adapter TEXT;
+                ALTER TABLE memory_objects ADD COLUMN source_model TEXT;
+                ALTER TABLE memory_objects ADD COLUMN importance REAL DEFAULT 0.5;
+                ALTER TABLE memory_objects ADD COLUMN access_count INTEGER DEFAULT 0;
+                ALTER TABLE memory_objects ADD COLUMN last_accessed_at TEXT;
+                ALTER TABLE memory_objects ADD COLUMN consolidated_from_json TEXT;
+                ALTER TABLE memory_objects ADD COLUMN text_hash TEXT;
+
+                CREATE INDEX IF NOT EXISTS idx_memory_active_importance
+                  ON memory_objects(session_id, status, importance DESC, created_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_memory_text_hash
+                  ON memory_objects(session_id, kind, text_hash);
+                "#,
+            )?;
+            self.conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![2_i64, Utc::now().to_rfc3339()],
+            )?;
+        }
+
         self.conn.execute(
             "INSERT OR REPLACE INTO schema_meta (key, value, updated_at) VALUES (?1, ?2, ?3)",
-            params!["schema_version", "1", Utc::now().to_rfc3339()],
+            params!["schema_version", "2", Utc::now().to_rfc3339()],
         )?;
         Ok(())
     }
@@ -543,12 +583,19 @@ impl MetadataStore {
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>();
+        let consolidated_from = memory
+            .consolidated_from
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
         self.conn.execute(
             r#"
             INSERT OR REPLACE INTO memory_objects (
               memory_id, session_id, kind, status, text, confidence, source_event_ids_json,
-              created_at, superseded_by
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+              created_at, superseded_by,
+              source_adapter, source_model, importance, access_count, last_accessed_at,
+              consolidated_from_json, text_hash
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
             "#,
             params![
                 memory.memory_id.as_str(),
@@ -559,7 +606,14 @@ impl MetadataStore {
                 memory.confidence,
                 serde_json::to_string(&source_event_ids)?,
                 memory.created_at.to_rfc3339(),
-                memory.superseded_by.clone().map(String::from)
+                memory.superseded_by.clone().map(String::from),
+                memory.source_adapter,
+                memory.source_model,
+                memory.importance,
+                memory.access_count,
+                memory.last_accessed_at.map(|dt| dt.to_rfc3339()),
+                serde_json::to_string(&consolidated_from)?,
+                memory.text_hash,
             ],
         )?;
         Ok(())
@@ -582,22 +636,36 @@ impl MetadataStore {
         Ok(())
     }
 
+    pub fn supersede_memory_kind_single(
+        &self,
+        _session_id: &SessionId,
+        memory_id: &MemoryId,
+        superseded_by: &MemoryId,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            UPDATE memory_objects
+            SET status = 'superseded', superseded_by = ?2
+            WHERE memory_id = ?1 AND status != 'superseded'
+            "#,
+            params![memory_id.as_str(), superseded_by.as_str()],
+        )?;
+        Ok(())
+    }
+
     pub fn find_active_memory_by_text(
         &self,
         session_id: &SessionId,
         kind: MemoryObjectKind,
         text: &str,
     ) -> Result<Option<MemoryObject>> {
-        let mut stmt = self.conn.prepare(
-            r#"
-            SELECT memory_id, session_id, kind, status, text, confidence, source_event_ids_json,
-                   created_at, superseded_by
-            FROM memory_objects
-            WHERE session_id = ?1 AND kind = ?2 AND text = ?3 AND status != 'superseded'
-            ORDER BY created_at DESC
-            LIMIT 1
-            "#,
-        )?;
+        let sql = format!(
+            "SELECT {MEMORY_SELECT_COLUMNS} FROM memory_objects
+             WHERE session_id = ?1 AND kind = ?2 AND text = ?3 AND status != 'superseded'
+             ORDER BY created_at DESC
+             LIMIT 1"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let memory = stmt
             .query_row(
                 params![session_id.as_str(), kind.as_str(), text],
@@ -823,23 +891,51 @@ impl MetadataStore {
         kind: Option<MemoryObjectKind>,
     ) -> Result<Vec<MemoryObject>> {
         let sql = if kind.is_some() {
-            r#"
-            SELECT memory_id, session_id, kind, status, text, confidence, source_event_ids_json,
-                   created_at, superseded_by
-            FROM memory_objects
-            WHERE session_id = ?1 AND kind = ?2
-            ORDER BY created_at ASC
-            "#
+            format!(
+                "SELECT {MEMORY_SELECT_COLUMNS} FROM memory_objects
+                 WHERE session_id = ?1 AND kind = ?2
+                 ORDER BY created_at ASC"
+            )
         } else {
-            r#"
-            SELECT memory_id, session_id, kind, status, text, confidence, source_event_ids_json,
-                   created_at, superseded_by
-            FROM memory_objects
-            WHERE session_id = ?1
-            ORDER BY created_at ASC
-            "#
+            format!(
+                "SELECT {MEMORY_SELECT_COLUMNS} FROM memory_objects
+                 WHERE session_id = ?1
+                 ORDER BY created_at ASC"
+            )
         };
-        let mut stmt = self.conn.prepare(sql)?;
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = if let Some(kind) = kind {
+            stmt.query_map(params![session_id.as_str(), kind.as_str()], map_memory)?
+        } else {
+            stmt.query_map(params![session_id.as_str()], map_memory)?
+        };
+
+        let mut memory = Vec::new();
+        for row in rows {
+            memory.push(row?);
+        }
+        Ok(memory)
+    }
+
+    pub fn list_active_memory_objects(
+        &self,
+        session_id: &SessionId,
+        kind: Option<MemoryObjectKind>,
+    ) -> Result<Vec<MemoryObject>> {
+        let sql = if kind.is_some() {
+            format!(
+                "SELECT {MEMORY_SELECT_COLUMNS} FROM memory_objects
+                 WHERE session_id = ?1 AND kind = ?2 AND status != 'superseded'
+                 ORDER BY importance DESC, created_at DESC"
+            )
+        } else {
+            format!(
+                "SELECT {MEMORY_SELECT_COLUMNS} FROM memory_objects
+                 WHERE session_id = ?1 AND status != 'superseded'
+                 ORDER BY importance DESC, created_at DESC"
+            )
+        };
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = if let Some(kind) = kind {
             stmt.query_map(params![session_id.as_str(), kind.as_str()], map_memory)?
         } else {
@@ -896,22 +992,67 @@ impl MetadataStore {
 
     pub fn search_memory(&self, query: &str) -> Result<Vec<MemoryObject>> {
         let needle = format!("%{query}%");
-        let mut stmt = self.conn.prepare(
-            r#"
-            SELECT memory_id, session_id, kind, status, text, confidence, source_event_ids_json,
-                   created_at, superseded_by
-            FROM memory_objects
-            WHERE text LIKE ?1 AND status != 'superseded'
-            ORDER BY created_at DESC
-            LIMIT 50
-            "#,
-        )?;
+        let sql = format!(
+            "SELECT {MEMORY_SELECT_COLUMNS} FROM memory_objects
+             WHERE text LIKE ?1 AND status != 'superseded'
+             ORDER BY created_at DESC
+             LIMIT 50"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![needle], map_memory)?;
         let mut matches = Vec::new();
         for row in rows {
             matches.push(row?);
         }
         Ok(matches)
+    }
+
+    pub fn increment_memory_access(&self, memory_ids: &[MemoryId]) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        for id in memory_ids {
+            self.conn.execute(
+                r#"
+                UPDATE memory_objects
+                SET access_count = access_count + 1, last_accessed_at = ?2
+                WHERE memory_id = ?1
+                "#,
+                params![id.as_str(), now],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn update_memory_importance(
+        &self,
+        memory_id: &MemoryId,
+        importance: f64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE memory_objects SET importance = ?2 WHERE memory_id = ?1",
+            params![memory_id.as_str(), importance],
+        )?;
+        Ok(())
+    }
+
+    pub fn count_active_memories(
+        &self,
+        session_id: &SessionId,
+        kind: Option<MemoryObjectKind>,
+    ) -> Result<usize> {
+        let count = if let Some(kind) = kind {
+            self.conn.query_row(
+                "SELECT COUNT(*) FROM memory_objects WHERE session_id = ?1 AND kind = ?2 AND status != 'superseded'",
+                params![session_id.as_str(), kind.as_str()],
+                |row| row.get::<_, i64>(0),
+            )?
+        } else {
+            self.conn.query_row(
+                "SELECT COUNT(*) FROM memory_objects WHERE session_id = ?1 AND status != 'superseded'",
+                params![session_id.as_str()],
+                |row| row.get::<_, i64>(0),
+            )?
+        };
+        Ok(count as usize)
     }
 
     pub fn session_exists(&self, session_id: &SessionId) -> Result<bool> {
@@ -942,6 +1083,13 @@ impl MetadataStore {
     }
 }
 
+const MEMORY_SELECT_COLUMNS: &str = r#"
+    memory_id, session_id, kind, status, text, confidence, source_event_ids_json,
+    created_at, superseded_by,
+    source_adapter, source_model, importance, access_count, last_accessed_at,
+    consolidated_from_json, text_hash
+"#;
+
 fn map_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryObject> {
     let source_event_ids_json: String = row.get(6)?;
     let source_event_ids =
@@ -966,6 +1114,23 @@ fn map_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryObject> {
         }
     };
 
+    let consolidated_from_json: Option<String> = row.get(14)?;
+    let consolidated_from = consolidated_from_json
+        .map(|json| {
+            serde_json::from_str::<Vec<String>>(&json)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|s| MemoryId::parse(s).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let last_accessed_at = row
+        .get::<_, Option<String>>(13)?
+        .map(|s| parse_rfc3339(&s))
+        .transpose()
+        .map_err(into_sql_error)?;
+
     Ok(MemoryObject {
         memory_id: MemoryId::parse(row.get::<_, String>(0)?).map_err(into_sql_error)?,
         session_id: SessionId::parse(row.get::<_, String>(1)?).map_err(into_sql_error)?,
@@ -980,6 +1145,13 @@ fn map_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryObject> {
             .map(MemoryId::parse)
             .transpose()
             .map_err(into_sql_error)?,
+        source_adapter: row.get(9)?,
+        source_model: row.get(10)?,
+        importance: row.get::<_, Option<f64>>(11)?.unwrap_or(0.5),
+        access_count: row.get::<_, Option<u32>>(12)?.unwrap_or(0),
+        last_accessed_at,
+        consolidated_from,
+        text_hash: row.get(15)?,
     })
 }
 
@@ -1082,6 +1254,13 @@ mod tests {
             source_event_ids: Vec::new(),
             created_at: chrono::Utc::now(),
             superseded_by: None,
+            source_adapter: None,
+            source_model: None,
+            importance: 0.5,
+            access_count: 0,
+            last_accessed_at: None,
+            consolidated_from: Vec::new(),
+            text_hash: None,
         };
         let active_memory = crate::store::MemoryObject {
             memory_id: crate::ids::MemoryId::new(),
@@ -1093,6 +1272,13 @@ mod tests {
             source_event_ids: Vec::new(),
             created_at: chrono::Utc::now(),
             superseded_by: None,
+            source_adapter: None,
+            source_model: None,
+            importance: 0.5,
+            access_count: 0,
+            last_accessed_at: None,
+            consolidated_from: Vec::new(),
+            text_hash: None,
         };
         store.insert_memory_object(&first_memory).unwrap();
         store.insert_memory_object(&active_memory).unwrap();
