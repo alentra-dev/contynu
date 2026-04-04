@@ -263,6 +263,8 @@ fn builtin_hydration_args(kind: AdapterKind) -> Vec<OsString> {
     match kind {
         AdapterKind::CodexCli => Vec::new(),
         AdapterKind::ClaudeCli => vec![
+            OsString::from("--mcp-config"),
+            OsString::from(".mcp.json"),
             OsString::from("--append-system-prompt"),
             OsString::from("{prompt_text}"),
         ],

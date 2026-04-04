@@ -31,15 +31,21 @@ fn ensure_claude_mcp(state_dir: &Path, cwd: &Path, project_id: &str) -> Result<(
         }
     });
 
+    // --mcp-config expects {"mcpServers": {...}} wrapper format
     let mut config: serde_json::Value = if mcp_path.exists() {
         let content = std::fs::read_to_string(&mcp_path)?;
-        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
+        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({"mcpServers": {}}))
     } else {
-        serde_json::json!({})
+        serde_json::json!({"mcpServers": {}})
     };
 
+    // Ensure mcpServers key exists
+    if !config.get("mcpServers").is_some() {
+        config["mcpServers"] = serde_json::json!({});
+    }
+
     // Always update to ensure project ID is current
-    config["contynu"] = entry;
+    config["mcpServers"]["contynu"] = entry;
     std::fs::write(&mcp_path, serde_json::to_string_pretty(&config)?)?;
     Ok(())
 }

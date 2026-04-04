@@ -170,7 +170,12 @@ fn builtin_launchers() -> Vec<ConfiguredLlmLauncher> {
             hydrate: true,
             use_pty: true,
             hydration_delivery: HydrationDelivery::EnvOnly,
-            hydration_args: vec!["--append-system-prompt".into(), "{prompt_text}".into()],
+            hydration_args: vec![
+                "--mcp-config".into(),
+                ".mcp.json".into(),
+                "--append-system-prompt".into(),
+                "{prompt_text}".into(),
+            ],
             extra_env: BTreeMap::new(),
             prompt_format: None,
         },
