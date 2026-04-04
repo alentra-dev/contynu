@@ -17,11 +17,41 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             target_name: linux-x86_64
             archive_ext: tar.gz
             bin_name: contynu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            target_name: linux-aarch64
+            archive_ext: tar.gz
+            bin_name: contynu
+
+          # macOS
+          - runner: macos-latest
+            target: x86_64-apple-darwin
+            target_name: macos-x86_64
+            archive_ext: tar.gz
+            bin_name: contynu
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            target_name: macos-aarch64
+            archive_ext: tar.gz
+            bin_name: contynu
+
+          # Windows
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            target_name: windows-x86_64
+            archive_ext: zip
+            bin_name: contynu.exe
+          - runner: windows-latest
+            target: aarch64-pc-windows-msvc
+            target_name: windows-aarch64
+            archive_ext: zip
+            bin_name: contynu.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -35,12 +65,21 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} -p contynu-cli
 
-      - name: Package archive
+      - name: Package archive (unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/${{ matrix.bin_name }} dist/
           tar -czf contynu-${{ matrix.target_name }}.${{ matrix.archive_ext }} -C dist ${{ matrix.bin_name }}
+
+      - name: Package archive (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.bin_name }}" dist/
+          Compress-Archive -Path "dist/${{ matrix.bin_name }}" -DestinationPath "contynu-${{ matrix.target_name }}.${{ matrix.archive_ext }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
