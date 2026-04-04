@@ -1,46 +1,82 @@
 # Contynu
 
-Contynu is a model-agnostic persistent memory layer for LLM workflows.
+**Memory that persists.** Model-agnostic persistent memory for LLM workflows.
 
-It captures prompts, responses, tool activity, command output, artifacts, and execution metadata into a durable local continuity layer so work can resume cleanly across crashes, restarts, and model handoffs.
+Contynu captures prompts, responses, tool activity, command output, artifacts, and execution metadata into a durable local continuity layer so work can resume cleanly across crashes, restarts, and model handoffs between Claude, Codex, Gemini, and any future LLM CLI.
+
+**Website:** [contynu.com](https://contynu.com)
 
 ## Install
 
-### Linux
+### Linux / macOS
 
 ```bash
 curl -fsSL https://github.com/alentra-dev/contynu/releases/latest/download/install.sh | sh
 ```
 
-The release installer downloads a prebuilt `contynu` binary from GitHub Releases and installs it into a user-local bin directory.
+### Windows
 
-- Linux default install dir: `~/.local/bin`
-
-Windows and macOS release packaging are not published yet. The first public install path targets Linux, which matches the current release runtime support.
-
-You can override the target directory or version with environment variables:
-
-```bash
-CONTYNU_INSTALL_DIR="$HOME/bin" CONTYNU_VERSION="v0.1.0" sh ./scripts/install.sh
+```powershell
+irm https://github.com/alentra-dev/contynu/releases/latest/download/install.ps1 | iex
 ```
 
-Source installs are still available for developers:
+### From source
 
 ```bash
 cargo install --path crates/contynu-cli
 ```
 
-## Current Architecture
+Prebuilt binaries are available for:
+- Linux (x86_64, aarch64)
+- macOS (x86_64, Apple Silicon)
+- Windows (x86_64, aarch64)
 
-- Canonical truth: append-only JSONL journal
-- Structured metadata: SQLite
-- Large and binary content: content-addressed local blob store
-- Recovery primitive: deterministic rehydration packet
-- Runtime shape: local-first CLI wrapper around external tools
+You can override the install directory or version:
 
-The implementation in this repository is intentionally explicit and inspectable. The journal is authoritative, SQLite is derived structured state, and checkpoint/rehydration artifacts are materialized locally.
+```bash
+CONTYNU_INSTALL_DIR="$HOME/bin" CONTYNU_VERSION="v0.2.1" sh ./scripts/install.sh
+```
 
-## Workspace Layout
+## Quick Start
+
+```bash
+# Use with any LLM CLI — just prefix with contynu
+contynu claude     # wraps Claude Code with persistent memory
+contynu codex      # wraps Codex CLI — picks up where Claude left off
+contynu gemini     # wraps Gemini CLI — has full context from both
+```
+
+That's it. No configuration needed. Contynu auto-detects the LLM, captures the session, and transfers memory on the next handoff.
+
+## How It Works
+
+1. **Capture** — Contynu wraps your LLM CLI and records every interaction to an append-only journal
+2. **Extract** — Facts, decisions, constraints, and context are extracted as structured memory objects
+3. **Transfer** — When you switch models, Contynu delivers the accumulated memory in the format each model understands best (XML for Claude, Markdown for Codex, structured text for Gemini)
+4. **Recall** — An MCP server lets any model search the full project history on demand
+
+## Key Features
+
+- **Cross-model memory transfer** — Facts from Claude are available in Codex and Gemini
+- **Importance-ranked memories** — Scored by importance, recency, and confidence so critical decisions always transfer
+- **Model-aware rendering** — Each model receives context in its optimal format
+- **MCP server** — LLMs query the full memory archive via `search_memory`, `list_memories`, and `search_events`
+- **Auto-registration** — MCP server registers itself with each CLI automatically
+- **Indefinite memory** — Append-only JSONL journal with SHA-256 checksums; nothing is ever lost
+- **Local-first** — All data stays on your machine. SQLite + JSONL + content-addressed blobs
+- **Zero config** — Replace `claude` with `contynu claude`. Works immediately
+
+## Architecture
+
+- **Canonical truth:** Append-only JSONL journal (one per project)
+- **Structured metadata:** SQLite with WAL mode
+- **Large content:** Content-addressed local blob store (SHA-256)
+- **Recovery:** Deterministic rehydration packets with budget-aware assembly
+- **Memory:** Typed objects (Fact, Constraint, Decision, Todo, Summary) with importance scoring and provenance
+- **MCP:** Stdio JSON-RPC server with search, list, and event query tools
+- **Runtime:** Local CLI wrapper with PTY/pipe/script-based capture
+
+### Storage Layout
 
 ```text
 .contynu/
@@ -57,29 +93,55 @@ The implementation in this repository is intentionally explicit and inspectable.
         rehydration.json
 ```
 
-## CLI
+## CLI Reference
 
-### Streamlined LLM launch
+### LLM Launch
 
 ```bash
-contynu codex
-contynu claude
-contynu gemini
+contynu claude                    # Launch Claude with persistent memory
+contynu codex                     # Launch Codex with persistent memory
+contynu gemini                    # Launch Gemini with persistent memory
+contynu run -- cargo test         # Wrap any command
+contynu cargo test                # Direct passthrough
 ```
 
-Known LLM launcher commands automatically attach to the current project memory and use the same durable capture path as `run`.
-When a known LLM launcher is continuing an existing project, Contynu now materializes a rehydration packet and injects continuity through the launcher’s configured startup surface. The seeded config uses:
+### Memory & Checkpoints
 
-- `AGENTS.md` for `codex`
-- `CLAUDE.md` for `claude`
-- `GEMINI.md` for `gemini`
+```bash
+contynu status                    # Project state snapshot
+contynu checkpoint                # Create manual checkpoint
+contynu resume                    # Build rehydration packet
+contynu handoff --target-model gpt-5.4  # Prepare for model switch
+contynu search memory "auth"      # Search memory objects
+contynu search exact "JWT"        # Search event payloads
+```
 
-Those launchers also request Contynu’s built-in PTY transport by default so interactive sessions run against a real terminal.
+### MCP Server
 
-Unknown future LLM CLIs can be taught to Contynu through `.contynu/config.json`. If a launcher is listed there, the normal direct path like `contynu myllm` will recognize it as hydratable.
-`contynu init` now writes a starter `.contynu/config.json` that already includes `codex`, `claude`, and `gemini`, so those integrations can be adjusted locally as upstream CLIs change.
+```bash
+contynu mcp-server                # Start stdio MCP server (used by LLM CLIs)
+```
 
-Example:
+The MCP server auto-registers with Claude (`.mcp.json`), Codex (`config.toml`), and Gemini (`gemini mcp add`) on first launch. LLMs can then call `search_memory`, `list_memories`, and `search_events` tools directly.
+
+### Other Commands
+
+```bash
+contynu init                      # Initialize state directory
+contynu projects                  # List all projects
+contynu recent                    # Recent activity
+contynu replay                    # Canonical event sequence
+contynu inspect project           # Inspect project details
+contynu inspect event evt_<id>    # Inspect specific event
+contynu artifacts list            # List tracked artifacts
+contynu doctor                    # Diagnostic info
+contynu repair                    # Fix corrupted journals
+contynu config validate           # Validate launcher config
+```
+
+### Custom Launchers
+
+Unknown LLM CLIs can be taught to Contynu via `.contynu/config.json`:
 
 ```json
 {
@@ -89,72 +151,14 @@ Example:
       "aliases": ["futurellm-cli"],
       "hydrate": true,
       "use_pty": true,
-      "context_file": "FUTURELLM.md",
-      "hydration_delivery": "env_only",
-      "hydration_args": ["--context-file", "{prompt_file}", "--project", "{project_id}"],
-      "extra_env": {
-        "FUTURELLM_MODE": "enabled"
-      }
+      "hydration_delivery": "env_and_stdin",
+      "hydration_args": ["--context-file", "{prompt_file}"],
+      "extra_env": { "FUTURELLM_MODE": "enabled" },
+      "prompt_format": "markdown"
     }
   ]
 }
 ```
-
-`hydration_delivery` supports `env_only`, `stdin_only`, or `env_and_stdin`.
-`hydration_args` lets a configured launcher receive rehydration context through adapter-specific CLI flags using placeholders like `{prompt_file}`, `{packet_file}`, `{project_id}`, and `{schema_version}`.
-`use_pty` lets a launcher request PTY transport when available.
-`context_file` lets a launcher use a provider-native workspace instruction file that Contynu installs for the duration of the run and then restores.
-
-### Streamlined Generic Launch
-
-```bash
-contynu cargo test
-contynu bash -lc "make build"
-```
-
-Ordinary terminal commands can also be launched directly. Contynu treats them as generic wrapped commands inside the same project continuity stream.
-
-### Initialize state
-
-```bash
-contynu init
-```
-
-### Wrap an external command
-
-```bash
-contynu run -- cargo test
-```
-
-`contynu run` is still available as the explicit generic wrapper form. It captures streams incrementally while the process is running, durably appends them to the journal in real time, and derives lightweight structured memory after each turn.
-
-### Create or inspect recovery state
-
-```bash
-contynu start-project
-contynu status
-contynu projects
-contynu recent
-contynu checkpoint
-contynu resume
-contynu handoff --target-model gpt-5.4
-contynu replay
-```
-
-### Inspect and repair
-
-```bash
-contynu inspect project
-contynu inspect event evt_<id>
-contynu search exact journal
-contynu search memory decision
-contynu artifacts list
-contynu doctor
-contynu repair
-contynu config validate
-```
-
-Contynu now defaults to a single continuous project memory per state directory. A raw `project_id` still exists for exact targeting and scripting, but normal commands resolve the primary project automatically.
 
 ## Developer Setup
 
@@ -163,16 +167,14 @@ cargo test
 cargo fmt --check
 ```
 
-More detailed docs:
+## Documentation
 
-- [`docs/implementation-plan.md`](docs/implementation-plan.md)
-- [`docs/finalization-roadmap.md`](docs/finalization-roadmap.md)
-- [`docs/cli.md`](docs/cli.md)
-- [`docs/adapter-architecture.md`](docs/adapter-architecture.md)
-- [`docs/crash-recovery.md`](docs/crash-recovery.md)
-- [`docs/rehydration.md`](docs/rehydration.md)
-- [`docs/handoff-summary.md`](docs/handoff-summary.md)
-- [`docs/release-distribution.md`](docs/release-distribution.md)
+- [`docs/architecture.md`](docs/architecture.md) — System design blueprint
+- [`docs/cli.md`](docs/cli.md) — CLI command reference
+- [`docs/adapter-architecture.md`](docs/adapter-architecture.md) — Adapter system design
+- [`docs/rehydration.md`](docs/rehydration.md) — Rehydration packet structure
+- [`docs/crash-recovery.md`](docs/crash-recovery.md) — Durability and recovery
+- [`docs/handoff-summary.md`](docs/handoff-summary.md) — Model handoff capabilities
 
 ## License
 
