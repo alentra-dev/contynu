@@ -34,11 +34,11 @@ impl PtyChild {
         let mut slave: RawFd = -1;
         let rc = unsafe {
             libc::openpty(
-                &mut master,
-                &mut slave,
+                &mut master as *mut RawFd as *mut _,
+                &mut slave as *mut RawFd as *mut _,
                 std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
+                std::ptr::null_mut() as *mut _,
+                std::ptr::null_mut() as *mut _,
             )
         };
         if rc != 0 {
@@ -68,7 +68,7 @@ impl PtyChild {
         if pid == 0 {
             unsafe {
                 libc::setsid();
-                libc::ioctl(slave, libc::TIOCSCTTY, 0);
+                libc::ioctl(slave, libc::TIOCSCTTY as _, 0);
                 libc::dup2(slave, 0);
                 libc::dup2(slave, 1);
                 libc::dup2(slave, 2);
