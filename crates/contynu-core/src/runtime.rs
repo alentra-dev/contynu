@@ -586,15 +586,32 @@ impl RuntimeEngine {
                     )
                 }
             }
-            ExecutionTransport::Pty => Self::execute_with_pty(
-                cwd,
-                launch_plan,
-                journal,
-                store,
-                session_id,
-                turn_id,
-                interrupted,
-            ),
+            ExecutionTransport::Pty => {
+                #[cfg(unix)]
+                {
+                    Self::execute_with_pty(
+                        cwd,
+                        launch_plan,
+                        journal,
+                        store,
+                        session_id,
+                        turn_id,
+                        interrupted,
+                    )
+                }
+                #[cfg(not(unix))]
+                {
+                    Self::execute_with_pipes(
+                        cwd,
+                        launch_plan,
+                        journal,
+                        store,
+                        session_id,
+                        turn_id,
+                        interrupted,
+                    )
+                }
+            }
         }
     }
 
@@ -708,6 +725,7 @@ impl RuntimeEngine {
         })
     }
 
+    #[cfg(unix)]
     fn execute_with_pty(
         cwd: &std::path::Path,
         launch_plan: &crate::adapters::LaunchPlan,
@@ -2316,6 +2334,7 @@ fn install_ctrlc_handler(child: Arc<Mutex<std::process::Child>>, interrupted: Ar
     .ok();
 }
 
+#[cfg(unix)]
 fn install_pty_ctrlc_handler(child: &PtyChild, interrupted: Arc<AtomicBool>) {
     let pid = child.pid();
     ctrlc::set_handler(move || {
