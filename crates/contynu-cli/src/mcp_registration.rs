@@ -140,27 +140,25 @@ fn ensure_gemini_mcp(state_dir: &Path, project_id: &str) -> Result<()> {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if stdout.contains("contynu") {
-                // Already registered — Gemini doesn't support updating env vars
-                // in existing MCP servers, so we leave it as-is
-                return Ok(());
+                // Already registered — update by removing and re-adding
+                let _ = std::process::Command::new("gemini")
+                    .args(["mcp", "remove", "contynu"])
+                    .output();
             }
         }
         Err(_) => return Ok(()), // gemini not available or doesn't support mcp
     }
 
-    // Register
+    // Register with env vars for state dir and active project
     let _ = std::process::Command::new("gemini")
         .args([
-            "mcp",
-            "add",
-            "contynu",
-            "--",
-            "contynu",
-            "mcp-server",
-            "--state-dir",
-            &state_dir_abs.display().to_string(),
+            "mcp", "add", "contynu",
+            "contynu", "mcp-server",
+            "-e", &format!("CONTYNU_STATE_DIR={}", state_dir_abs.display()),
+            "-e", &format!("CONTYNU_ACTIVE_PROJECT={}", project_id),
+            "--trust",
+            "--scope", "user",
         ])
-        .env("CONTYNU_ACTIVE_PROJECT", project_id)
         .output();
 
     Ok(())
