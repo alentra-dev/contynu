@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 160" fill="none">
+  <defs>
+    <linearGradient id="wg" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#6366F1"/>
+      <stop offset="100%" stop-color="#0EA5E9"/>
+    </linearGradient>
+  </defs>
+  <!--
+    Wordmark: "contynu" in a clean geometric sans-serif.
+    The "y" descender curves back up and to the right, flowing into "n" —
+    a visual echo of the continuity concept. Letters are constructed from
+    geometric primitives for a modern, technical feel.
+  -->
+  <text
+    x="20" y="110"
+    font-family="'Inter', 'SF Pro Display', 'Segoe UI', system-ui, -apple-system, sans-serif"
+    font-size="108"
+    font-weight="600"
+    letter-spacing="-2"
+    fill="url(#wg)"
+  >contynu</text>
+</svg>

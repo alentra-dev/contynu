@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <!-- Monochrome version — works on any background -->
+  <path
+    d="M 340 108
+       C 280 68, 180 68, 130 128
+       C 72 196, 72 316, 130 384
+       C 180 444, 280 444, 340 404
+       M 340 404
+       C 308 420, 264 428, 228 416
+       C 172 396, 140 340, 140 256
+       C 140 172, 172 116, 228 96
+       C 264 84, 308 92, 340 108
+       M 256 192
+       C 220 192, 192 220, 192 256
+       C 192 292, 220 320, 256 320
+       C 292 320, 320 292, 320 256
+       C 320 220, 292 192, 256 192 Z"
+    stroke="currentColor"
+    stroke-width="32"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    fill="none"
+  />
+  <circle cx="256" cy="256" r="24" fill="currentColor"/>
+  <circle cx="340" cy="108" r="16" fill="currentColor"/>
+  <circle cx="340" cy="404" r="16" fill="currentColor"/>
+  <circle cx="130" cy="256" r="16" fill="currentColor"/>
+</svg>

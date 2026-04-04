@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 900" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6366F1"/>
+      <stop offset="100%" stop-color="#0EA5E9"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="900" fill="#0F172A"/>
+
+  <!-- Title -->
+  <text x="60" y="60" font-family="'Inter', system-ui, sans-serif" font-size="16" font-weight="600" letter-spacing="6" fill="#64748B">CONTYNU BRAND REFERENCE</text>
+
+  <!-- Color Palette Section -->
+  <text x="60" y="120" font-family="'Inter', system-ui, sans-serif" font-size="14" font-weight="500" letter-spacing="3" fill="#94A3B8">COLOR PALETTE</text>
+
+  <!-- Indigo -->
+  <rect x="60" y="140" width="120" height="80" rx="8" fill="#6366F1"/>
+  <text x="70" y="240" font-family="'Inter', system-ui, sans-serif" font-size="12" font-weight="600" fill="#F8FAFC">Indigo</text>
+  <text x="70" y="256" font-family="'SF Mono', 'Fira Code', monospace" font-size="11" fill="#94A3B8">#6366F1</text>
+
+  <!-- Sky -->
+  <rect x="200" y="140" width="120" height="80" rx="8" fill="#0EA5E9"/>
+  <text x="210" y="240" font-family="'Inter', system-ui, sans-serif" font-size="12" font-weight="600" fill="#F8FAFC">Sky</text>
+  <text x="210" y="256" font-family="'SF Mono', 'Fira Code', monospace" font-size="11" fill="#94A3B8">#0EA5E9</text>
+
+  <!-- Violet (secondary) -->
+  <rect x="340" y="140" width="120" height="80" rx="8" fill="#818CF8"/>
+  <text x="350" y="240" font-family="'Inter', system-ui, sans-serif" font-size="12" font-weight="600" fill="#F8FAFC">Violet</text>
+  <text x="350" y="256" font-family="'SF Mono', 'Fira Code', monospace" font-size="11" fill="#94A3B8">#818CF8</text>
+
+  <!-- Slate Dark -->
+  <rect x="480" y="140" width="120" height="80" rx="8" fill="#0F172A" stroke="#334155" stroke-width="1"/>
+  <text x="490" y="240" font-family="'Inter', system-ui, sans-serif" font-size="12" font-weight="600" fill="#F8FAFC">Slate 900</text>
+  <text x="490" y="256" font-family="'SF Mono', 'Fira Code', monospace" font-size="11" fill="#94A3B8">#0F172A</text>
+
+  <!-- Slate Light -->
+  <rect x="620" y="140" width="120" height="80" rx="8" fill="#F8FAFC"/>
+  <text x="630" y="240" font-family="'Inter', system-ui, sans-serif" font-size="12" font-weight="600" fill="#F8FAFC">Slate 50</text>
+  <text x="630" y="256" font-family="'SF Mono', 'Fira Code', monospace" font-size="11" fill="#94A3B8">#F8FAFC</text>
+
+  <!-- Slate Mid -->
+  <rect x="760" y="140" width="120" height="80" rx="8" fill="#94A3B8"/>
+  <text x="770" y="240" font-family="'Inter', system-ui, sans-serif" font-size="12" font-weight="600" fill="#F8FAFC">Slate 400</text>
+  <text x="770" y="256" font-family="'SF Mono', 'Fira Code', monospace" font-size="11" fill="#94A3B8">#94A3B8</text>
+
+  <!-- Logo on dark -->
+  <text x="60" y="320" font-family="'Inter', system-ui, sans-serif" font-size="14" font-weight="500" letter-spacing="3" fill="#94A3B8">LOGO ON DARK</text>
+
+  <g transform="translate(60, 340) scale(0.25)">
+    <path
+      d="M 340 108 C 280 68, 180 68, 130 128 C 72 196, 72 316, 130 384 C 180 444, 280 444, 340 404
+         M 340 404 C 308 420, 264 428, 228 416 C 172 396, 140 340, 140 256 C 140 172, 172 116, 228 96 C 264 84, 308 92, 340 108
+         M 256 192 C 220 192, 192 220, 192 256 C 192 292, 220 320, 256 320 C 292 320, 320 292, 320 256 C 320 220, 292 192, 256 192 Z"
+      stroke="url(#bg)" stroke-width="32" stroke-linecap="round" fill="none"/>
+    <circle cx="256" cy="256" r="24" fill="url(#bg)"/>
+    <circle cx="340" cy="108" r="16" fill="#6366F1"/>
+    <circle cx="340" cy="404" r="16" fill="#0EA5E9"/>
+    <circle cx="130" cy="256" r="16" fill="#818CF8"/>
+  </g>
+
+  <text x="200" y="412" font-family="'Inter', system-ui, sans-serif" font-size="60" font-weight="600" letter-spacing="-1" fill="url(#bg)">contynu</text>
+
+  <!-- Logo on light -->
+  <text x="60" y="520" font-family="'Inter', system-ui, sans-serif" font-size="14" font-weight="500" letter-spacing="3" fill="#94A3B8">LOGO ON LIGHT</text>
+
+  <rect x="60" y="540" width="700" height="120" rx="8" fill="#F8FAFC"/>
+
+  <g transform="translate(80, 548) scale(0.2)">
+    <path
+      d="M 340 108 C 280 68, 180 68, 130 128 C 72 196, 72 316, 130 384 C 180 444, 280 444, 340 404
+         M 340 404 C 308 420, 264 428, 228 416 C 172 396, 140 340, 140 256 C 140 172, 172 116, 228 96 C 264 84, 308 92, 340 108
+         M 256 192 C 220 192, 192 220, 192 256 C 192 292, 220 320, 256 320 C 292 320, 320 292, 320 256 C 320 220, 292 192, 256 192 Z"
+      stroke="#0F172A" stroke-width="32" stroke-linecap="round" fill="none"/>
+    <circle cx="256" cy="256" r="24" fill="#0F172A"/>
+    <circle cx="340" cy="108" r="16" fill="#0F172A"/>
+    <circle cx="340" cy="404" r="16" fill="#0F172A"/>
+    <circle cx="130" cy="256" r="16" fill="#0F172A"/>
+  </g>
+
+  <text x="190" y="618" font-family="'Inter', system-ui, sans-serif" font-size="48" font-weight="600" letter-spacing="-1" fill="#0F172A">contynu</text>
+
+  <!-- Typography -->
+  <text x="60" y="720" font-family="'Inter', system-ui, sans-serif" font-size="14" font-weight="500" letter-spacing="3" fill="#94A3B8">TYPOGRAPHY</text>
+
+  <text x="60" y="756" font-family="'Inter', system-ui, sans-serif" font-size="13" fill="#CBD5E1">Primary: Inter (semibold 600)</text>
+  <text x="60" y="778" font-family="'Inter', system-ui, sans-serif" font-size="13" fill="#CBD5E1">Monospace: SF Mono / Fira Code / JetBrains Mono</text>
+  <text x="60" y="800" font-family="'Inter', system-ui, sans-serif" font-size="13" fill="#CBD5E1">Brand name: always lowercase "contynu"</text>
+
+  <!-- Concept note -->
+  <text x="60" y="860" font-family="'Inter', system-ui, sans-serif" font-size="11" fill="#475569">The mark is a continuous unbroken path — memory that flows between models and never breaks.</text>
+  <text x="60" y="878" font-family="'Inter', system-ui, sans-serif" font-size="11" fill="#475569">Three nodes represent the handoff points (Claude, Codex, Gemini). The central dot is the persistent core.</text>
+</svg>

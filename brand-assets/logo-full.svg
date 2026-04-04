@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 200" fill="none">
+  <defs>
+    <linearGradient id="lg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6366F1"/>
+      <stop offset="100%" stop-color="#0EA5E9"/>
+    </linearGradient>
+    <linearGradient id="wlg" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#6366F1"/>
+      <stop offset="100%" stop-color="#0EA5E9"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Logomark (scaled to 160x160, offset 20,20) -->
+  <g transform="translate(20, 20) scale(0.3125)">
+    <path
+      d="M 340 108
+         C 280 68, 180 68, 130 128
+         C 72 196, 72 316, 130 384
+         C 180 444, 280 444, 340 404
+         M 340 404
+         C 308 420, 264 428, 228 416
+         C 172 396, 140 340, 140 256
+         C 140 172, 172 116, 228 96
+         C 264 84, 308 92, 340 108
+         M 256 192
+         C 220 192, 192 220, 192 256
+         C 192 292, 220 320, 256 320
+         C 292 320, 320 292, 320 256
+         C 320 220, 292 192, 256 192 Z"
+      stroke="url(#lg)"
+      stroke-width="32"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      fill="none"
+    />
+    <circle cx="256" cy="256" r="24" fill="url(#lg)"/>
+    <circle cx="340" cy="108" r="16" fill="#6366F1"/>
+    <circle cx="340" cy="404" r="16" fill="#0EA5E9"/>
+    <circle cx="130" cy="256" r="16" fill="#818CF8"/>
+  </g>
+
+  <!-- Wordmark -->
+  <text
+    x="220" y="130"
+    font-family="'Inter', 'SF Pro Display', 'Segoe UI', system-ui, -apple-system, sans-serif"
+    font-size="108"
+    font-weight="600"
+    letter-spacing="-2"
+    fill="url(#wlg)"
+  >contynu</text>
+
+  <!-- Tagline -->
+  <text
+    x="224" y="168"
+    font-family="'Inter', 'SF Pro Display', 'Segoe UI', system-ui, -apple-system, sans-serif"
+    font-size="22"
+    font-weight="400"
+    letter-spacing="4"
+    fill="#94A3B8"
+  >MEMORY THAT PERSISTS</text>
+</svg>

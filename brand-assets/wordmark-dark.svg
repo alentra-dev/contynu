@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 160" fill="none">
+  <!-- Wordmark on dark backgrounds -->
+  <text
+    x="20" y="110"
+    font-family="'Inter', 'SF Pro Display', 'Segoe UI', system-ui, -apple-system, sans-serif"
+    font-size="108"
+    font-weight="600"
+    letter-spacing="-2"
+    fill="#F8FAFC"
+  >contynu</text>
+</svg>
