@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>contynu — Memory That Persists</title>
+  <meta name="description" content="Model-agnostic persistent memory for LLM workflows. Facts, decisions, and context transfer seamlessly between Claude, Codex, and Gemini.">
+  <meta property="og:title" content="contynu — Memory That Persists">
+  <meta property="og:description" content="Model-agnostic persistent memory for LLM workflows.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://contynu.com">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <style>
+    /* ── Reset & Base ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --indigo: #6366F1;
+      --sky: #0EA5E9;
+      --violet: #818CF8;
+      --slate-900: #0F172A;
+      --slate-800: #1E293B;
+      --slate-700: #334155;
+      --slate-400: #94A3B8;
+      --slate-300: #CBD5E1;
+      --slate-200: #E2E8F0;
+      --slate-50: #F8FAFC;
+      --gradient: linear-gradient(135deg, var(--indigo), var(--sky));
+    }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: var(--slate-900);
+      color: var(--slate-300);
+      line-height: 1.7;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Typography ── */
+    h1, h2, h3 { color: var(--slate-50); line-height: 1.2; }
+    a { color: var(--sky); text-decoration: none; transition: color 0.2s; }
+    a:hover { color: var(--violet); }
+    code {
+      font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+      background: var(--slate-800);
+      padding: 0.15em 0.4em;
+      border-radius: 4px;
+      font-size: 0.88em;
+    }
+    pre {
+      background: var(--slate-800);
+      border: 1px solid var(--slate-700);
+      border-radius: 12px;
+      padding: 1.5rem;
+      overflow-x: auto;
+      font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+      font-size: 0.875rem;
+      line-height: 1.6;
+    }
+
+    /* ── Layout ── */
+    .container { max-width: 1100px; margin: 0 auto; padding: 0 2rem; }
+    section { padding: 5rem 0; }
+
+    /* ── Nav ── */
+    nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      background: rgba(15, 23, 42, 0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid rgba(51, 65, 85, 0.5);
+    }
+    nav .container {
+      display: flex; align-items: center; justify-content: space-between;
+      height: 64px;
+    }
+    .nav-brand {
+      font-size: 1.25rem; font-weight: 700; letter-spacing: -0.5px;
+      background: var(--gradient); -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent; background-clip: text;
+    }
+    .nav-links { display: flex; gap: 2rem; align-items: center; }
+    .nav-links a { color: var(--slate-400); font-size: 0.875rem; font-weight: 500; }
+    .nav-links a:hover { color: var(--slate-50); }
+    .btn-github {
+      display: inline-flex; align-items: center; gap: 0.5rem;
+      background: var(--slate-800); border: 1px solid var(--slate-700);
+      color: var(--slate-50) !important; padding: 0.5rem 1rem;
+      border-radius: 8px; font-size: 0.875rem; font-weight: 500;
+      transition: all 0.2s;
+      -webkit-text-fill-color: initial;
+    }
+    .btn-github:hover { background: var(--slate-700); border-color: var(--slate-400); }
+    .btn-github svg { width: 18px; height: 18px; }
+
+    /* ── Hero ── */
+    .hero {
+      padding: 10rem 0 6rem; text-align: center;
+      background: radial-gradient(ellipse at 50% 0%, rgba(99,102,241,0.12) 0%, transparent 60%);
+    }
+    .hero-badge {
+      display: inline-block; font-size: 0.8rem; font-weight: 600;
+      letter-spacing: 2px; text-transform: uppercase;
+      color: var(--violet); margin-bottom: 1.5rem;
+      padding: 0.35rem 1rem; border: 1px solid rgba(129,140,248,0.3);
+      border-radius: 100px;
+    }
+    .hero h1 {
+      font-size: clamp(2.5rem, 6vw, 4.5rem); font-weight: 800;
+      letter-spacing: -1.5px; margin-bottom: 1.5rem;
+    }
+    .hero h1 .gradient {
+      background: var(--gradient); -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent; background-clip: text;
+    }
+    .hero p {
+      font-size: 1.25rem; color: var(--slate-400);
+      max-width: 640px; margin: 0 auto 2.5rem;
+    }
+    .hero-actions { display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; }
+    .btn-primary {
+      display: inline-flex; align-items: center; gap: 0.5rem;
+      background: var(--gradient); color: white;
+      padding: 0.75rem 1.75rem; border-radius: 10px;
+      font-size: 1rem; font-weight: 600;
+      transition: transform 0.2s, box-shadow 0.2s;
+      box-shadow: 0 4px 24px rgba(99,102,241,0.3);
+    }
+    .btn-primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 32px rgba(99,102,241,0.4);
+      color: white;
+    }
+    .btn-secondary {
+      display: inline-flex; align-items: center; gap: 0.5rem;
+      background: transparent; color: var(--slate-300);
+      padding: 0.75rem 1.75rem; border-radius: 10px;
+      font-size: 1rem; font-weight: 500;
+      border: 1px solid var(--slate-700);
+      transition: all 0.2s;
+    }
+    .btn-secondary:hover { border-color: var(--slate-400); color: var(--slate-50); }
+
+    /* ── Install strip ── */
+    .install-strip {
+      margin-top: 3rem;
+      display: flex; justify-content: center;
+    }
+    .install-cmd {
+      display: flex; align-items: center; gap: 0.75rem;
+      background: var(--slate-800); border: 1px solid var(--slate-700);
+      border-radius: 10px; padding: 0.75rem 1.25rem;
+      font-family: 'SF Mono', monospace; font-size: 0.875rem;
+      color: var(--slate-300); cursor: pointer;
+      transition: border-color 0.2s;
+    }
+    .install-cmd:hover { border-color: var(--violet); }
+    .install-cmd .prompt { color: var(--sky); user-select: none; }
+    .install-cmd .copy-hint {
+      color: var(--slate-400); font-size: 0.75rem;
+      font-family: 'Inter', sans-serif; margin-left: 1rem;
+    }
+
+    /* ── Problem ── */
+    .problem { border-top: 1px solid var(--slate-800); }
+    .problem-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 4rem;
+      align-items: center;
+    }
+    .problem h2 { font-size: 2rem; font-weight: 700; margin-bottom: 1rem; letter-spacing: -0.5px; }
+    .problem p { color: var(--slate-400); margin-bottom: 1rem; }
+
+    /* ── Flow diagram ── */
+    .flow-visual {
+      background: var(--slate-800); border: 1px solid var(--slate-700);
+      border-radius: 16px; padding: 2.5rem;
+    }
+    .flow-step {
+      display: flex; align-items: center; gap: 1rem;
+      padding: 0.75rem 0;
+    }
+    .flow-node {
+      width: 44px; height: 44px; border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 0.8rem; flex-shrink: 0;
+      color: white;
+    }
+    .flow-arrow {
+      width: 24px; text-align: center; color: var(--slate-400);
+      font-size: 1.2rem; flex-shrink: 0;
+    }
+    .flow-label { font-size: 0.9rem; color: var(--slate-300); }
+    .flow-label strong { color: var(--slate-50); }
+
+    /* ── Features ── */
+    .features { border-top: 1px solid var(--slate-800); }
+    .features h2 {
+      font-size: 2rem; font-weight: 700; text-align: center;
+      margin-bottom: 3.5rem; letter-spacing: -0.5px;
+    }
+    .features-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2rem; }
+    .feature-card {
+      background: var(--slate-800); border: 1px solid var(--slate-700);
+      border-radius: 16px; padding: 2rem;
+      transition: border-color 0.3s, transform 0.3s;
+    }
+    .feature-card:hover { border-color: var(--indigo); transform: translateY(-4px); }
+    .feature-icon {
+      width: 48px; height: 48px; border-radius: 12px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.4rem; margin-bottom: 1.25rem;
+      background: rgba(99,102,241,0.1); color: var(--violet);
+    }
+    .feature-card h3 { font-size: 1.1rem; font-weight: 600; margin-bottom: 0.5rem; }
+    .feature-card p { font-size: 0.9rem; color: var(--slate-400); line-height: 1.6; }
+
+    /* ── How it works ── */
+    .how-it-works { border-top: 1px solid var(--slate-800); }
+    .how-it-works h2 {
+      font-size: 2rem; font-weight: 700; text-align: center;
+      margin-bottom: 1rem; letter-spacing: -0.5px;
+    }
+    .how-it-works > .container > p {
+      text-align: center; color: var(--slate-400);
+      max-width: 600px; margin: 0 auto 3rem;
+    }
+    .code-tabs { margin-bottom: 2rem; }
+    .code-tabs pre { margin-bottom: 0.5rem; }
+    .code-tabs .label {
+      display: block; font-size: 0.75rem; font-weight: 600;
+      color: var(--slate-400); letter-spacing: 1px;
+      text-transform: uppercase; margin-bottom: 0.5rem;
+    }
+
+    /* ── CTA ── */
+    .cta {
+      text-align: center; padding: 6rem 0;
+      background: radial-gradient(ellipse at 50% 100%, rgba(14,165,233,0.08) 0%, transparent 60%);
+    }
+    .cta h2 { font-size: 2.5rem; font-weight: 800; margin-bottom: 1rem; letter-spacing: -1px; }
+    .cta p { color: var(--slate-400); margin-bottom: 2rem; font-size: 1.1rem; }
+
+    /* ── Footer ── */
+    footer {
+      border-top: 1px solid var(--slate-800); padding: 2rem 0;
+      text-align: center; font-size: 0.85rem; color: var(--slate-400);
+    }
+    footer a { color: var(--slate-300); }
+
+    /* ── Responsive ── */
+    @media (max-width: 768px) {
+      .problem-grid { grid-template-columns: 1fr; gap: 2rem; }
+      .features-grid { grid-template-columns: 1fr; }
+      .nav-links a:not(.btn-github) { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Nav -->
+<nav>
+  <div class="container">
+    <a href="#" class="nav-brand">contynu</a>
+    <div class="nav-links">
+      <a href="#problem">Why</a>
+      <a href="#features">Features</a>
+      <a href="#how">Get Started</a>
+      <a href="https://github.com/alentra-dev/contynu" class="btn-github" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+        GitHub
+      </a>
+    </div>
+  </div>
+</nav>
+
+<!-- Hero -->
+<section class="hero">
+  <div class="container">
+    <div class="hero-badge">Open Source</div>
+    <h1>Memory that<br><span class="gradient">persists</span></h1>
+    <p>Model-agnostic persistent memory for LLM workflows. Facts, decisions, and context transfer seamlessly between Claude, Codex, and Gemini.</p>
+    <div class="hero-actions">
+      <a href="https://github.com/alentra-dev/contynu" class="btn-primary" target="_blank" rel="noopener">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+        View on GitHub
+      </a>
+      <a href="#how" class="btn-secondary">Get started</a>
+    </div>
+    <div class="install-strip">
+      <div class="install-cmd" onclick="navigator.clipboard.writeText('curl -fsSL https://github.com/alentra-dev/contynu/releases/latest/download/install.sh | sh')">
+        <span class="prompt">$</span>
+        curl -fsSL https://github.com/alentra-dev/contynu/releases/latest/download/install.sh | sh
+        <span class="copy-hint">click to copy</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Problem -->
+<section class="problem" id="problem">
+  <div class="container">
+    <div class="problem-grid">
+      <div>
+        <h2>LLMs forget everything between sessions</h2>
+        <p>You spend an hour with Claude building an API. You switch to Codex to refactor. Codex has no idea what you just decided. You switch to Gemini for a review. Gemini starts from scratch.</p>
+        <p>Every model handoff is a <strong style="color:var(--slate-50)">cold start</strong>. Every context switch loses work. Every session begins with "let me re-explain the entire project."</p>
+        <p style="color:var(--slate-50); font-weight:500; margin-top:1.5rem">Contynu fixes this.</p>
+      </div>
+      <div class="flow-visual">
+        <div class="flow-step">
+          <div class="flow-node" style="background:var(--indigo)">C</div>
+          <div class="flow-arrow">&rarr;</div>
+          <div class="flow-label"><strong>Claude</strong> decides on JWT auth with HMAC-SHA256</div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-node" style="background:var(--slate-700)">
+            <svg width="20" height="20" viewBox="0 0 512 512" fill="none"><circle cx="256" cy="256" r="80" fill="var(--violet)"/></svg>
+          </div>
+          <div class="flow-arrow">&darr;</div>
+          <div class="flow-label" style="color:var(--violet)"><strong>contynu captures</strong> the decision with provenance</div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-node" style="background:#10A37F">Cx</div>
+          <div class="flow-arrow">&rarr;</div>
+          <div class="flow-label"><strong>Codex</strong> reads the decision, implements the auth middleware</div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-node" style="background:var(--slate-700)">
+            <svg width="20" height="20" viewBox="0 0 512 512" fill="none"><circle cx="256" cy="256" r="80" fill="var(--violet)"/></svg>
+          </div>
+          <div class="flow-arrow">&darr;</div>
+          <div class="flow-label" style="color:var(--violet)"><strong>contynu captures</strong> the implementation details</div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-node" style="background:var(--sky)">G</div>
+          <div class="flow-arrow">&rarr;</div>
+          <div class="flow-label"><strong>Gemini</strong> reviews with full context from both sessions</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Features -->
+<section class="features" id="features">
+  <div class="container">
+    <h2>Built for how you actually work</h2>
+    <div class="features-grid">
+      <div class="feature-card">
+        <div class="feature-icon">&infin;</div>
+        <h3>Indefinite Memory</h3>
+        <p>Every fact, decision, and constraint persists forever in an append-only journal. Nothing is lost, even across hundreds of sessions.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&harr;</div>
+        <h3>Cross-Model Transfer</h3>
+        <p>Memory flows seamlessly between Claude, Codex, and Gemini. Each model receives context in its optimal format &mdash; XML, Markdown, or structured text.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#x1F50D;</div>
+        <h3>MCP Server</h3>
+        <p>LLMs query the full memory archive on demand via the Model Context Protocol. Search by keyword, kind, or time window with paginated results.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#x2696;</div>
+        <h3>Importance Ranking</h3>
+        <p>Memories are scored by importance, recency, and confidence. The most critical facts always make it into the handoff &mdash; no matter how large the project.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#x1F512;</div>
+        <h3>Local-First</h3>
+        <p>All data stays on your machine. SQLite + JSONL + content-addressed blobs. No cloud dependencies, no API keys, no data leaving your disk.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#x2699;</div>
+        <h3>Zero Config</h3>
+        <p>Replace <code>claude</code> with <code>contynu claude</code>. That's it. Auto-detection, auto-registration, auto-hydration. Works immediately.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- How it works -->
+<section class="how-it-works" id="how">
+  <div class="container">
+    <h2>Get started in 30 seconds</h2>
+    <p>One install. One command prefix. All your models remember everything.</p>
+    <div class="code-tabs">
+      <span class="label">Install</span>
+      <pre><code><span style="color:var(--sky)">$</span> curl -fsSL https://github.com/alentra-dev/contynu/releases/latest/download/install.sh | sh</code></pre>
+    </div>
+    <div class="code-tabs">
+      <span class="label">Use with any LLM CLI</span>
+      <pre><code><span style="color:var(--slate-400)"># Instead of running your LLM directly...</span>
+<span style="color:var(--sky)">$</span> contynu claude     <span style="color:var(--slate-400)"># wraps Claude Code with persistent memory</span>
+<span style="color:var(--sky)">$</span> contynu codex      <span style="color:var(--slate-400)"># wraps Codex CLI &mdash; picks up where Claude left off</span>
+<span style="color:var(--sky)">$</span> contynu gemini     <span style="color:var(--slate-400)"># wraps Gemini CLI &mdash; has full context from both</span></code></pre>
+    </div>
+    <div class="code-tabs">
+      <span class="label">Search memory from any model</span>
+      <pre><code><span style="color:var(--slate-400)"># The MCP server auto-registers &mdash; LLMs can query directly:</span>
+<span style="color:var(--violet)">&gt;</span> Use the search_memory tool to find what we decided about authentication
+<span style="color:var(--sky)">&#x2713;</span> Found: "Use HMAC-SHA256 for token signing" (from Claude session, importance: 0.85)</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<section class="cta">
+  <div class="container">
+    <h2>Stop re-explaining your project</h2>
+    <p>Your AI tools should remember what happened. Contynu makes sure they do.</p>
+    <div class="hero-actions">
+      <a href="https://github.com/alentra-dev/contynu" class="btn-primary" target="_blank" rel="noopener">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+        Star on GitHub
+      </a>
+    </div>
+  </div>
+</section>
+
+<!-- Footer -->
+<footer>
+  <div class="container">
+    <p>contynu &mdash; Created by <a href="https://github.com/alentra-dev" target="_blank">Udonna Eke-Okoro</a> &middot; April 2026 &middot; <a href="https://github.com/alentra-dev/contynu/blob/main/LICENSE" target="_blank">MPL-2.0</a></p>
+  </div>
+</footer>
+
+</body>
+</html>
