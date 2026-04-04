@@ -176,6 +176,11 @@ cargo fmt --check
 - [`docs/crash-recovery.md`](docs/crash-recovery.md) — Durability and recovery
 - [`docs/handoff-summary.md`](docs/handoff-summary.md) — Model handoff capabilities
 
+## Creators
+
+- **Udonna Eke-Okoro** — Creator
+- **Kelenna Eke-Okoro** — Co-Creator
+
 ## License
 
 This repository is licensed under the Mozilla Public License 2.0. See [`LICENSE`](./LICENSE).
