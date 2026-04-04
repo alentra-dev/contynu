@@ -141,6 +141,64 @@ pub struct MemoryObject {
     pub text_hash: Option<String>,
 }
 
+/// Query parameters for flexible memory search.
+pub struct MemoryQuery {
+    pub session_id: Option<SessionId>,
+    pub text_query: Option<String>,
+    pub kind: Option<MemoryObjectKind>,
+    pub source_adapter: Option<String>,
+    pub after: Option<DateTime<Utc>>,
+    pub before: Option<DateTime<Utc>>,
+    pub sort_by: MemorySortBy,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+impl Default for MemoryQuery {
+    fn default() -> Self {
+        Self {
+            session_id: None,
+            text_query: None,
+            kind: None,
+            source_adapter: None,
+            after: None,
+            before: None,
+            sort_by: MemorySortBy::Importance,
+            limit: 20,
+            offset: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum MemorySortBy {
+    Importance,
+    Recency,
+}
+
+/// Query parameters for flexible event search.
+pub struct EventQuery {
+    pub session_id: Option<SessionId>,
+    pub text_query: Option<String>,
+    pub after: Option<DateTime<Utc>>,
+    pub before: Option<DateTime<Utc>>,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+impl Default for EventQuery {
+    fn default() -> Self {
+        Self {
+            session_id: None,
+            text_query: None,
+            after: None,
+            before: None,
+            limit: 20,
+            offset: 0,
+        }
+    }
+}
+
 pub struct MetadataStore {
     conn: Connection,
 }
@@ -157,6 +215,15 @@ impl MetadataStore {
         let store = Self { conn };
         store.migrate()?;
         Ok(store)
+    }
+
+    pub fn open_readonly(path: impl AsRef<Path>) -> Result<Self> {
+        let conn = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.execute_batch("PRAGMA query_only = ON;")?;
+        Ok(Self { conn })
     }
 
     pub fn migrate(&self) -> Result<()> {
@@ -1005,6 +1072,143 @@ impl MetadataStore {
             matches.push(row?);
         }
         Ok(matches)
+    }
+
+    /// Flexible memory search with filtering, pagination, and sorting.
+    pub fn query_memories(&self, query: &MemoryQuery) -> Result<Vec<MemoryObject>> {
+        let mut conditions = vec!["status != 'superseded'".to_string()];
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut param_idx = 1;
+
+        if let Some(ref session_id) = query.session_id {
+            conditions.push(format!("session_id = ?{param_idx}"));
+            param_values.push(Box::new(session_id.as_str().to_string()));
+            param_idx += 1;
+        }
+        if let Some(ref text) = query.text_query {
+            conditions.push(format!("text LIKE ?{param_idx}"));
+            param_values.push(Box::new(format!("%{text}%")));
+            param_idx += 1;
+        }
+        if let Some(ref kind) = query.kind {
+            conditions.push(format!("kind = ?{param_idx}"));
+            param_values.push(Box::new(kind.as_str().to_string()));
+            param_idx += 1;
+        }
+        if let Some(ref adapter) = query.source_adapter {
+            conditions.push(format!("source_adapter = ?{param_idx}"));
+            param_values.push(Box::new(adapter.clone()));
+            param_idx += 1;
+        }
+        if let Some(ref after) = query.after {
+            conditions.push(format!("created_at >= ?{param_idx}"));
+            param_values.push(Box::new(after.to_rfc3339()));
+            param_idx += 1;
+        }
+        if let Some(ref before) = query.before {
+            conditions.push(format!("created_at <= ?{param_idx}"));
+            param_values.push(Box::new(before.to_rfc3339()));
+            let _ = param_idx;
+        }
+
+        let order = match query.sort_by {
+            MemorySortBy::Importance => "importance DESC, created_at DESC",
+            MemorySortBy::Recency => "created_at DESC",
+        };
+
+        let limit = query.limit.min(50).max(1);
+        let offset = query.offset;
+
+        let sql = format!(
+            "SELECT {MEMORY_SELECT_COLUMNS} FROM memory_objects WHERE {} ORDER BY {} LIMIT {} OFFSET {}",
+            conditions.join(" AND "),
+            order,
+            limit,
+            offset
+        );
+
+        let params: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params.as_slice(), map_memory)?;
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
+    }
+
+    /// Flexible event search with filtering and pagination.
+    pub fn query_events(&self, query: &EventQuery) -> Result<Vec<EventRecord>> {
+        let mut conditions = Vec::new();
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut param_idx = 1;
+
+        if let Some(ref text) = query.text_query {
+            conditions.push(format!("(payload_json LIKE ?{param_idx} OR event_type LIKE ?{param_idx})"));
+            param_values.push(Box::new(format!("%{text}%")));
+            param_idx += 1;
+        }
+        if let Some(ref session_id) = query.session_id {
+            conditions.push(format!("session_id = ?{param_idx}"));
+            param_values.push(Box::new(session_id.as_str().to_string()));
+            param_idx += 1;
+        }
+        if let Some(ref after) = query.after {
+            conditions.push(format!("ts >= ?{param_idx}"));
+            param_values.push(Box::new(after.to_rfc3339()));
+            param_idx += 1;
+        }
+        if let Some(ref before) = query.before {
+            conditions.push(format!("ts <= ?{param_idx}"));
+            param_values.push(Box::new(before.to_rfc3339()));
+            let _ = param_idx;
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conditions.join(" AND "))
+        };
+
+        let limit = query.limit.min(50).max(1);
+        let offset = query.offset;
+
+        let sql = format!(
+            r#"SELECT event_id, session_id, turn_id, seq, ts, actor, event_type, payload_json,
+                      checksum, journal_path, journal_byte_offset, journal_line
+               FROM events {where_clause}
+               ORDER BY ts DESC
+               LIMIT {limit} OFFSET {offset}"#
+        );
+
+        let params: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            let payload_json: String = row.get(7)?;
+            let turn_id: Option<String> = row.get(2)?;
+            Ok(EventRecord {
+                event_id: EventId::parse(row.get::<_, String>(0)?).map_err(into_sql_error)?,
+                session_id: SessionId::parse(row.get::<_, String>(1)?).map_err(into_sql_error)?,
+                turn_id: turn_id
+                    .map(TurnId::parse)
+                    .transpose()
+                    .map_err(into_sql_error)?,
+                seq: row.get::<_, i64>(3)? as u64,
+                ts: parse_rfc3339(&row.get::<_, String>(4)?).map_err(into_sql_error)?,
+                actor: row.get(5)?,
+                event_type: row.get(6)?,
+                payload_json: serde_json::from_str(&payload_json).map_err(into_sql_error)?,
+                checksum: row.get(8)?,
+                journal_path: row.get(9)?,
+                journal_byte_offset: row.get::<_, i64>(10)? as u64,
+                journal_line: row.get::<_, i64>(11)? as usize,
+            })
+        })?;
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
     }
 
     pub fn increment_memory_access(&self, memory_ids: &[MemoryId]) -> Result<()> {

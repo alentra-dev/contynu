@@ -7,6 +7,7 @@ pub mod event;
 pub mod files;
 pub mod ids;
 pub mod journal;
+pub mod mcp;
 pub mod pty;
 pub mod rendering;
 pub mod runtime;
@@ -29,6 +30,7 @@ pub use journal::{Journal, JournalAppend, JournalRepair, JournalReplay};
 pub use runtime::{RunConfig, RunOutcome, RuntimeEngine};
 pub use state::StatePaths;
 pub use store::{
-    ArtifactRecord, CheckpointRecord, EventRecord, FileRecord, MemoryObject, MemoryObjectKind,
-    MetadataStore, ProjectRecord, SessionRecord, TurnRecord,
+    ArtifactRecord, CheckpointRecord, EventQuery, EventRecord, FileRecord, MemoryObject,
+    MemoryObjectKind, MemoryQuery, MemorySortBy, MetadataStore, ProjectRecord, SessionRecord,
+    TurnRecord,
 };

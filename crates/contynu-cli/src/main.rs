@@ -1,3 +1,6 @@
+mod mcp_registration;
+mod mcp_server;
+
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -85,6 +88,12 @@ enum Command {
     Repair {
         #[arg(long, alias = "session")]
         project: Option<String>,
+    },
+    /// Start the Contynu MCP server (stdio transport)
+    #[command(name = "mcp-server")]
+    McpServer {
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
     },
     #[command(external_subcommand)]
     External(Vec<OsString>),
@@ -181,6 +190,14 @@ fn main() -> Result<()> {
         Some(Command::Artifacts { command }) => artifacts(&state, command),
         Some(Command::Doctor) => doctor(&state),
         Some(Command::Repair { project }) => repair(&state, project.as_deref()),
+        Some(Command::McpServer { state_dir: override_dir }) => {
+            let dir = override_dir.unwrap_or_else(|| {
+                std::env::var("CONTYNU_STATE_DIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| cli.state_dir.clone())
+            });
+            mcp_server::run(&dir)
+        }
         Some(Command::External(command)) => passthrough(&state, &cli.cwd, command),
         None if cli.new => {
             println!("Started fresh. Launch a tool with `contynu codex`, `contynu claude`, `contynu gemini`, or `contynu <command...>`.");
@@ -312,6 +329,26 @@ fn launch_llm(
     executable: &str,
     command: LlmCommand,
 ) -> Result<()> {
+    // Resolve project ID for MCP registration
+    let project_id_for_mcp = {
+        let store = MetadataStore::open(state.sqlite_db())?;
+        command
+            .project
+            .as_ref()
+            .map(|p| ProjectId::parse(p.clone()))
+            .transpose()?
+            .or(store.primary_project_id()?)
+    };
+
+    // Auto-register MCP server for this CLI (non-fatal on failure)
+    if let Some(ref pid) = project_id_for_mcp {
+        if let Err(e) =
+            mcp_registration::ensure_mcp_registered(executable, state.root(), cwd, pid.as_str())
+        {
+            eprintln!("Warning: MCP auto-registration: {e}");
+        }
+    }
+
     let mut argv = vec![executable.to_string()];
     argv.extend(command.args);
     let outcome = RuntimeEngine::run(RunConfig {
