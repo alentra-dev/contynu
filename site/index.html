@@ -73,9 +73,14 @@
       height: 64px;
     }
     .nav-brand {
+      display: flex; align-items: center; gap: 0.6rem;
       font-size: 1.25rem; font-weight: 700; letter-spacing: -0.5px;
       background: var(--gradient); -webkit-background-clip: text;
       -webkit-text-fill-color: transparent; background-clip: text;
+    }
+    .nav-brand svg {
+      width: 28px; height: 28px; flex-shrink: 0;
+      -webkit-text-fill-color: initial;
     }
     .nav-links { display: flex; gap: 2rem; align-items: center; }
     .nav-links a { color: var(--slate-400); font-size: 0.875rem; font-weight: 500; }
@@ -151,12 +156,14 @@
       font-family: 'SF Mono', monospace; font-size: 0.875rem;
       color: var(--slate-300); cursor: pointer;
       transition: border-color 0.2s;
+      max-width: 100%; overflow-x: auto;
     }
     .install-cmd:hover { border-color: var(--violet); }
     .install-cmd .prompt { color: var(--sky); user-select: none; }
     .install-cmd .copy-hint {
       color: var(--slate-400); font-size: 0.75rem;
       font-family: 'Inter', sans-serif; margin-left: 1rem;
+      white-space: nowrap;
     }
 
     /* ── Problem ── */
@@ -258,7 +265,14 @@
 <!-- Nav -->
 <nav>
   <div class="container">
-    <a href="#" class="nav-brand">contynu</a>
+    <a href="#" class="nav-brand">
+      <svg viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <defs><linearGradient id="nav-g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#6366F1"/><stop offset="100%" stop-color="#0EA5E9"/></linearGradient></defs>
+        <path d="M340 108C280 68 180 68 130 128C72 196 72 316 130 384C180 444 280 444 340 404M340 404C308 420 264 428 228 416C172 396 140 340 140 256C140 172 172 116 228 96C264 84 308 92 340 108M256 192C220 192 192 220 192 256C192 292 220 320 256 320C292 320 320 292 320 256C320 220 292 192 256 192Z" stroke="url(#nav-g)" stroke-width="32" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        <circle cx="256" cy="256" r="24" fill="url(#nav-g)"/><circle cx="340" cy="108" r="16" fill="#6366F1"/><circle cx="340" cy="404" r="16" fill="#0EA5E9"/><circle cx="130" cy="256" r="16" fill="#818CF8"/>
+      </svg>
+      contynu
+    </a>
     <div class="nav-links">
       <a href="#problem">Why</a>
       <a href="#features">Features</a>
@@ -274,6 +288,13 @@
 <!-- Hero -->
 <section class="hero">
   <div class="container">
+    <div style="margin-bottom:2rem;">
+      <svg width="80" height="80" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <defs><linearGradient id="hero-g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#6366F1"/><stop offset="100%" stop-color="#0EA5E9"/></linearGradient></defs>
+        <path d="M340 108C280 68 180 68 130 128C72 196 72 316 130 384C180 444 280 444 340 404M340 404C308 420 264 428 228 416C172 396 140 340 140 256C140 172 172 116 228 96C264 84 308 92 340 108M256 192C220 192 192 220 192 256C192 292 220 320 256 320C292 320 320 292 320 256C320 220 292 192 256 192Z" stroke="url(#hero-g)" stroke-width="32" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        <circle cx="256" cy="256" r="24" fill="url(#hero-g)"/><circle cx="340" cy="108" r="16" fill="#6366F1"/><circle cx="340" cy="404" r="16" fill="#0EA5E9"/><circle cx="130" cy="256" r="16" fill="#818CF8"/>
+      </svg>
+    </div>
     <div class="hero-badge">Open Source</div>
     <h1>Memory that<br><span class="gradient">persists</span></h1>
     <p>Model-agnostic persistent memory for LLM workflows. Facts, decisions, and context transfer seamlessly between Claude, Codex, and Gemini.</p>
@@ -285,9 +306,9 @@
       <a href="#how" class="btn-secondary">Get started</a>
     </div>
     <div class="install-strip">
-      <div class="install-cmd" onclick="navigator.clipboard.writeText('curl -fsSL https://github.com/alentra-dev/contynu/releases/latest/download/install.sh | sh')">
+      <div class="install-cmd" onclick="navigator.clipboard.writeText('curl -fsSL https://github.com/alentra-dev/contynu/releases/latest/download/install.sh | sh');this.querySelector('.copy-hint').textContent='copied!';setTimeout(()=>this.querySelector('.copy-hint').textContent='click to copy',2000)">
         <span class="prompt">$</span>
-        curl -fsSL https://github.com/alentra-dev/contynu/releases/latest/download/install.sh | sh
+        curl -fsSL https://...contynu/.../install.sh | sh
         <span class="copy-hint">click to copy</span>
       </div>
     </div>
@@ -300,7 +321,7 @@
     <div class="problem-grid">
       <div>
         <h2>LLMs forget everything between sessions</h2>
-        <p>You spend an hour with Claude building an API. You switch to Codex to refactor. Codex has no idea what you just decided. You switch to Gemini for a review. Gemini starts from scratch.</p>
+        <p>You spend an hour with Claude building a product. You switch to Codex to iterate. Codex has no idea what you just decided. You switch to Gemini for a review. Gemini starts from scratch.</p>
         <p>Every model handoff is a <strong style="color:var(--slate-50)">cold start</strong>. Every context switch loses work. Every session begins with "let me re-explain the entire project."</p>
         <p style="color:var(--slate-50); font-weight:500; margin-top:1.5rem">Contynu fixes this.</p>
       </div>
