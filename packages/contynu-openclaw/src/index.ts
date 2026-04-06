@@ -12,36 +12,40 @@ import type { ContynuPluginConfig } from './types';
  * compaction, and writes importance-ranked facts back to MEMORY.md.
  * Agents also get MCP tools (search_memory, list_memories, search_events)
  * for on-demand deep recall of any fact from the full project history.
- *
- * Usage in OpenClaw config (~/.openclaw/openclaw.json):
- * {
- *   "plugins": {
- *     "contynu-openclaw": { "enabled": true }
- *   }
- * }
  */
-export default function register(api: any, config?: ContynuPluginConfig) {
-  const stateDir = config?.stateDir ?? path.join(process.cwd(), '.contynu');
-  const cli = new ContynuCli(stateDir);
-  const mapping = new AgentMapping(stateDir);
+const plugin = {
+  id: 'contynu-openclaw',
+  name: 'Contynu Memory',
+  description: 'Permanent, model-agnostic memory for OpenClaw agents powered by Contynu.',
 
-  // Ensure Contynu state is initialized on plugin load
-  api.on('bootstrap', async () => {
-    try {
-      await cli.ensureInit();
-    } catch (err) {
-      console.error(
-        `[contynu-openclaw] bootstrap failed: ${err instanceof Error ? err.message : err}`
-      );
-    }
-  });
+  register(api: any, config?: ContynuPluginConfig) {
+    const stateDir = config?.stateDir ?? path.join(process.cwd(), '.contynu');
+    const cli = new ContynuCli(stateDir);
+    const mapping = new AgentMapping(stateDir);
 
-  // Capture every conversation turn into Contynu's permanent store
-  api.on('afterTurn', (ctx: any) => handleAfterTurn(ctx, cli, mapping));
+    // Ensure Contynu state is initialized on plugin load
+    api.on('bootstrap', async () => {
+      try {
+        await cli.ensureInit();
+        console.log('[contynu-openclaw] Initialized. State:', stateDir);
+      } catch (err) {
+        console.error(
+          `[contynu-openclaw] bootstrap failed: ${err instanceof Error ? err.message : err}`
+        );
+      }
+    });
 
-  // Checkpoint and write back to MEMORY.md before compaction fires
-  api.on('session:compact:before', (ctx: any) => handleCompactBefore(ctx, cli, mapping));
-}
+    // Capture every conversation turn into Contynu's permanent store
+    api.on('afterTurn', (ctx: any) => handleAfterTurn(ctx, cli, mapping));
+
+    // Checkpoint and write back to MEMORY.md before compaction fires
+    api.on('session:compact:before', (ctx: any) => handleCompactBefore(ctx, cli, mapping));
+
+    console.log('[contynu-openclaw] Plugin registered.');
+  },
+};
+
+export default plugin;
 
 // Named exports for testing and advanced usage
 export { ContynuCli } from './cli';

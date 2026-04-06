@@ -10,3 +10,5 @@ Cargo.lock
 .DS_Store
 .idea/
 .vscode/
+linkedin-followup-post.docx
+.~lock.*
