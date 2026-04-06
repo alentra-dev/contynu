@@ -2191,8 +2191,10 @@ pub fn derive_memory_from_ingested_events(
         }
     }
 
-    // Extract response content as a fact if no dialogue pairing
-    if prompts.is_empty() && !responses.is_empty() {
+    // Always extract the LLM response content as a Fact for recall.
+    // This ensures the actual knowledge from the conversation persists,
+    // not just the summary.
+    if !responses.is_empty() {
         let response_text = responses.join(" ");
         let truncated = if response_text.len() > 500 {
             format!("{}...", &response_text[..500])
