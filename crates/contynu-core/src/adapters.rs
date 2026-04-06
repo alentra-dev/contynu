@@ -174,7 +174,7 @@ impl AdapterSpec {
             AdapterKind::ClaudeCli => PromptFormat::Xml,
             AdapterKind::CodexCli => PromptFormat::Markdown,
             AdapterKind::GeminiCli => PromptFormat::StructuredText,
-            _ => PromptFormat::StructuredText,
+            _ => PromptFormat::Markdown,
         };
         Self {
             kind,
@@ -200,7 +200,7 @@ impl AdapterSpec {
                 AdapterKind::ClaudeCli => PromptFormat::Xml,
                 AdapterKind::CodexCli => PromptFormat::Markdown,
                 AdapterKind::GeminiCli => PromptFormat::StructuredText,
-                _ => PromptFormat::StructuredText,
+                _ => PromptFormat::Markdown,
             });
         Self {
             kind,

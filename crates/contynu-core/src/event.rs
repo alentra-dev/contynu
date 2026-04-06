@@ -123,6 +123,42 @@ impl EventType {
     }
 }
 
+/// Parsed from a single JSONL line during `contynu ingest`.
+#[derive(Debug, Deserialize)]
+pub struct IngestLine {
+    pub event_type: EventType,
+    pub actor: Actor,
+    #[serde(default = "serde_json::Value::default")]
+    pub payload: Value,
+    pub ts: Option<DateTime<Utc>>,
+}
+
+impl IngestLine {
+    pub fn into_draft(
+        self,
+        session_id: SessionId,
+        turn_id: Option<TurnId>,
+    ) -> EventDraft {
+        EventDraft {
+            session_id,
+            turn_id,
+            ts: self.ts.unwrap_or_else(Utc::now),
+            actor: self.actor,
+            event_type: self.event_type,
+            payload_version: 1,
+            payload: if self.payload.is_null() {
+                serde_json::json!({})
+            } else {
+                self.payload
+            },
+            parent_event_id: None,
+            correlation_id: None,
+            causation_id: None,
+            tags: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventDraft {
     pub session_id: SessionId,

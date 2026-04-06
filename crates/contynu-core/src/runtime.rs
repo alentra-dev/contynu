@@ -2111,6 +2111,107 @@ fn latest_dialogue_from_events(events: &[EventRecord]) -> Option<(String, String
     }
 }
 
+/// Derive memory objects from externally ingested events (e.g., from OpenClaw plugin).
+/// Returns the number of memory objects created.
+pub fn derive_memory_from_ingested_events(
+    journal: &Journal,
+    store: &MetadataStore,
+    session_id: &SessionId,
+    turn_id: &TurnId,
+    source_adapter: Option<String>,
+    source_model: Option<String>,
+) -> crate::error::Result<usize> {
+    let events = store.list_events_for_turn(session_id, turn_id)?;
+    if events.is_empty() {
+        return Ok(0);
+    }
+
+    let source_event_ids: Vec<crate::ids::EventId> =
+        events.iter().map(|e| e.event_id.clone()).collect();
+    let mut count = 0usize;
+
+    // Extract dialogue from message_input / message_output events
+    let mut prompts = Vec::new();
+    let mut responses = Vec::new();
+    for event in &events {
+        match event.event_type.as_str() {
+            "message_input" => {
+                if let Some(text) = extract_event_text(event) {
+                    let text = text.trim().to_string();
+                    if !text.is_empty() {
+                        prompts.push(text);
+                    }
+                }
+            }
+            "message_output" => {
+                if let Some(text) = extract_event_text(event) {
+                    let text = text.trim().to_string();
+                    if !text.is_empty() {
+                        responses.push(text);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Create summary from latest dialogue
+    let summary = match (prompts.last(), responses.last()) {
+        (Some(prompt), Some(response)) => {
+            let p = if prompt.len() > 100 { &prompt[..100] } else { prompt };
+            let r = if response.len() > 200 { &response[..200] } else { response };
+            format!("Most recent exchange: user asked \"{}\" and the assistant answered \"{}\".", p, r)
+        }
+        _ => "Turn ingested from external source.".to_string(),
+    };
+
+    if RuntimeEngine::insert_memory_object(
+        journal, store, session_id, turn_id,
+        MemoryObjectKind::Summary, summary, Some(0.9), 0.4, true,
+        source_event_ids.clone(), source_adapter.clone(), source_model.clone(),
+    )?.is_some() {
+        count += 1;
+    }
+
+    // Run structured candidate extraction on all events
+    for candidate in derive_structured_candidates(&events, Some(0)) {
+        let importance = match candidate.kind {
+            MemoryObjectKind::Constraint => 0.9,
+            MemoryObjectKind::Decision => 0.85,
+            MemoryObjectKind::Todo => 0.75,
+            MemoryObjectKind::Fact => 0.7,
+            _ => 0.6,
+        };
+        if RuntimeEngine::insert_memory_object(
+            journal, store, session_id, turn_id,
+            candidate.kind, candidate.text, Some(candidate.confidence), importance, false,
+            source_event_ids.clone(), source_adapter.clone(), source_model.clone(),
+        )?.is_some() {
+            count += 1;
+        }
+    }
+
+    // Extract response content as a fact if no dialogue pairing
+    if prompts.is_empty() && !responses.is_empty() {
+        let response_text = responses.join(" ");
+        let truncated = if response_text.len() > 500 {
+            format!("{}...", &response_text[..500])
+        } else {
+            response_text
+        };
+        if RuntimeEngine::insert_memory_object(
+            journal, store, session_id, turn_id,
+            MemoryObjectKind::Fact, format!("LLM response: {}", truncated),
+            Some(0.85), 0.8, false,
+            source_event_ids.clone(), source_adapter.clone(), source_model.clone(),
+        )?.is_some() {
+            count += 1;
+        }
+    }
+
+    Ok(count)
+}
+
 fn derive_structured_candidates(
     events: &[EventRecord],
     exit_code: Option<i32>,

@@ -1,8 +1,10 @@
 use std::fmt::Write as _;
 
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::checkpoint::RehydrationPacket;
+use crate::store::{MemoryObject, MemoryObjectKind};
 
 /// Format used to render rehydration prompts for different LLM providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -408,6 +410,62 @@ fn is_operational(text: &str) -> bool {
         || lower.contains(" using inherit_terminal transport")
         || lower.starts_with("last turn used `")
         || lower.starts_with("session has ")
+}
+
+// ---------------------------------------------------------------------------
+// Memory Export (for OpenClaw MEMORY.md write-back)
+// ---------------------------------------------------------------------------
+
+/// Render active memories as Markdown for export, optionally wrapped in
+/// HTML comment markers compatible with OpenClaw's MEMORY.md format.
+pub fn render_memory_export(memories: &[MemoryObject], max_chars: usize, with_markers: bool) -> String {
+    let mut out = String::new();
+
+    if with_markers {
+        out.push_str("<!-- contynu-memory-sync:start -->\n");
+    }
+    out.push_str("## Project Memory (synced by Contynu)\n\n");
+
+    let kinds_and_headers = [
+        (MemoryObjectKind::Fact, "Key Facts"),
+        (MemoryObjectKind::Decision, "Decisions"),
+        (MemoryObjectKind::Constraint, "Constraints"),
+        (MemoryObjectKind::Todo, "Open Tasks"),
+    ];
+
+    for (kind, header) in &kinds_and_headers {
+        let items: Vec<&MemoryObject> = memories
+            .iter()
+            .filter(|m| m.kind == *kind && !is_operational(&m.text))
+            .collect();
+
+        if items.is_empty() {
+            continue;
+        }
+
+        let section_header = format!("### {header}\n");
+        if out.len() + section_header.len() > max_chars.saturating_sub(100) {
+            break;
+        }
+        out.push_str(&section_header);
+
+        for m in &items {
+            let line = format!("- {} [importance: {:.2}]\n", one_line(&m.text), m.importance);
+            if out.len() + line.len() > max_chars.saturating_sub(60) {
+                break;
+            }
+            out.push_str(&line);
+        }
+        out.push('\n');
+    }
+
+    let _ = writeln!(out, "*Last synced: {}*", chrono::Utc::now().to_rfc3339());
+
+    if with_markers {
+        out.push_str("<!-- contynu-memory-sync:end -->\n");
+    }
+
+    out
 }
 
 // ---------------------------------------------------------------------------

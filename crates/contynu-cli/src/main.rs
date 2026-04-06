@@ -89,6 +89,33 @@ enum Command {
         #[arg(long, alias = "session")]
         project: Option<String>,
     },
+    /// Ingest events from stdin (JSONL) into the project journal
+    Ingest {
+        #[arg(long, alias = "session")]
+        project: Option<String>,
+        #[arg(long)]
+        adapter: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, default_value_t = true)]
+        derive_memory: bool,
+    },
+    /// Export importance-ranked memories as Markdown
+    #[command(name = "export-memory")]
+    ExportMemory {
+        #[arg(long, alias = "session")]
+        project: Option<String>,
+        #[arg(long, default_value_t = 20000)]
+        max_chars: usize,
+        #[arg(long)]
+        with_markers: bool,
+    },
+    /// Configure Contynu integration with OpenClaw
+    #[command(name = "openclaw")]
+    OpenClaw {
+        #[command(subcommand)]
+        command: OpenClawCommand,
+    },
     /// Start the Contynu MCP server (stdio transport)
     #[command(name = "mcp-server")]
     McpServer {
@@ -127,6 +154,17 @@ struct LlmCommand {
 
     #[arg(trailing_var_arg = true)]
     args: Vec<String>,
+}
+
+#[derive(Debug, Subcommand)]
+enum OpenClawCommand {
+    /// Auto-configure Contynu for use with OpenClaw
+    Setup {
+        #[arg(long)]
+        openclaw_config: Option<std::path::PathBuf>,
+    },
+    /// Show OpenClaw integration status
+    Status,
 }
 
 #[derive(Debug, Subcommand)]
@@ -189,6 +227,13 @@ fn main() -> Result<()> {
         Some(Command::Search { command }) => search(&state, command),
         Some(Command::Artifacts { command }) => artifacts(&state, command),
         Some(Command::Doctor) => doctor(&state),
+        Some(Command::OpenClaw { command }) => openclaw_command(&state, &cli.cwd, command),
+        Some(Command::Ingest { project, adapter, model, derive_memory }) => {
+            ingest(&state, project.as_deref(), adapter.as_deref(), model.as_deref(), derive_memory)
+        }
+        Some(Command::ExportMemory { project, max_chars, with_markers }) => {
+            export_memory(&state, project.as_deref(), max_chars, with_markers)
+        }
         Some(Command::Repair { project }) => repair(&state, project.as_deref()),
         Some(Command::McpServer { state_dir: override_dir }) => {
             let dir = override_dir.unwrap_or_else(|| {
@@ -875,6 +920,215 @@ fn print_rehydration_packet(title: &str, packet: &contynu_core::RehydrationPacke
     print_section("Relevant artifacts", &artifacts);
     print_section("Recent context", &packet.recent_verbatim_context);
     print_section("Retrieval guidance", &packet.retrieval_guidance);
+    Ok(())
+}
+
+fn openclaw_command(
+    state: &StatePaths,
+    cwd: &std::path::PathBuf,
+    command: OpenClawCommand,
+) -> Result<()> {
+    match command {
+        OpenClawCommand::Setup { openclaw_config } => openclaw_setup(state, cwd, openclaw_config),
+        OpenClawCommand::Status => openclaw_status(state),
+    }
+}
+
+fn openclaw_setup(
+    state: &StatePaths,
+    _cwd: &std::path::PathBuf,
+    openclaw_config: Option<std::path::PathBuf>,
+) -> Result<()> {
+    // Initialize Contynu state
+    state.ensure_layout()?;
+    contynu_core::ContynuConfig::ensure_exists(&state.root().join("config.json"))?;
+
+    // Ensure primary project exists
+    let store = MetadataStore::open(state.sqlite_db())?;
+    let project_id = match store.primary_project_id()? {
+        Some(id) => id,
+        None => {
+            let id = contynu_core::ProjectId::new();
+            store.register_session(&contynu_core::SessionRecord {
+                session_id: id.clone(),
+                project_id: None,
+                status: "active".into(),
+                cli_name: Some("openclaw".into()),
+                cli_version: None,
+                model_name: None,
+                cwd: None,
+                repo_root: None,
+                host_fingerprint: None,
+                started_at: chrono::Utc::now(),
+                ended_at: None,
+            })?;
+            store.set_primary_project_id(&id)?;
+            id
+        }
+    };
+
+    // Register MCP server in OpenClaw config
+    let oc_config = openclaw_config.unwrap_or_else(|| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        std::path::PathBuf::from(home)
+            .join(".openclaw")
+            .join("openclaw.json")
+    });
+    if let Err(e) =
+        mcp_registration::ensure_mcp_registered("openclaw", state.root(), &oc_config, project_id.as_str())
+    {
+        eprintln!("Warning: Could not register MCP server in OpenClaw config: {e}");
+    }
+
+    // Create agent mapping file
+    let mapping_path = state.root().join("openclaw-agents.json");
+    if !mapping_path.exists() {
+        std::fs::write(&mapping_path, "{}")?;
+    }
+
+    println!("Contynu + OpenClaw integration ready.\n");
+    println!("  State directory:  {}", state.root().display());
+    println!("  Primary project:  {}", project_id);
+    println!("  Agent mapping:    {}", mapping_path.display());
+    println!();
+    println!("Install the plugin:");
+    println!("  npm install -g contynu-openclaw");
+    println!();
+    println!("Add to your OpenClaw config ({}):", oc_config.display());
+    println!("  {{");
+    println!("    \"plugins\": {{");
+    println!("      \"contynu-openclaw\": {{ \"enabled\": true }}");
+    println!("    }}");
+    println!("  }}");
+    println!();
+    println!("Then restart OpenClaw. Every agent gets permanent memory automatically.");
+
+    Ok(())
+}
+
+fn openclaw_status(state: &StatePaths) -> Result<()> {
+    ensure_state(state)?;
+    let store = MetadataStore::open(state.sqlite_db())?;
+
+    println!("Contynu + OpenClaw integration status\n");
+
+    // State dir
+    println!("  State directory:  {}", state.root().display());
+
+    // Primary project
+    match store.primary_project_id()? {
+        Some(id) => println!("  Primary project:  {}", id),
+        None => println!("  Primary project:  (none)"),
+    }
+
+    // Agent mapping
+    let mapping_path = state.root().join("openclaw-agents.json");
+    if mapping_path.exists() {
+        let content = std::fs::read_to_string(&mapping_path)?;
+        let map: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
+        let count = map.as_object().map_or(0, |m| m.len());
+        println!("  Mapped agents:    {}", count);
+    } else {
+        println!("  Agent mapping:    (not created)");
+    }
+
+    // Memory counts
+    if let Some(id) = store.primary_project_id()? {
+        let total = store.count_active_memories(&id, None)?;
+        println!("  Active memories:  {}", total);
+    }
+
+    // MCP server check
+    let oc_config_path = std::env::var("HOME")
+        .map(|h| std::path::PathBuf::from(h).join(".openclaw").join("openclaw.json"))
+        .unwrap_or_default();
+    if oc_config_path.exists() {
+        let content = std::fs::read_to_string(&oc_config_path).unwrap_or_default();
+        if content.contains("contynu") {
+            println!("  MCP server:       registered");
+        } else {
+            println!("  MCP server:       not registered (run `contynu openclaw setup`)");
+        }
+    } else {
+        println!("  OpenClaw config:  not found");
+    }
+
+    Ok(())
+}
+
+fn ingest(
+    state: &StatePaths,
+    project: Option<&str>,
+    adapter: Option<&str>,
+    model: Option<&str>,
+    derive_memory: bool,
+) -> Result<()> {
+    ensure_state(state)?;
+    let project_id = resolve_project_id(state, project)?;
+    let journal = contynu_core::Journal::open(state.journal_path_for_project(&project_id))?;
+    let store = MetadataStore::open(state.sqlite_db())?;
+    let turn_id = contynu_core::TurnId::new();
+
+    // Register turn
+    store.register_turn(&contynu_core::TurnRecord {
+        turn_id: turn_id.clone(),
+        session_id: project_id.clone(),
+        status: "started".into(),
+        started_at: chrono::Utc::now(),
+        completed_at: None,
+        summary_memory_id: None,
+    })?;
+
+    let stdin = std::io::stdin().lock();
+    let mut event_count = 0usize;
+
+    for line in std::io::BufRead::lines(stdin) {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let ingest_line: contynu_core::IngestLine = serde_json::from_str(&line)
+            .map_err(|e| anyhow!("Failed to parse ingest line: {e}\nLine: {line}"))?;
+        let draft = ingest_line.into_draft(project_id.clone(), Some(turn_id.clone()));
+        let (event, append) = journal.append(draft)?;
+        store.record_event(&event, &journal.path().display().to_string(), append)?;
+        event_count += 1;
+    }
+
+    let memory_count = if derive_memory && event_count > 0 {
+        contynu_core::derive_memory_from_ingested_events(
+            &journal,
+            &store,
+            &project_id,
+            &turn_id,
+            adapter.map(String::from),
+            model.map(String::from),
+        )?
+    } else {
+        0
+    };
+
+    store.update_turn_status(&turn_id, "completed", Some(chrono::Utc::now()))?;
+    eprintln!(
+        "Ingested {} events, derived {} memory objects for project {}",
+        event_count, memory_count, project_id
+    );
+    Ok(())
+}
+
+fn export_memory(
+    state: &StatePaths,
+    project: Option<&str>,
+    max_chars: usize,
+    with_markers: bool,
+) -> Result<()> {
+    ensure_state(state)?;
+    let project_id = resolve_project_id(state, project)?;
+    let store = MetadataStore::open(state.sqlite_db())?;
+    let memories = store.list_active_memory_objects(&project_id, None)?;
+
+    let output = contynu_core::rendering::render_memory_export(&memories, max_chars, with_markers);
+    print!("{output}");
     Ok(())
 }
 

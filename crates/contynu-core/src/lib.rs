@@ -27,7 +27,8 @@ pub use event::{Actor, EventDraft, EventEnvelope, EventType};
 pub use files::{FileChange, FileChangeKind, FileTracker};
 pub use ids::{ArtifactId, CheckpointId, EventId, FileId, MemoryId, ProjectId, SessionId, TurnId};
 pub use journal::{Journal, JournalAppend, JournalRepair, JournalReplay};
-pub use runtime::{RunConfig, RunOutcome, RuntimeEngine};
+pub use event::IngestLine;
+pub use runtime::{derive_memory_from_ingested_events, RunConfig, RunOutcome, RuntimeEngine};
 pub use state::StatePaths;
 pub use store::{
     ArtifactRecord, CheckpointRecord, EventQuery, EventRecord, FileRecord, MemoryObject,

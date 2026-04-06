@@ -1,0 +1,37 @@
+{
+  "name": "contynu-openclaw",
+  "version": "0.1.0",
+  "description": "Permanent memory for OpenClaw agents powered by Contynu",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test tests/*.test.js",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "openclaw",
+    "contynu",
+    "memory",
+    "mcp",
+    "ai-agent"
+  ],
+  "author": "Udonna Eke-Okoro",
+  "license": "MPL-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alentra-dev/contynu"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.2",
+    "typescript": "^5.5.0"
+  }
+}

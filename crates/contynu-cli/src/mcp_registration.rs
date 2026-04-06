@@ -14,6 +14,7 @@ pub fn ensure_mcp_registered(
         "claude" | "claude-code" => ensure_claude_mcp(state_dir, cwd, project_id),
         "codex" | "codex-cli" => ensure_codex_mcp(state_dir, project_id),
         "gemini" | "gemini-cli" => ensure_gemini_mcp(state_dir, project_id),
+        "openclaw" => ensure_openclaw_mcp(state_dir, cwd, project_id),
         _ => Ok(()), // unknown CLI, skip
     }
 }
@@ -161,6 +162,51 @@ fn ensure_gemini_mcp(state_dir: &Path, project_id: &str) -> Result<()> {
         ])
         .output();
 
+    Ok(())
+}
+
+fn ensure_openclaw_mcp(state_dir: &Path, config_path: &Path, project_id: &str) -> Result<()> {
+    let state_dir_abs = std::fs::canonicalize(state_dir).unwrap_or_else(|_| state_dir.to_path_buf());
+
+    // config_path here is the OpenClaw config file path (passed as cwd from openclaw_setup)
+    let oc_config = if config_path.is_file() {
+        config_path.to_path_buf()
+    } else {
+        let home = dirs_or_home();
+        home.join(".openclaw").join("openclaw.json")
+    };
+
+    if !oc_config.exists() {
+        return Ok(()); // OpenClaw not installed
+    }
+
+    let content = std::fs::read_to_string(&oc_config)?;
+    // Simple check — if contynu is already in the MCP section, skip
+    if content.contains("\"contynu\"") && content.contains("mcp-server") {
+        return Ok(());
+    }
+
+    // Parse as JSON, add MCP server entry
+    let mut config: serde_json::Value = serde_json::from_str(&content)
+        .unwrap_or_else(|_| serde_json::json!({}));
+
+    if !config.get("mcp").is_some() {
+        config["mcp"] = serde_json::json!({});
+    }
+    if !config["mcp"].get("servers").is_some() {
+        config["mcp"]["servers"] = serde_json::json!({});
+    }
+
+    config["mcp"]["servers"]["contynu"] = serde_json::json!({
+        "command": "contynu",
+        "args": ["mcp-server"],
+        "env": {
+            "CONTYNU_STATE_DIR": state_dir_abs.display().to_string(),
+            "CONTYNU_ACTIVE_PROJECT": project_id
+        }
+    });
+
+    std::fs::write(&oc_config, serde_json::to_string_pretty(&config)?)?;
     Ok(())
 }
 

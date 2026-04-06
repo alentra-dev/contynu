@@ -340,7 +340,7 @@ impl<'a> CheckpointManager<'a> {
 pub fn render_rehydration_prompt(packet: &RehydrationPacket, adapter_name: &str) -> String {
     crate::rendering::render_rehydration(
         packet,
-        crate::rendering::PromptFormat::StructuredText,
+        crate::rendering::PromptFormat::Markdown,
         adapter_name,
     )
 }
