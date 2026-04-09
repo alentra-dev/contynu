@@ -1,6 +1,5 @@
 use std::fmt::Write as _;
 
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::checkpoint::RehydrationPacket;

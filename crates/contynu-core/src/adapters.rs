@@ -282,17 +282,6 @@ fn builtin_hydration_args(kind: AdapterKind) -> Vec<OsString> {
     }
 }
 
-fn render_stdin_prelude(adapter_name: &str, packet: &RehydrationPacket) -> String {
-    let packet_json =
-        serde_json::to_string_pretty(packet).expect("rehydration packet should serialize");
-    format!(
-        "CONTYNU REHYDRATION CONTEXT\nadapter={}\nproject_id={}\nUse this as authoritative project state when starting work.\n{}\n\n",
-        adapter_name,
-        packet.project_id,
-        packet_json
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
