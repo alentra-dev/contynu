@@ -1092,7 +1092,16 @@ fn import_conversations(
 
         let detected_format = if format == "auto" {
             if file_path.extension().map_or(false, |ext| ext == "jsonl") {
-                "claude-jsonl"
+                // Check if it's Codex rollout (has "type":"session_meta") or Claude JSONL
+                if content.contains("session_meta") || content.contains("response_item") {
+                    "codex-jsonl"
+                } else {
+                    "claude-jsonl"
+                }
+            } else if content.contains("\"sessionId\"") && content.contains("\"messages\"") {
+                "gemini"
+            } else if content.contains("\"mapping\"") && content.contains("\"message\"") {
+                "chatgpt"
             } else if content.trim_start().starts_with('[') || content.trim_start().starts_with('{') {
                 "chatgpt"
             } else {
@@ -1179,6 +1188,77 @@ fn import_conversations(
                                 event_count += 1;
                             }
                         }
+                    }
+                }
+            }
+            "gemini" => {
+                // Gemini CLI session JSON: {"sessionId", "messages": [{"type": "user"|"model", "content": [{"text"}]}]}
+                let data: serde_json::Value = serde_json::from_str(&content)
+                    .map_err(|e| anyhow!("Failed to parse Gemini JSON: {e}"))?;
+                let messages = data.get("messages").and_then(|m| m.as_array());
+                if let Some(messages) = messages {
+                    for msg in messages {
+                        let msg_type = msg.get("type").and_then(|t| t.as_str()).unwrap_or("system");
+                        let text = msg.get("content")
+                            .and_then(|c| c.as_array())
+                            .map(|parts| parts.iter().filter_map(|p| p.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join("\n"))
+                            .unwrap_or_default();
+                        if text.is_empty() { continue; }
+                        let (event_type, actor) = match msg_type {
+                            "user" => ("message_input", "user"),
+                            "model" => ("message_output", "assistant"),
+                            _ => continue,
+                        };
+                        let ts = msg.get("timestamp").and_then(|t| t.as_str())
+                            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                            .map(|dt| dt.with_timezone(&chrono::Utc));
+                        let ingest_line = contynu_core::IngestLine {
+                            event_type: serde_json::from_value(serde_json::json!(event_type))?,
+                            actor: serde_json::from_value(serde_json::json!(actor))?,
+                            payload: serde_json::json!({"content": [{"type": "text", "text": text}]}),
+                            ts,
+                        };
+                        let draft = ingest_line.into_draft(project_id.clone(), Some(turn_id.clone()));
+                        let (event, append) = journal.append(draft)?;
+                        store.record_event(&event, &journal.path().display().to_string(), append)?;
+                        event_count += 1;
+                    }
+                }
+            }
+            "codex-jsonl" => {
+                // Codex CLI rollout JSONL: {"type":"response_item","payload":{"type":"message","role":"user"|"assistant","content":[{"text"}]}}
+                for line in content.lines() {
+                    let line = line.trim();
+                    if line.is_empty() { continue; }
+                    if let Ok(obj) = serde_json::from_str::<serde_json::Value>(line) {
+                        let item_type = obj.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                        if item_type != "response_item" { continue; }
+                        let payload = match obj.get("payload") { Some(p) => p, None => continue };
+                        let role = payload.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                        let text = payload.get("content")
+                            .and_then(|c| c.as_array())
+                            .map(|parts| parts.iter()
+                                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                                .collect::<Vec<_>>().join("\n"))
+                            .unwrap_or_default();
+                        if text.is_empty() || text.len() < 5 { continue; }
+                        let (event_type, actor) = match role {
+                            "user" => ("message_input", "user"),
+                            "assistant" => ("message_output", "assistant"),
+                            _ => continue,
+                        };
+                        let ingest_line = contynu_core::IngestLine {
+                            event_type: serde_json::from_value(serde_json::json!(event_type))?,
+                            actor: serde_json::from_value(serde_json::json!(actor))?,
+                            payload: serde_json::json!({"content": [{"type": "text", "text": text}]}),
+                            ts: obj.get("timestamp").and_then(|t| t.as_str())
+                                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                                .map(|dt| dt.with_timezone(&chrono::Utc)),
+                        };
+                        let draft = ingest_line.into_draft(project_id.clone(), Some(turn_id.clone()));
+                        let (event, append) = journal.append(draft)?;
+                        store.record_event(&event, &journal.path().display().to_string(), append)?;
+                        event_count += 1;
                     }
                 }
             }
