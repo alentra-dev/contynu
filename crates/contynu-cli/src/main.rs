@@ -371,6 +371,10 @@ fn start_project(state: &StatePaths, cwd: &PathBuf) -> Result<()> {
 }
 
 fn run(state: &StatePaths, cwd: &PathBuf, command: RunCommand) -> Result<()> {
+    // Auto-import existing sessions
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let _ = auto_import_sessions(state, &home);
+
     let outcome = RuntimeEngine::run(RunConfig {
         state_dir: state.root().to_path_buf(),
         cwd: cwd.clone(),
@@ -389,14 +393,13 @@ fn launch_llm(
     executable: &str,
     command: LlmCommand,
 ) -> Result<()> {
-    // Auto-discover and import existing LLM sessions in background (non-blocking)
-    let bg_state_dir = state.root().to_path_buf();
-    std::thread::spawn(move || {
-        let bg_state = StatePaths::new(&bg_state_dir);
-        if let Err(e) = auto_import_sessions(&bg_state) {
+    // Auto-discover and import existing LLM sessions (fast — skips if nothing new)
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        if let Err(e) = auto_import_sessions(state, &home) {
             eprintln!("Note: session auto-import: {e}");
         }
-    });
+    }
 
     // Resolve project ID for MCP registration
     let project_id_for_mcp = {
@@ -1081,7 +1084,7 @@ fn openclaw_status(state: &StatePaths) -> Result<()> {
 }
 
 /// Auto-discover and import existing LLM session files that haven't been imported yet.
-fn auto_import_sessions(state: &StatePaths) -> Result<()> {
+fn auto_import_sessions(state: &StatePaths, home_dir: &str) -> Result<()> {
     let tracking_path = state.root().join("imported-sessions.json");
     let mut imported: std::collections::HashSet<String> = if tracking_path.exists() {
         let content = std::fs::read_to_string(&tracking_path)?;
@@ -1090,9 +1093,10 @@ fn auto_import_sessions(state: &StatePaths) -> Result<()> {
         std::collections::HashSet::new()
     };
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let home = std::path::Path::new(&home);
+    let home = std::path::Path::new(home_dir);
     let mut new_files: Vec<(std::path::PathBuf, &str)> = Vec::new();
+    // Cap total new files to import per launch for speed
+    let max_new_per_launch = 20;
 
     // Codex rollout files
     let codex_dir = home.join(".codex").join("sessions");
@@ -1123,6 +1127,8 @@ fn auto_import_sessions(state: &StatePaths) -> Result<()> {
     if new_files.is_empty() {
         return Ok(());
     }
+    // Cap per launch for speed
+    new_files.truncate(max_new_per_launch);
 
     // Import new files
     let store = MetadataStore::open(state.sqlite_db())?;
