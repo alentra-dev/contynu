@@ -1124,6 +1124,21 @@ fn auto_import_sessions(state: &StatePaths, home_dir: &str) -> Result<()> {
         }
     }
 
+    // Claude Code session files
+    let claude_dir = home.join(".claude").join("projects");
+    if claude_dir.exists() {
+        if let Ok(walker) = glob_files(&claude_dir, "*.jsonl") {
+            for path in walker {
+                // Skip subagent files
+                if path.to_string_lossy().contains("subagents") { continue; }
+                let key = path.display().to_string();
+                if !imported.contains(&key) {
+                    new_files.push((path, "claude-session"));
+                }
+            }
+        }
+    }
+
     if new_files.is_empty() {
         return Ok(());
     }
@@ -1211,6 +1226,52 @@ fn auto_import_sessions(state: &StatePaths, home_dir: &str) -> Result<()> {
                     }
                 }
             }
+            "claude-session" => {
+                // Claude Code session JSONL: type=user/assistant with message.content
+                for line in content.lines() {
+                    let line = line.trim();
+                    if line.is_empty() { continue; }
+                    if let Ok(obj) = serde_json::from_str::<serde_json::Value>(line) {
+                        let msg_type = obj.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                        match msg_type {
+                            "user" => {
+                                let text = obj.get("message").and_then(|m| m.get("content"))
+                                    .and_then(|c| c.as_str())
+                                    .unwrap_or("");
+                                if text.len() < 5 { continue; }
+                                if let Ok(il) = serde_json::from_value::<contynu_core::event::IngestLine>(
+                                    serde_json::json!({"event_type": "message_input", "actor": "user", "payload": {"content": [{"type": "text", "text": text}]}})
+                                ) {
+                                    let draft = il.into_draft(project_id.clone(), Some(turn_id.clone()));
+                                    if let Ok((event, append)) = journal.append(draft) {
+                                        let _ = store.record_event(&event, &journal.path().display().to_string(), append);
+                                        event_count += 1;
+                                    }
+                                }
+                            }
+                            "assistant" => {
+                                let text = obj.get("message").and_then(|m| m.get("content"))
+                                    .and_then(|c| c.as_array())
+                                    .map(|parts| parts.iter()
+                                        .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                                        .collect::<Vec<_>>().join("\n"))
+                                    .unwrap_or_default();
+                                if text.len() < 5 { continue; }
+                                if let Ok(il) = serde_json::from_value::<contynu_core::event::IngestLine>(
+                                    serde_json::json!({"event_type": "message_output", "actor": "assistant", "payload": {"content": [{"type": "text", "text": text}]}})
+                                ) {
+                                    let draft = il.into_draft(project_id.clone(), Some(turn_id.clone()));
+                                    if let Ok((event, append)) = journal.append(draft) {
+                                        let _ = store.record_event(&event, &journal.path().display().to_string(), append);
+                                        event_count += 1;
+                                    }
+                                }
+                            }
+                            _ => continue,
+                        }
+                    }
+                }
+            }
             _ => continue,
         }
 
@@ -1230,7 +1291,7 @@ fn auto_import_sessions(state: &StatePaths, home_dir: &str) -> Result<()> {
 
     if total_imported > 0 {
         eprintln!(
-            "Auto-imported {} session file(s) from Codex/Gemini history",
+            "Auto-imported {} session file(s) from Claude/Codex/Gemini history",
             total_imported
         );
     }
