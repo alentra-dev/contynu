@@ -389,10 +389,14 @@ fn launch_llm(
     executable: &str,
     command: LlmCommand,
 ) -> Result<()> {
-    // Auto-discover and import existing LLM sessions (non-fatal)
-    if let Err(e) = auto_import_sessions(state) {
-        eprintln!("Note: session auto-import: {e}");
-    }
+    // Auto-discover and import existing LLM sessions in background (non-blocking)
+    let bg_state_dir = state.root().to_path_buf();
+    std::thread::spawn(move || {
+        let bg_state = StatePaths::new(&bg_state_dir);
+        if let Err(e) = auto_import_sessions(&bg_state) {
+            eprintln!("Note: session auto-import: {e}");
+        }
+    });
 
     // Resolve project ID for MCP registration
     let project_id_for_mcp = {
@@ -1230,13 +1234,25 @@ fn auto_import_sessions(state: &StatePaths) -> Result<()> {
 /// Walk a directory recursively and find files matching a pattern.
 fn glob_files(dir: &std::path::Path, pattern: &str) -> Result<Vec<std::path::PathBuf>> {
     let mut results = Vec::new();
-    for entry in walkdir::WalkDir::new(dir).max_depth(6).into_iter().filter_map(|e| e.ok()) {
+    for entry in walkdir::WalkDir::new(dir)
+        .max_depth(4)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         if entry.file_type().is_file() {
             if let Some(name) = entry.file_name().to_str() {
                 if matches_simple_glob(name, pattern) {
-                    results.push(entry.into_path());
+                    // Skip files over 5MB to avoid ingesting huge sessions
+                    if entry.metadata().map_or(false, |m| m.len() < 5_000_000) {
+                        results.push(entry.into_path());
+                    }
                 }
             }
+        }
+        // Cap at 100 files to avoid scanning forever
+        if results.len() >= 100 {
+            break;
         }
     }
     Ok(results)
