@@ -10,15 +10,15 @@ If the executable matches a configured LLM launcher in `.contynu/config.json`, C
 
 ### `contynu codex [-- <args...>]`
 
-Launches `codex` inside Contynu’s runtime using the primary project by default. The seeded launcher config injects continuity through a temporary `AGENTS.md` file in the workspace, along with runtime files and environment variables.
+Launches `codex` inside Contynu’s runtime using the primary project by default. Continuity is injected via a temporary `AGENTS.md` file (Markdown format) and stdin prelude, along with environment variables.
 
 ### `contynu claude [-- <args...>]`
 
-Launches `claude` inside Contynu’s runtime using the primary project by default. The seeded launcher config injects continuity through a temporary `CLAUDE.md` file in the workspace.
+Launches `claude` inside Contynu’s runtime using the primary project by default. Continuity is injected via `--append-system-prompt` (XML format) and `--mcp-config .mcp.json` for MCP server registration.
 
 ### `contynu gemini [-- <args...>]`
 
-Launches `gemini` inside Contynu’s runtime using the primary project by default. The seeded launcher config injects continuity through a temporary `GEMINI.md` file in the workspace.
+Launches `gemini` inside Contynu’s runtime using the primary project by default. Continuity is injected via a temporary `GEMINI.md` file (structured text format) and a `--prompt-interactive` startup nudge to read the memory file.
 
 ### `contynu init`
 
@@ -109,6 +109,53 @@ Prints the raw config file contents.
 ### `contynu repair [--project <id>]`
 
 Repairs a truncated journal tail if needed, then reconciles journal state back into SQLite.
+
+### `contynu import <files...> [--format <auto|claude-jsonl|codex-jsonl|gemini|chatgpt|text>]`
+
+Imports conversation history from external files into the project memory. Supports:
+
+- **Claude JSONL** (`.jsonl` with role/content) — auto-detected
+- **Codex rollout JSONL** (`.jsonl` with session_meta/response_item) — auto-detected
+- **Gemini session JSON** (`.json` with sessionId/messages) — auto-detected
+- **ChatGPT export JSON** (`.json` with mapping/message) — auto-detected
+- **Plain text** — fallback for any other format
+
+After import, memories are derived automatically and are immediately searchable.
+
+### `contynu ingest [--project <id>] [--adapter <name>] [--model <name>] [--derive-memory]`
+
+Accepts JSONL events from stdin and writes them to the project journal. Used by the OpenClaw plugin to feed conversation turns into Contynu. Each line is a JSON object with `event_type`, `actor`, and `payload` fields.
+
+### `contynu export-memory [--project <id>] [--max-chars <n>] [--with-markers]`
+
+Outputs importance-ranked memories as Markdown. When `--with-markers` is set, wraps output in `<!-- contynu-memory-sync:start/end -->` HTML comment markers for OpenClaw MEMORY.md write-back.
+
+### `contynu mcp-server [--state-dir <path>]`
+
+Starts the Contynu MCP server using stdio JSON-RPC 2.0 transport. Exposes three tools:
+
+- `search_memory` — text search with kind, time window, sort, and pagination
+- `list_memories` — browse all memories with filtering and sorting
+- `search_events` — search raw event history with time window
+
+The MCP server auto-registers with Claude (`.mcp.json`), Codex (`config.toml`), and Gemini (`gemini mcp add`) on first LLM launch.
+
+### `contynu openclaw setup [--openclaw-config <path>]`
+
+One-time setup for OpenClaw integration. Registers the Contynu MCP server in OpenClaw's config, creates agent-to-project mapping, and prints plugin installation instructions.
+
+### `contynu openclaw status`
+
+Reports the health of the OpenClaw integration: state directory, primary project, mapped agents, active memories, and MCP server registration status.
+
+## Auto-Import
+
+On every `contynu run`, `contynu claude`, `contynu codex`, or `contynu gemini` launch, Contynu automatically scans for existing session files:
+
+- `~/.codex/sessions/**/rollout-*.jsonl` — Codex CLI rollout files
+- `~/.gemini/tmp/*/chats/session-*.json` — Gemini CLI session files
+
+New files are imported and tracked in `.contynu/imported-sessions.json` to avoid re-importing. This means installing Contynu and running it once makes all prior Codex and Gemini conversations immediately searchable.
 
 ## Notes
 
