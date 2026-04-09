@@ -389,6 +389,11 @@ fn launch_llm(
     executable: &str,
     command: LlmCommand,
 ) -> Result<()> {
+    // Auto-discover and import existing LLM sessions (non-fatal)
+    if let Err(e) = auto_import_sessions(state) {
+        eprintln!("Note: session auto-import: {e}");
+    }
+
     // Resolve project ID for MCP registration
     let project_id_for_mcp = {
         let store = MetadataStore::open(state.sqlite_db())?;
@@ -1069,6 +1074,182 @@ fn openclaw_status(state: &StatePaths) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Auto-discover and import existing LLM session files that haven't been imported yet.
+fn auto_import_sessions(state: &StatePaths) -> Result<()> {
+    let tracking_path = state.root().join("imported-sessions.json");
+    let mut imported: std::collections::HashSet<String> = if tracking_path.exists() {
+        let content = std::fs::read_to_string(&tracking_path)?;
+        serde_json::from_str(&content).unwrap_or_default()
+    } else {
+        std::collections::HashSet::new()
+    };
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let home = std::path::Path::new(&home);
+    let mut new_files: Vec<(std::path::PathBuf, &str)> = Vec::new();
+
+    // Codex rollout files
+    let codex_dir = home.join(".codex").join("sessions");
+    if codex_dir.exists() {
+        if let Ok(walker) = glob_files(&codex_dir, "rollout-*.jsonl") {
+            for path in walker {
+                let key = path.display().to_string();
+                if !imported.contains(&key) {
+                    new_files.push((path, "codex-jsonl"));
+                }
+            }
+        }
+    }
+
+    // Gemini session files
+    let gemini_dir = home.join(".gemini").join("tmp");
+    if gemini_dir.exists() {
+        if let Ok(walker) = glob_files(&gemini_dir, "session-*.json") {
+            for path in walker {
+                let key = path.display().to_string();
+                if !imported.contains(&key) {
+                    new_files.push((path, "gemini"));
+                }
+            }
+        }
+    }
+
+    if new_files.is_empty() {
+        return Ok(());
+    }
+
+    // Import new files
+    let store = MetadataStore::open(state.sqlite_db())?;
+    let project_id = match store.primary_project_id()? {
+        Some(id) => id,
+        None => return Ok(()), // no project yet
+    };
+    let journal = contynu_core::Journal::open(state.journal_path_for_project(&project_id))?;
+
+    let mut total_imported = 0usize;
+    for (path, format) in &new_files {
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if content.len() < 50 { continue; } // skip tiny/empty files
+
+        let turn_id = contynu_core::TurnId::new();
+        store.register_turn(&contynu_core::TurnRecord {
+            turn_id: turn_id.clone(),
+            session_id: project_id.clone(),
+            status: "started".into(),
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            summary_memory_id: None,
+        })?;
+
+        let mut event_count = 0usize;
+        match *format {
+            "gemini" => {
+                if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(messages) = data.get("messages").and_then(|m| m.as_array()) {
+                        for msg in messages {
+                            let msg_type = msg.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                            let text = msg.get("content").and_then(|c| c.as_array())
+                                .map(|parts| parts.iter().filter_map(|p| p.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join("\n"))
+                                .unwrap_or_default();
+                            if text.is_empty() || text.len() < 5 { continue; }
+                            let (et, actor) = match msg_type {
+                                "user" => ("message_input", "user"),
+                                "model" => ("message_output", "assistant"),
+                                _ => continue,
+                            };
+                            if let Ok(il) = serde_json::from_value::<contynu_core::event::IngestLine>(serde_json::json!({"event_type": et, "actor": actor, "payload": {"content": [{"type": "text", "text": text}]}})) {
+                                let draft = il.into_draft(project_id.clone(), Some(turn_id.clone()));
+                                if let Ok((event, append)) = journal.append(draft) {
+                                    let _ = store.record_event(&event, &journal.path().display().to_string(), append);
+                                    event_count += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "codex-jsonl" => {
+                for line in content.lines() {
+                    let line = line.trim();
+                    if line.is_empty() { continue; }
+                    if let Ok(obj) = serde_json::from_str::<serde_json::Value>(line) {
+                        if obj.get("type").and_then(|t| t.as_str()) != Some("response_item") { continue; }
+                        if let Some(payload) = obj.get("payload") {
+                            let role = payload.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                            let text = payload.get("content").and_then(|c| c.as_array())
+                                .map(|parts| parts.iter().filter_map(|p| p.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join("\n"))
+                                .unwrap_or_default();
+                            if text.is_empty() || text.len() < 5 { continue; }
+                            let (et, actor) = match role {
+                                "user" => ("message_input", "user"),
+                                "assistant" => ("message_output", "assistant"),
+                                _ => continue,
+                            };
+                            if let Ok(il) = serde_json::from_value::<contynu_core::event::IngestLine>(serde_json::json!({"event_type": et, "actor": actor, "payload": {"content": [{"type": "text", "text": text}]}})) {
+                                let draft = il.into_draft(project_id.clone(), Some(turn_id.clone()));
+                                if let Ok((event, append)) = journal.append(draft) {
+                                    let _ = store.record_event(&event, &journal.path().display().to_string(), append);
+                                    event_count += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => continue,
+        }
+
+        if event_count > 0 {
+            let _ = contynu_core::derive_memory_from_ingested_events(
+                &journal, &store, &project_id, &turn_id,
+                Some(format.to_string()), None,
+            );
+            total_imported += 1;
+        }
+        store.update_turn_status(&turn_id, "completed", Some(chrono::Utc::now()))?;
+        imported.insert(path.display().to_string());
+    }
+
+    // Save tracking file
+    std::fs::write(&tracking_path, serde_json::to_string_pretty(&imported)?)?;
+
+    if total_imported > 0 {
+        eprintln!(
+            "Auto-imported {} session file(s) from Codex/Gemini history",
+            total_imported
+        );
+    }
+    Ok(())
+}
+
+/// Walk a directory recursively and find files matching a pattern.
+fn glob_files(dir: &std::path::Path, pattern: &str) -> Result<Vec<std::path::PathBuf>> {
+    let mut results = Vec::new();
+    for entry in walkdir::WalkDir::new(dir).max_depth(6).into_iter().filter_map(|e| e.ok()) {
+        if entry.file_type().is_file() {
+            if let Some(name) = entry.file_name().to_str() {
+                if matches_simple_glob(name, pattern) {
+                    results.push(entry.into_path());
+                }
+            }
+        }
+    }
+    Ok(results)
+}
+
+fn matches_simple_glob(name: &str, pattern: &str) -> bool {
+    if let Some(suffix) = pattern.strip_prefix('*') {
+        name.ends_with(suffix)
+    } else if let Some((prefix, suffix)) = pattern.split_once('*') {
+        name.starts_with(prefix) && name.ends_with(suffix)
+    } else {
+        name == pattern
+    }
 }
 
 fn import_conversations(
