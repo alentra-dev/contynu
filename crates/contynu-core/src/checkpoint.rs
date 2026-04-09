@@ -51,6 +51,12 @@ impl Default for PacketBudget {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RehydrationPacket {
     pub schema_version: u32,
+    /// L0: One-line project identity (~50 tokens, always loaded)
+    #[serde(default)]
+    pub project_identity: String,
+    /// L1: Compact brief of top memories (~500 tokens, always loaded)
+    #[serde(default)]
+    pub compact_brief: String,
     pub project_id: ProjectId,
     pub target_model: Option<String>,
     pub mission: String,
@@ -300,10 +306,64 @@ impl<'a> CheckpointManager<'a> {
             )
         };
 
+        // L0: Project identity — one-line summary (~50 tokens)
+        let session_info = self.store.get_session(session_id)?;
+        let project_identity = if let Some(ref session) = session_info {
+            format!(
+                "Project {} | {} | {} memories | {} turns",
+                session_id,
+                session.cli_name.as_deref().unwrap_or("unknown"),
+                memory.len(),
+                self.store.list_turns_for_session(session_id)?.len()
+            )
+        } else {
+            format!("Project {}", session_id)
+        };
+
+        // L1: Compact brief — top 15 memories, one line each (~500 tokens)
+        let mut brief_lines = Vec::new();
+        let mut brief_chars = 0usize;
+        let max_brief_chars = 2000;
+        // Take from all categories, sorted by importance (already sorted)
+        for m in &memory {
+            if m.kind == MemoryObjectKind::Summary {
+                continue;
+            }
+            // Compress: strip common prefixes, bold markers, truncate
+            let text = m.text
+                .replace("LLM response: ", "")
+                .replace("**", "")
+                .replace("Decision: ", "")
+                .replace("Fact: ", "")
+                .replace("Constraint: ", "")
+                .replace("Todo: ", "");
+            let text = text.trim();
+            let truncated = if text.len() > 100 { &text[..100] } else { text };
+            let kind_abbrev = match m.kind {
+                MemoryObjectKind::Fact => "F",
+                MemoryObjectKind::Decision => "D",
+                MemoryObjectKind::Constraint => "C",
+                MemoryObjectKind::Todo => "T",
+                _ => "•",
+            };
+            let line = format!("{}: {}", kind_abbrev, truncated);
+            if brief_chars + line.len() > max_brief_chars {
+                break;
+            }
+            brief_lines.push(line.clone());
+            brief_chars += line.len();
+            if brief_lines.len() >= 15 {
+                break;
+            }
+        }
+        let compact_brief = brief_lines.join("\n");
+
         let max_artifacts = budget.max_per_category;
         Ok(RehydrationPacket {
             schema_version: 2,
             project_id: session_id.clone(),
+            project_identity,
+            compact_brief,
             target_model,
             mission,
             stable_facts,
@@ -612,6 +672,8 @@ mod tests {
     fn prompt_packet() -> RehydrationPacket {
         RehydrationPacket {
             schema_version: 1,
+            project_identity: String::new(),
+            compact_brief: String::new(),
             project_id: ProjectId::parse("prj_019d503680a475a3ae465200a90cd4fa").unwrap(),
             target_model: None,
             mission: "Continue the session faithfully from canonical state.".into(),
@@ -716,6 +778,8 @@ mod tests {
                 last_accessed_at: None,
                 consolidated_from: Vec::new(),
                 text_hash: None,
+                valid_from: None,
+                valid_to: None,
             })
             .unwrap();
 

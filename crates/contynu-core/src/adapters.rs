@@ -317,6 +317,8 @@ mod tests {
         let project_id = ProjectId::new();
         let packet = RehydrationPacket {
             schema_version: 1,
+            project_identity: String::new(),
+            compact_brief: String::new(),
             project_id: project_id.clone(),
             target_model: None,
             mission: "Continue the project faithfully.".into(),
@@ -375,6 +377,8 @@ mod tests {
         let project_id = ProjectId::new();
         let packet = RehydrationPacket {
             schema_version: 7,
+            project_identity: String::new(),
+            compact_brief: String::new(),
             project_id: project_id.clone(),
             target_model: None,
             mission: "Continue the project faithfully.".into(),
@@ -443,6 +447,8 @@ mod tests {
         let project_id = ProjectId::new();
         let packet = RehydrationPacket {
             schema_version: 1,
+            project_identity: String::new(),
+            compact_brief: String::new(),
             project_id: project_id.clone(),
             target_model: None,
             mission: "Continue the project faithfully.".into(),

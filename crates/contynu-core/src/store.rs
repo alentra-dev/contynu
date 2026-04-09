@@ -139,6 +139,8 @@ pub struct MemoryObject {
     pub last_accessed_at: Option<DateTime<Utc>>,
     pub consolidated_from: Vec<MemoryId>,
     pub text_hash: Option<String>,
+    pub valid_from: Option<DateTime<Utc>>,
+    pub valid_to: Option<DateTime<Utc>>,
 }
 
 /// Query parameters for flexible memory search.
@@ -152,6 +154,8 @@ pub struct MemoryQuery {
     pub sort_by: MemorySortBy,
     pub limit: usize,
     pub offset: usize,
+    /// If true, only return memories where valid_to is NULL (still valid).
+    pub only_valid: bool,
 }
 
 impl Default for MemoryQuery {
@@ -166,6 +170,7 @@ impl Default for MemoryQuery {
             sort_by: MemorySortBy::Importance,
             limit: 20,
             offset: 0,
+            only_valid: false,
         }
     }
 }
@@ -292,9 +297,32 @@ impl MetadataStore {
             )?;
         }
 
+        // Migration v3: temporal validity
+        let applied_v3 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 3",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        if applied_v3 == 0 {
+            self.conn.execute_batch(
+                r#"
+                ALTER TABLE memory_objects ADD COLUMN valid_from TEXT;
+                ALTER TABLE memory_objects ADD COLUMN valid_to TEXT;
+                "#,
+            )?;
+            self.conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![3_i64, Utc::now().to_rfc3339()],
+            )?;
+        }
+
         self.conn.execute(
             "INSERT OR REPLACE INTO schema_meta (key, value, updated_at) VALUES (?1, ?2, ?3)",
-            params!["schema_version", "2", Utc::now().to_rfc3339()],
+            params!["schema_version", "3", Utc::now().to_rfc3339()],
         )?;
         Ok(())
     }
@@ -661,8 +689,8 @@ impl MetadataStore {
               memory_id, session_id, kind, status, text, confidence, source_event_ids_json,
               created_at, superseded_by,
               source_adapter, source_model, importance, access_count, last_accessed_at,
-              consolidated_from_json, text_hash
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+              consolidated_from_json, text_hash, valid_from, valid_to
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
             "#,
             params![
                 memory.memory_id.as_str(),
@@ -681,6 +709,8 @@ impl MetadataStore {
                 memory.last_accessed_at.map(|dt| dt.to_rfc3339()),
                 serde_json::to_string(&consolidated_from)?,
                 memory.text_hash,
+                memory.valid_from.map(|dt| dt.to_rfc3339()),
+                memory.valid_to.map(|dt| dt.to_rfc3339()),
             ],
         )?;
         Ok(())
@@ -1057,6 +1087,15 @@ impl MetadataStore {
         Ok(matches)
     }
 
+    /// Mark a memory as no longer valid (set valid_to to now).
+    pub fn invalidate_memory(&self, memory_id: &MemoryId) -> Result<()> {
+        self.conn.execute(
+            "UPDATE memory_objects SET valid_to = ?2 WHERE memory_id = ?1 AND valid_to IS NULL",
+            params![memory_id.as_str(), Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
     pub fn search_memory(&self, query: &str) -> Result<Vec<MemoryObject>> {
         let needle = format!("%{query}%");
         let sql = format!(
@@ -1109,6 +1148,9 @@ impl MetadataStore {
             conditions.push(format!("created_at <= ?{param_idx}"));
             param_values.push(Box::new(before.to_rfc3339()));
             let _ = param_idx;
+        }
+        if query.only_valid {
+            conditions.push("(valid_to IS NULL)".to_string());
         }
 
         let order = match query.sort_by {
@@ -1291,7 +1333,7 @@ const MEMORY_SELECT_COLUMNS: &str = r#"
     memory_id, session_id, kind, status, text, confidence, source_event_ids_json,
     created_at, superseded_by,
     source_adapter, source_model, importance, access_count, last_accessed_at,
-    consolidated_from_json, text_hash
+    consolidated_from_json, text_hash, valid_from, valid_to
 "#;
 
 fn map_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryObject> {
@@ -1356,6 +1398,16 @@ fn map_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryObject> {
         last_accessed_at,
         consolidated_from,
         text_hash: row.get(15)?,
+        valid_from: row
+            .get::<_, Option<String>>(16)?
+            .map(|s| parse_rfc3339(&s))
+            .transpose()
+            .map_err(into_sql_error)?,
+        valid_to: row
+            .get::<_, Option<String>>(17)?
+            .map(|s| parse_rfc3339(&s))
+            .transpose()
+            .map_err(into_sql_error)?,
     })
 }
 
@@ -1465,6 +1517,8 @@ mod tests {
             last_accessed_at: None,
             consolidated_from: Vec::new(),
             text_hash: None,
+            valid_from: None,
+            valid_to: None,
         };
         let active_memory = crate::store::MemoryObject {
             memory_id: crate::ids::MemoryId::new(),
@@ -1483,6 +1537,8 @@ mod tests {
             last_accessed_at: None,
             consolidated_from: Vec::new(),
             text_hash: None,
+            valid_from: None,
+            valid_to: None,
         };
         store.insert_memory_object(&first_memory).unwrap();
         store.insert_memory_object(&active_memory).unwrap();

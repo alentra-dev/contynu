@@ -1430,6 +1430,8 @@ impl RuntimeEngine {
                     last_accessed_at: None,
                     consolidated_from,
                     text_hash,
+                    valid_from: Some(Utc::now()),
+                    valid_to: None,
                 };
                 store.insert_memory_object(&memory)?;
                 total_consolidated += group.len();
@@ -1499,6 +1501,8 @@ impl RuntimeEngine {
             last_accessed_at: None,
             consolidated_from: Vec::new(),
             text_hash,
+            valid_from: Some(Utc::now()),
+            valid_to: None,
         };
         store.insert_memory_object(&memory)?;
         if kind == MemoryObjectKind::Summary {

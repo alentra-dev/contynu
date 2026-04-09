@@ -287,6 +287,7 @@ impl McpDispatcher {
             sort_by: parse_sort_by(args),
             limit: args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize,
             offset: args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+            only_valid: true,
         };
 
         let memories = self.store.query_memories(&query)?;
@@ -325,6 +326,7 @@ impl McpDispatcher {
             sort_by: parse_sort_by(args),
             limit: args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize,
             offset: args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+            only_valid: true,
         };
 
         let memories = self.store.query_memories(&query)?;
@@ -541,6 +543,8 @@ mod tests {
                 last_accessed_at: None,
                 consolidated_from: Vec::new(),
                 text_hash: None,
+                valid_from: None,
+                valid_to: None,
             }).unwrap();
         }
 

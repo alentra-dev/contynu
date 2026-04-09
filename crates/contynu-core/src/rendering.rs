@@ -54,6 +54,17 @@ fn render_xml(packet: &RehydrationPacket, adapter_name: &str) -> String {
         packet.project_id, packet.schema_version, adapter_name
     );
 
+    if !packet.project_identity.is_empty() {
+        let _ = writeln!(out, "  <identity>{}</identity>", xml_escape(&packet.project_identity));
+    }
+    if !packet.compact_brief.is_empty() {
+        out.push_str("  <brief>\n");
+        for line in packet.compact_brief.lines() {
+            let _ = writeln!(out, "    {}", xml_escape(line));
+        }
+        out.push_str("  </brief>\n");
+    }
+
     if let Some(target) = &packet.target_model {
         let _ = writeln!(out, "  <target_model>{target}</target_model>");
     }
@@ -184,6 +195,15 @@ fn render_markdown(packet: &RehydrationPacket, adapter_name: &str) -> String {
         packet.project_id, packet.schema_version, adapter_name
     );
 
+    if !packet.project_identity.is_empty() {
+        let _ = writeln!(out, "> {}\n", packet.project_identity);
+    }
+    if !packet.compact_brief.is_empty() {
+        out.push_str("## Quick Brief\n```\n");
+        out.push_str(&packet.compact_brief);
+        out.push_str("\n```\n\n");
+    }
+
     if let Some(target) = &packet.target_model {
         let _ = writeln!(out, "**Target model:** {target}\n");
     }
@@ -273,6 +293,16 @@ fn render_structured_text(packet: &RehydrationPacket, adapter_name: &str) -> Str
 
     // Quick-reference summary at the top so the model sees key facts immediately.
     prompt.push_str("IMPORTANT: This file contains project memory from prior sessions. READ THIS FIRST before searching files.\n\n");
+    if !packet.project_identity.is_empty() {
+        let _ = writeln!(prompt, "{}\n", packet.project_identity);
+    }
+    if !packet.compact_brief.is_empty() {
+        prompt.push_str("QUICK BRIEF:\n");
+        for line in packet.compact_brief.lines() {
+            let _ = writeln!(prompt, "  {}", line);
+        }
+        prompt.push('\n');
+    }
     if !packet.stable_facts.is_empty() {
         prompt.push_str("KEY FACTS FROM PRIOR SESSIONS:\n");
         for fact in &packet.stable_facts {
@@ -496,6 +526,8 @@ mod tests {
     fn test_packet() -> RehydrationPacket {
         RehydrationPacket {
             schema_version: 2,
+            project_identity: String::new(),
+            compact_brief: String::new(),
             project_id: ProjectId::parse("prj_019d503680a475a3ae465200a90cd4fa").unwrap(),
             target_model: None,
             mission: "Fix the authentication bug".into(),

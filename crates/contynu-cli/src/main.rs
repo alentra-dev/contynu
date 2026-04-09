@@ -100,6 +100,18 @@ enum Command {
         #[arg(long, default_value_t = true)]
         derive_memory: bool,
     },
+    /// Import conversations from Claude JSONL, ChatGPT JSON, or plain text
+    Import {
+        /// Path to conversation file(s)
+        #[arg(required = true)]
+        files: Vec<std::path::PathBuf>,
+        #[arg(long, default_value = "auto")]
+        format: String,
+        #[arg(long, alias = "session")]
+        project: Option<String>,
+        #[arg(long)]
+        adapter: Option<String>,
+    },
     /// Export importance-ranked memories as Markdown
     #[command(name = "export-memory")]
     ExportMemory {
@@ -228,6 +240,9 @@ fn main() -> Result<()> {
         Some(Command::Artifacts { command }) => artifacts(&state, command),
         Some(Command::Doctor) => doctor(&state),
         Some(Command::OpenClaw { command }) => openclaw_command(&state, &cli.cwd, command),
+        Some(Command::Import { files, format, project, adapter }) => {
+            import_conversations(&state, project.as_deref(), &files, &format, adapter.as_deref())
+        }
         Some(Command::Ingest { project, adapter, model, derive_memory }) => {
             ingest(&state, project.as_deref(), adapter.as_deref(), model.as_deref(), derive_memory)
         }
@@ -1053,6 +1068,157 @@ fn openclaw_status(state: &StatePaths) -> Result<()> {
         println!("  OpenClaw config:  not found");
     }
 
+    Ok(())
+}
+
+fn import_conversations(
+    state: &StatePaths,
+    project: Option<&str>,
+    files: &[std::path::PathBuf],
+    format: &str,
+    adapter: Option<&str>,
+) -> Result<()> {
+    ensure_state(state)?;
+    let project_id = resolve_project_id(state, project)?;
+    let journal = contynu_core::Journal::open(state.journal_path_for_project(&project_id))?;
+    let store = MetadataStore::open(state.sqlite_db())?;
+
+    let mut total_events = 0usize;
+    let mut total_memories = 0usize;
+
+    for file_path in files {
+        let content = std::fs::read_to_string(file_path)
+            .map_err(|e| anyhow!("Failed to read {}: {e}", file_path.display()))?;
+
+        let detected_format = if format == "auto" {
+            if file_path.extension().map_or(false, |ext| ext == "jsonl") {
+                "claude-jsonl"
+            } else if content.trim_start().starts_with('[') || content.trim_start().starts_with('{') {
+                "chatgpt"
+            } else {
+                "text"
+            }
+        } else {
+            format
+        };
+
+        let turn_id = contynu_core::TurnId::new();
+        store.register_turn(&contynu_core::TurnRecord {
+            turn_id: turn_id.clone(),
+            session_id: project_id.clone(),
+            status: "started".into(),
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            summary_memory_id: None,
+        })?;
+
+        let adapter_name = adapter.unwrap_or(detected_format);
+        let mut event_count = 0usize;
+
+        match detected_format {
+            "claude-jsonl" => {
+                // Claude Code JSONL: one JSON object per line with role + content
+                for line in content.lines() {
+                    let line = line.trim();
+                    if line.is_empty() { continue; }
+                    if let Ok(obj) = serde_json::from_str::<serde_json::Value>(line) {
+                        let role = obj.get("role").and_then(|v| v.as_str()).unwrap_or("system");
+                        let text = obj.get("content").and_then(|v| v.as_str())
+                            .or_else(|| obj.get("text").and_then(|v| v.as_str()))
+                            .unwrap_or("");
+                        if text.is_empty() { continue; }
+                        let (event_type, actor) = match role {
+                            "user" | "human" => ("message_input", "user"),
+                            "assistant" => ("message_output", "assistant"),
+                            _ => ("message_output", "system"),
+                        };
+                        let ingest_line = contynu_core::IngestLine {
+                            event_type: serde_json::from_value(serde_json::json!(event_type))?,
+                            actor: serde_json::from_value(serde_json::json!(actor))?,
+                            payload: serde_json::json!({"content": [{"type": "text", "text": text}]}),
+                            ts: None,
+                        };
+                        let draft = ingest_line.into_draft(project_id.clone(), Some(turn_id.clone()));
+                        let (event, append) = journal.append(draft)?;
+                        store.record_event(&event, &journal.path().display().to_string(), append)?;
+                        event_count += 1;
+                    }
+                }
+            }
+            "chatgpt" => {
+                // ChatGPT conversations.json export
+                let data: serde_json::Value = serde_json::from_str(&content)
+                    .map_err(|e| anyhow!("Failed to parse ChatGPT JSON: {e}"))?;
+                let conversations = if data.is_array() { data.as_array().cloned().unwrap_or_default() } else { vec![data] };
+                for convo in conversations {
+                    let mapping = convo.get("mapping").and_then(|m| m.as_object());
+                    if let Some(mapping) = mapping {
+                        for (_id, node) in mapping {
+                            let msg = node.get("message");
+                            if let Some(msg) = msg {
+                                let role = msg.get("author").and_then(|a| a.get("role")).and_then(|r| r.as_str()).unwrap_or("system");
+                                let parts = msg.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array());
+                                let text = parts.map(|ps| ps.iter().filter_map(|p| p.as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default();
+                                if text.is_empty() { continue; }
+                                let (event_type, actor) = match role {
+                                    "user" => ("message_input", "user"),
+                                    "assistant" => ("message_output", "assistant"),
+                                    _ => continue,
+                                };
+                                let ingest_line = contynu_core::IngestLine {
+                                    event_type: serde_json::from_value(serde_json::json!(event_type))?,
+                                    actor: serde_json::from_value(serde_json::json!(actor))?,
+                                    payload: serde_json::json!({"content": [{"type": "text", "text": text}]}),
+                                    ts: msg.get("create_time").and_then(|t| t.as_f64()).map(|ts| {
+                                        chrono::DateTime::from_timestamp(ts as i64, 0).map(|dt| dt.to_utc())
+                                    }).flatten(),
+                                };
+                                let draft = ingest_line.into_draft(project_id.clone(), Some(turn_id.clone()));
+                                let (event, append) = journal.append(draft)?;
+                                store.record_event(&event, &journal.path().display().to_string(), append)?;
+                                event_count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                // Plain text: treat entire file as one message
+                let ingest_line = contynu_core::IngestLine {
+                    event_type: serde_json::from_value(serde_json::json!("message_output"))?,
+                    actor: serde_json::from_value(serde_json::json!("assistant"))?,
+                    payload: serde_json::json!({"content": [{"type": "text", "text": content}]}),
+                    ts: None,
+                };
+                let draft = ingest_line.into_draft(project_id.clone(), Some(turn_id.clone()));
+                let (event, append) = journal.append(draft)?;
+                store.record_event(&event, &journal.path().display().to_string(), append)?;
+                event_count += 1;
+            }
+        }
+
+        let memory_count = if event_count > 0 {
+            contynu_core::derive_memory_from_ingested_events(
+                &journal, &store, &project_id, &turn_id,
+                Some(adapter_name.to_string()), None,
+            )?
+        } else {
+            0
+        };
+
+        store.update_turn_status(&turn_id, "completed", Some(chrono::Utc::now()))?;
+        total_events += event_count;
+        total_memories += memory_count;
+        eprintln!(
+            "Imported {} ({} format): {} events, {} memories",
+            file_path.display(), detected_format, event_count, memory_count
+        );
+    }
+
+    eprintln!(
+        "Total: {} events, {} memories imported into project {}",
+        total_events, total_memories, project_id
+    );
     Ok(())
 }
 
