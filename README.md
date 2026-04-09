@@ -107,7 +107,7 @@ See [`packages/contynu-openclaw/`](packages/contynu-openclaw/) for the plugin so
 - **Structured metadata:** SQLite with WAL mode (schema v3)
 - **Large content:** Content-addressed local blob store (SHA-256)
 - **Recovery:** Deterministic rehydration packets with budget-aware assembly
-- **Memory:** Typed objects (Fact, Constraint, Decision, Todo, Summary) with importance scoring, temporal validity, and provenance tracking
+- **Memory:** Typed objects (Fact, Constraint, Decision, Todo, Summary, Entity, FileNote) with importance scoring, temporal validity, and provenance tracking
 - **Progressive loading:** L0 identity + L1 compressed brief always in context; L2/L3 via MCP
 - **MCP:** Stdio JSON-RPC server with search, list, and event query tools
 - **Runtime:** Local CLI wrapper with PTY/pipe/script-based capture

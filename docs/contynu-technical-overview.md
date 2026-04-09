@@ -193,11 +193,12 @@ The top memories are selected within a configurable token budget (default: 4000 
 
 ### Memory Consolidation
 
-When active memory count exceeds 50, Contynu automatically consolidates:
-1. Groups related memories by keyword overlap
-2. Merges low-importance groups into single consolidated memories
-3. Preserves the highest importance from each group
-4. Tracks which memories were consolidated (provenance chain)
+When the total active memory count exceeds 30, Contynu triggers consolidation for each eligible kind (Fact, Todo, Summary) that has more than 10 active entries:
+1. Takes the bottom 50% by importance as candidates
+2. Groups candidates by Jaccard similarity (>0.3 threshold on content words)
+3. Merges groups of 2+ into single consolidated memories
+4. Preserves the highest importance from each group
+5. Tracks which memories were consolidated (provenance chain via `consolidated_from`)
 
 ### Provenance
 
