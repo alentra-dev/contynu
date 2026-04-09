@@ -276,6 +276,7 @@
     <div class="nav-links">
       <a href="#problem">Why</a>
       <a href="#features">Features</a>
+      <a href="#openclaw">OpenClaw</a>
       <a href="#how">Get Started</a>
       <a href="https://github.com/alentra-dev/contynu" class="btn-github" target="_blank" rel="noopener">
         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
@@ -297,7 +298,7 @@
     </div>
     <div class="hero-badge">Open Source</div>
     <h1>Memory that<br><span class="gradient">persists</span></h1>
-    <p>Model-agnostic persistent memory for LLM workflows. Facts, decisions, and context transfer seamlessly between Claude, Codex, and Gemini.</p>
+    <p>Model-agnostic persistent memory for LLM workflows. Facts, decisions, and context transfer seamlessly between Claude, Codex, Gemini &mdash; and <strong style="color:var(--violet)">OpenClaw agents</strong>.</p>
     <div class="hero-actions">
       <a href="https://github.com/alentra-dev/contynu" class="btn-primary" target="_blank" rel="noopener">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
@@ -366,34 +367,34 @@
     <h2>Built for how you actually work</h2>
     <div class="features-grid">
       <div class="feature-card">
-        <div class="feature-icon">&infin;</div>
-        <h3>Indefinite Memory</h3>
-        <p>Every fact, decision, and constraint persists forever in an append-only journal. Nothing is lost, even across hundreds of sessions.</p>
-      </div>
-      <div class="feature-card">
         <div class="feature-icon">&harr;</div>
         <h3>Cross-Model Transfer</h3>
         <p>Memory flows seamlessly between Claude, Codex, and Gemini. Each model receives context in its optimal format &mdash; XML, Markdown, or structured text.</p>
       </div>
       <div class="feature-card">
-        <div class="feature-icon">&#x1F50D;</div>
-        <h3>MCP Server</h3>
-        <p>LLMs query the full memory archive on demand via the Model Context Protocol. Search by keyword, kind, or time window with paginated results.</p>
+        <div class="feature-icon" style="font-size:1.2rem;">&#x1F419;</div>
+        <h3>OpenClaw Plugin</h3>
+        <p>Give OpenClaw agents permanent memory. Survives compaction, model switches, and session boundaries. Addresses issues <a href="https://github.com/openclaw/openclaw/issues/5429" target="_blank">#5429</a>, <a href="https://github.com/openclaw/openclaw/issues/25947" target="_blank">#25947</a>, and more.</p>
       </div>
       <div class="feature-card">
-        <div class="feature-icon">&#x2696;</div>
-        <h3>Importance Ranking</h3>
-        <p>Memories are scored by importance, recency, and confidence. The most critical facts always make it into the handoff &mdash; no matter how large the project.</p>
+        <div class="feature-icon">&#x1F50D;</div>
+        <h3>MCP Memory Recall</h3>
+        <p>LLMs search the full memory archive on demand via MCP. Keyword search, time windows, kind filtering, and paginated results. Auto-registers with every CLI.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#x26A1;</div>
+        <h3>Progressive Loading</h3>
+        <p>Compact project brief (~500 tokens) always in context. Deep recall via MCP when needed. 80% less context overhead than dumping everything into the prompt.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">&#x1F4E5;</div>
+        <h3>Auto-Import</h3>
+        <p>Install contynu, run it once &mdash; all your prior Codex and Gemini conversations are instantly searchable. Also imports Claude JSONL, ChatGPT exports, and plain text.</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">&#x1F512;</div>
-        <h3>Local-First</h3>
-        <p>All data stays on your machine. SQLite + JSONL + content-addressed blobs. No cloud dependencies, no API keys, no data leaving your disk.</p>
-      </div>
-      <div class="feature-card">
-        <div class="feature-icon">&#x2699;</div>
-        <h3>Zero Config</h3>
-        <p>Replace <code>claude</code> with <code>contynu claude</code>. That's it. Auto-detection, auto-registration, auto-hydration. Works immediately.</p>
+        <h3>Local-First &amp; Zero Config</h3>
+        <p>All data stays on your machine. Replace <code>claude</code> with <code>contynu claude</code>. Auto-detection, auto-registration, auto-hydration. Works immediately.</p>
       </div>
     </div>
   </div>
@@ -430,6 +431,31 @@
       <pre><code><span style="color:var(--slate-400)"># The MCP server auto-registers &mdash; LLMs can query directly:</span>
 <span style="color:var(--violet)">&gt;</span> Use the search_memory tool to find what we decided about authentication
 <span style="color:var(--sky)">&#x2713;</span> Found: "Use HMAC-SHA256 for token signing" (from Claude session, importance: 0.85)</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- OpenClaw -->
+<section class="features" id="openclaw" style="border-top: 1px solid var(--slate-800);">
+  <div class="container">
+    <h2>OpenClaw agents forget. <span style="background:var(--gradient);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;">contynu makes them remember.</span></h2>
+    <p style="text-align:center; color:var(--slate-400); max-width:640px; margin:-2rem auto 3rem;">
+      The <code>contynu-openclaw</code> plugin gives every OpenClaw agent permanent memory that survives compaction, model switches, and session boundaries. Zero changes to OpenClaw's codebase.
+    </p>
+    <div class="features-grid" style="grid-template-columns: repeat(2, 1fr);">
+      <div class="feature-card">
+        <h3 style="color:var(--violet);">The problem</h3>
+        <p>OpenClaw's context compaction is lossy &mdash; critical decisions, safety constraints, and project context get silently destroyed. Users have lost days of work (<a href="https://github.com/openclaw/openclaw/issues/5429" target="_blank">#5429</a>). The dreaming system crashes (<a href="https://github.com/openclaw/openclaw/issues/61951" target="_blank">#61951</a>). There's no session memory between restarts (<a href="https://github.com/openclaw/openclaw/issues/39885" target="_blank">#39885</a>).</p>
+      </div>
+      <div class="feature-card">
+        <h3 style="color:var(--sky);">The fix</h3>
+        <p>contynu checkpoints before compaction fires, writes importance-ranked facts to MEMORY.md, and gives agents MCP tools to search the full history on demand. One setup command, then it works silently in the background.</p>
+      </div>
+    </div>
+    <div class="code-tabs" style="margin-top:2rem;">
+      <span class="label">Setup (one time)</span>
+      <pre><code><span style="color:var(--sky)">$</span> contynu openclaw setup
+<span style="color:var(--sky)">$</span> npm install -g contynu-openclaw</code></pre>
     </div>
   </div>
 </section>
