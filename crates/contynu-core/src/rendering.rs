@@ -431,7 +431,7 @@ fn render_launcher_structured(packet: &RehydrationPacket) -> String {
     sections.join("\n")
 }
 
-fn is_operational(text: &str) -> bool {
+pub(crate) fn is_operational(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.starts_with("command `")
         || lower.contains(" exited with ")

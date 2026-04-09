@@ -6,10 +6,19 @@ use contynu_core::mcp::{JsonRpcRequest, McpDispatcher};
 use contynu_core::{MetadataStore, ProjectId, StatePaths};
 
 pub fn run(state_dir: &Path) -> Result<()> {
-    let state = StatePaths::new(state_dir);
+    // Use the provided state_dir if it contains a valid database,
+    // otherwise try to discover one from CWD.
+    let effective_dir = if state_dir.join("sqlite").join("contynu.db").exists() {
+        state_dir.to_path_buf()
+    } else if let Some(discovered) = discover_state_dir() {
+        discovered
+    } else {
+        state_dir.to_path_buf()
+    };
+    let state = StatePaths::new(&effective_dir);
     let active_project = resolve_active_project(&state)?;
 
-    let dispatcher = McpDispatcher::new(state_dir, active_project)
+    let dispatcher = McpDispatcher::new(&effective_dir, active_project)
         .map_err(|e| anyhow!("Failed to start MCP server: {e}"))?;
 
     let stdin = io::stdin().lock();
@@ -55,6 +64,24 @@ fn resolve_active_project(state: &StatePaths) -> Result<ProjectId> {
     Err(anyhow!(
         "No active project. Set CONTYNU_ACTIVE_PROJECT or ensure a primary project exists."
     ))
+}
+
+/// Walk up from CWD looking for a `.contynu/sqlite/contynu.db` to find the
+/// real project state dir. This handles cases where CONTYNU_STATE_DIR was set
+/// from an ephemeral context (temp dir, worktree) that no longer exists.
+fn discover_state_dir() -> Option<std::path::PathBuf> {
+    let cwd = std::env::var("CONTYNU_CWD")
+        .map(std::path::PathBuf::from)
+        .or_else(|_| std::env::current_dir())
+        .ok()?;
+    let mut dir = cwd.as_path();
+    loop {
+        let candidate = dir.join(".contynu");
+        if candidate.join("sqlite").join("contynu.db").exists() {
+            return Some(candidate);
+        }
+        dir = dir.parent()?;
+    }
 }
 
 fn write_response(

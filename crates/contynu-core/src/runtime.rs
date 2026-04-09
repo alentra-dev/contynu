@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
@@ -1217,21 +1218,21 @@ impl RuntimeEngine {
             source_adapter.clone(),
             source_model.clone(),
         )?;
-        if latest_dialogue.is_none() || interrupted || exit_code.unwrap_or_default() != 0 {
+        // Only store command exit info on failure/interrupt (as low-importance
+        // Summary, not Fact) -- successful exits are operational noise.
+        if exit_code.unwrap_or_default() != 0 || interrupted {
             Self::insert_memory_object(
                 journal,
                 store,
                 session_id,
                 turn_id,
-                MemoryObjectKind::Fact,
+                MemoryObjectKind::Summary,
                 format!(
-                    "Command `{}` exited with {:?} using {} transport.",
-                    command_text,
-                    exit_code,
-                    transport.as_str()
+                    "Command `{}` failed with exit code {:?}.",
+                    command_text, exit_code
                 ),
-                Some(0.8),
-                0.7,
+                Some(0.6),
+                0.3,
                 false,
                 source_event_ids.clone(),
                 source_adapter.clone(),
@@ -1302,31 +1303,33 @@ impl RuntimeEngine {
         if latest_dialogue.is_none() && exit_code == Some(0) {
             let stdout_text = extract_captured_response(&source_events);
             if let Some(response) = stdout_text {
-                let truncated = if response.len() > 500 {
-                    format!("{}...", &response[..500])
-                } else {
-                    response
-                };
-                Self::insert_memory_object(
-                    journal,
-                    store,
-                    session_id,
-                    turn_id,
-                    MemoryObjectKind::Fact,
-                    format!("LLM response: {}", truncated),
-                    Some(0.85),
-                    0.8,
-                    false,
-                    source_event_ids.clone(),
-                    source_adapter.clone(),
-                    source_model.clone(),
-                )?;
+                if let Some(cleaned) = clean_llm_response(&response) {
+                    let truncated = if cleaned.len() > 500 {
+                        format!("{}...", &cleaned[..500])
+                    } else {
+                        cleaned
+                    };
+                    Self::insert_memory_object(
+                        journal,
+                        store,
+                        session_id,
+                        turn_id,
+                        MemoryObjectKind::Fact,
+                        truncated,
+                        Some(0.85),
+                        0.8,
+                        false,
+                        source_event_ids.clone(),
+                        source_adapter.clone(),
+                        source_model.clone(),
+                    )?;
+                }
             }
         }
 
         // Trigger consolidation if active memory count is high
         let active_count = store.count_active_memories(session_id, None)?;
-        if active_count > 50 {
+        if active_count > 30 {
             Self::consolidate_memories(journal, store, session_id, turn_id)?;
         }
 
@@ -1348,7 +1351,7 @@ impl RuntimeEngine {
 
         for kind in consolidation_kinds {
             let active = store.list_active_memory_objects(session_id, Some(kind))?;
-            if active.len() <= 20 {
+            if active.len() <= 10 {
                 continue;
             }
 
@@ -1358,31 +1361,20 @@ impl RuntimeEngine {
             let consolidation_count = sorted.len() / 2;
             let candidates = &sorted[..consolidation_count];
 
-            // Group by simple word overlap (3+ shared content words)
+            // Group by Jaccard similarity (>0.3 threshold)
             let mut groups: Vec<Vec<usize>> = Vec::new();
             let mut assigned = vec![false; candidates.len()];
 
             for i in 0..candidates.len() {
                 if assigned[i] { continue; }
-                let words_i: std::collections::HashSet<_> = candidates[i].text
-                    .to_ascii_lowercase()
-                    .split_whitespace()
-                    .filter(|w| w.len() > 3)
-                    .map(String::from)
-                    .collect();
+                let words_i = content_words(&candidates[i].text);
                 let mut group = vec![i];
                 assigned[i] = true;
 
                 for j in (i + 1)..candidates.len() {
                     if assigned[j] { continue; }
-                    let words_j: std::collections::HashSet<_> = candidates[j].text
-                        .to_ascii_lowercase()
-                        .split_whitespace()
-                        .filter(|w| w.len() > 3)
-                        .map(String::from)
-                        .collect();
-                    let shared = words_i.intersection(&words_j).count();
-                    if shared >= 3 {
+                    let words_j = content_words(&candidates[j].text);
+                    if jaccard_similarity(&words_i, &words_j) > 0.3 {
                         group.push(j);
                         assigned[j] = true;
                     }
@@ -1471,19 +1463,33 @@ impl RuntimeEngine {
         source_adapter: Option<String>,
         source_model: Option<String>,
     ) -> Result<Option<MemoryId>> {
+        // Hash-based normalized dedup (catches case/whitespace variants)
+        let text_hash_val = crate::event::sha256_hex(
+            text.trim().to_lowercase().as_bytes(),
+        );
         if store
-            .find_active_memory_by_text(session_id, kind, &text)?
+            .find_active_memory_by_hash(session_id, kind, &text_hash_val)?
             .is_some()
         {
             return Ok(None);
         }
+
+        // Jaccard similarity dedup against same-kind active memories
+        let active_same_kind = store.list_active_memory_objects(session_id, Some(kind))?;
+        let new_words = content_words(&text);
+        if !new_words.is_empty() {
+            for existing in &active_same_kind {
+                if jaccard_similarity(&new_words, &content_words(&existing.text)) > 0.6 {
+                    return Ok(None);
+                }
+            }
+        }
+
         let memory_id = MemoryId::new();
         if supersede_kind {
             store.supersede_memory_kind(session_id, kind, &memory_id)?;
         }
-        let text_hash = Some(crate::event::sha256_hex(
-            text.trim().to_lowercase().as_bytes(),
-        ));
+        let text_hash = Some(text_hash_val);
         let memory = MemoryObject {
             memory_id: memory_id.clone(),
             session_id: session_id.clone(),
@@ -2055,6 +2061,80 @@ fn dedupe_lines(lines: Vec<String>) -> Vec<String> {
     deduped
 }
 
+/// Extract content words (lowercase, >3 chars) from text for similarity comparison.
+fn content_words(text: &str) -> HashSet<String> {
+    text.to_ascii_lowercase()
+        .split_whitespace()
+        .filter(|w| w.len() > 3)
+        .map(String::from)
+        .collect()
+}
+
+/// Jaccard similarity between two word sets: |intersection| / |union|.
+fn jaccard_similarity(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
+    let union = a.union(b).count();
+    if union == 0 {
+        return 0.0;
+    }
+    a.intersection(b).count() as f64 / union as f64
+}
+
+/// Returns true if the line is LLM meta-commentary (process narration, disclaimers)
+/// rather than actual factual content.
+fn is_meta_commentary(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    let process_verbs = [
+        "checking", "reading", "reviewing", "looking", "analyzing",
+        "examining", "searching", "scanning", "picking up", "querying",
+        "retrying", "inspecting", "investigating",
+    ];
+    if lower.starts_with("i'm ") {
+        if process_verbs.iter().any(|v| lower[4..].starts_with(v)) {
+            return true;
+        }
+    }
+    if lower.starts_with("let me ") {
+        return true;
+    }
+    if lower.starts_with("i can't ") || lower.starts_with("i don't ") {
+        return true;
+    }
+    if lower.starts_with("i'll ") {
+        if process_verbs.iter().any(|v| lower[5..].starts_with(v)) {
+            return true;
+        }
+    }
+    if lower.starts_with("i need to ") {
+        return true;
+    }
+    if lower.starts_with("the shell is blocked") {
+        return true;
+    }
+    if lower.starts_with("if you paste") || lower.starts_with("if you want") {
+        return true;
+    }
+    crate::rendering::is_operational(line)
+}
+
+/// Clean an LLM response by stripping meta-commentary lines.
+/// Returns None if the cleaned result has fewer than 20 characters of content.
+fn clean_llm_response(text: &str) -> Option<String> {
+    let text = text.strip_prefix("LLM response: ").unwrap_or(text);
+    let lines: Vec<&str> = text
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .filter(|l| !is_meta_commentary(l))
+        .collect();
+    let result = lines.join("\n");
+    let result = result.trim().to_string();
+    if result.len() < 20 {
+        None
+    } else {
+        Some(result)
+    }
+}
+
 /// Extract the meaningful text from stdout_captured events, filtering UI noise.
 fn extract_captured_response(events: &[EventRecord]) -> Option<String> {
     let mut parts = Vec::new();
@@ -2195,23 +2275,25 @@ pub fn derive_memory_from_ingested_events(
         }
     }
 
-    // Always extract the LLM response content as a Fact for recall.
-    // This ensures the actual knowledge from the conversation persists,
-    // not just the summary.
+    // Extract cleaned LLM response content as a Fact for recall.
+    // Meta-commentary (process narration, disclaimers) is stripped to keep
+    // only actual knowledge from the conversation.
     if !responses.is_empty() {
         let response_text = responses.join(" ");
-        let truncated = if response_text.len() > 500 {
-            format!("{}...", &response_text[..500])
-        } else {
-            response_text
-        };
-        if RuntimeEngine::insert_memory_object(
-            journal, store, session_id, turn_id,
-            MemoryObjectKind::Fact, format!("LLM response: {}", truncated),
-            Some(0.85), 0.8, false,
-            source_event_ids.clone(), source_adapter.clone(), source_model.clone(),
-        )?.is_some() {
-            count += 1;
+        if let Some(cleaned) = clean_llm_response(&response_text) {
+            let truncated = if cleaned.len() > 500 {
+                format!("{}...", &cleaned[..500])
+            } else {
+                cleaned
+            };
+            if RuntimeEngine::insert_memory_object(
+                journal, store, session_id, turn_id,
+                MemoryObjectKind::Fact, truncated,
+                Some(0.85), 0.8, false,
+                source_event_ids.clone(), source_adapter.clone(), source_model.clone(),
+            )?.is_some() {
+                count += 1;
+            }
         }
     }
 

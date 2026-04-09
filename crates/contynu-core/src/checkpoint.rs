@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::path::Path;
 
@@ -198,8 +198,9 @@ impl<'a> CheckpointManager<'a> {
 
         let mission = latest_dialogue
             .map(|dialogue| dialogue.prompt.clone())
+            .filter(|p| !is_system_prompt(p))
             .or_else(|| {
-                events.iter().find_map(|event| {
+                events.iter().rev().find_map(|event| {
                     if event.event_type == "message_input" {
                         event
                             .payload_json
@@ -209,6 +210,7 @@ impl<'a> CheckpointManager<'a> {
                             .and_then(|item| item.get("text"))
                             .and_then(|text| text.as_str())
                             .map(str::to_owned)
+                            .filter(|t| !is_system_prompt(t))
                     } else {
                         None
                     }
@@ -440,13 +442,25 @@ fn score_and_select(
     let mut texts = Vec::new();
     let mut ids = Vec::new();
     let mut token_estimate = 0usize;
+    let mut seen_word_sets: Vec<HashSet<String>> = Vec::new();
 
     for m in &selected {
+        // Dedup: skip memories too similar to already-selected ones
+        let words = content_words(&m.text);
+        if !words.is_empty()
+            && seen_word_sets
+                .iter()
+                .any(|s| jaccard_similarity(&words, s) > 0.6)
+        {
+            continue;
+        }
+
         let word_count = m.text.split_whitespace().count();
         let tokens = (word_count as f64 * 1.3) as usize;
         if token_estimate + tokens > token_budget && texts.len() >= budget.min_per_category {
             break;
         }
+        seen_word_sets.push(words);
         texts.push(m.text.clone());
         ids.push(m.memory_id.clone());
         token_estimate += tokens;
@@ -455,12 +469,42 @@ fn score_and_select(
     (texts, ids)
 }
 
+fn content_words(text: &str) -> HashSet<String> {
+    text.to_ascii_lowercase()
+        .split_whitespace()
+        .filter(|w| w.len() > 3)
+        .map(String::from)
+        .collect()
+}
+
+fn jaccard_similarity(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
+    let union = a.union(b).count();
+    if union == 0 {
+        return 0.0;
+    }
+    a.intersection(b).count() as f64 / union as f64
+}
+
 fn path_string(path: &Path) -> String {
     path.display().to_string()
 }
 
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Returns true if text looks like a system prompt or framework instructions
+/// rather than a genuine user message.
+fn is_system_prompt(text: &str) -> bool {
+    text.len() > 2000
+        || text.contains("INSTRUCTIONS")
+        || text.contains("## Skills")
+        || text.contains("## Tools")
+        || text.contains("AGENTS.md")
+        || text.contains("CLAUDE.md")
+        || text.contains("SYSTEM PROMPT")
+        || text.starts_with("<system")
+        || (text.len() > 200 && text[..200].contains("You are a"))
 }
 
 fn extract_dialogue_turns(events: &[crate::store::EventRecord]) -> Vec<DialogueTurn> {

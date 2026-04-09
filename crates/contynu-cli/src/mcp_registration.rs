@@ -10,6 +10,12 @@ pub fn ensure_mcp_registered(
     cwd: &Path,
     project_id: &str,
 ) -> Result<()> {
+    // Don't register MCP from ephemeral/temp state dirs — they produce stale
+    // global configs that point to directories that no longer exist.
+    if is_ephemeral_path(state_dir) {
+        return Ok(());
+    }
+
     match cli_name {
         "claude" | "claude-code" => ensure_claude_mcp(state_dir, cwd, project_id),
         "codex" | "codex-cli" => ensure_codex_mcp(state_dir, project_id),
@@ -17,6 +23,16 @@ pub fn ensure_mcp_registered(
         "openclaw" => ensure_openclaw_mcp(state_dir, cwd, project_id),
         _ => Ok(()), // unknown CLI, skip
     }
+}
+
+/// Returns true if a path looks ephemeral (temp dir, worktree, etc.)
+/// and should not be persisted into global MCP registrations.
+fn is_ephemeral_path(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    s.starts_with("/tmp/")
+        || s.starts_with("/var/tmp/")
+        || s.contains("/.tmp")
+        || s.contains("/tmp.")
 }
 
 fn ensure_claude_mcp(state_dir: &Path, cwd: &Path, project_id: &str) -> Result<()> {

@@ -208,12 +208,18 @@ impl AdapterSpec {
             should_hydrate: launcher.hydrate,
             use_pty: launcher.use_pty,
             hydration_delivery: launcher.hydration_delivery,
-            hydration_args: launcher
-                .hydration_args
-                .iter()
-                .cloned()
-                .map(OsString::from)
-                .collect(),
+            hydration_args: if launcher.hydration_args.is_empty() {
+                // Fall back to builtin defaults when config doesn't specify args.
+                // This prevents stale config files from silently disabling hydration.
+                builtin_hydration_args(kind)
+            } else {
+                launcher
+                    .hydration_args
+                    .iter()
+                    .cloned()
+                    .map(OsString::from)
+                    .collect()
+            },
             extra_env: launcher.extra_env.clone(),
             prompt_format,
         }

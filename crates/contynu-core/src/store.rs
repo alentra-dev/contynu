@@ -772,6 +772,28 @@ impl MetadataStore {
         Ok(memory)
     }
 
+    pub fn find_active_memory_by_hash(
+        &self,
+        session_id: &SessionId,
+        kind: MemoryObjectKind,
+        text_hash: &str,
+    ) -> Result<Option<MemoryObject>> {
+        let sql = format!(
+            "SELECT {MEMORY_SELECT_COLUMNS} FROM memory_objects
+             WHERE session_id = ?1 AND kind = ?2 AND text_hash = ?3 AND status != 'superseded'
+             ORDER BY created_at DESC
+             LIMIT 1"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let memory = stmt
+            .query_row(
+                params![session_id.as_str(), kind.as_str(), text_hash],
+                map_memory,
+            )
+            .optional()?;
+        Ok(memory)
+    }
+
     pub fn list_events_for_session(&self, session_id: &SessionId) -> Result<Vec<EventRecord>> {
         let mut stmt = self.conn.prepare(
             r#"
