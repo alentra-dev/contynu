@@ -1,6 +1,6 @@
 # Contynu — Complete Technical Overview
 
-**Version:** 0.2.1 | **Created:** April 2026 | **Language:** Rust
+**Version:** 0.4.0+ | **Created:** April 2026 | **Language:** Rust + TypeScript (OpenClaw plugin)
 **Creators:** Udonna Eke-Okoro & Kelenna Eke-Okoro
 **License:** Mozilla Public License 2.0
 **Website:** [contynu.com](https://contynu.com) | **Source:** [github.com/alentra-dev/contynu](https://github.com/alentra-dev/contynu)
@@ -681,4 +681,54 @@ All IDs use UUID v7 (time-ordered) with typed prefixes:
 
 ---
 
-*This document reflects Contynu v0.2.1 as of April 2026.*
+---
+
+## 17. OpenClaw Integration
+
+Contynu integrates with [OpenClaw](https://github.com/openclaw/openclaw) (~350K GitHub stars) via the `contynu-openclaw` TypeScript plugin. Zero changes to OpenClaw's core codebase.
+
+### Plugin Architecture
+
+```
+OpenClaw Gateway
+    ├── afterTurn() hook → contynu-openclaw plugin → contynu ingest
+    ├── session:compact:before → contynu checkpoint + MEMORY.md write-back
+    └── MCP tools → contynu mcp-server → search_memory / list_memories
+```
+
+### Components
+
+| Component | What It Does |
+|-----------|-------------|
+| `contynu-openclaw` npm plugin | Bridges OpenClaw lifecycle hooks to Contynu CLI |
+| `contynu ingest` | Accepts JSONL events from the plugin |
+| `contynu export-memory` | Outputs importance-ranked Markdown for MEMORY.md |
+| `contynu openclaw setup` | Auto-configures MCP server in OpenClaw config |
+
+### Per-Agent Memory Isolation
+
+Each OpenClaw agent gets its own Contynu project. Memory is not shared between agents, but when the model behind an agent changes (e.g., Claude to GPT), the new model inherits the agent's full memory.
+
+### MEMORY.md Write-Back
+
+Uses OpenClaw's native marker format with `<!-- contynu-memory-sync:start/end -->` markers. Coexists with user content and dreaming promotions. Size-limited to prevent 20K char truncation.
+
+---
+
+## 18. Recent Additions (v0.3.0 – v0.4.0+)
+
+| Feature | Version | Description |
+|---------|---------|-------------|
+| Temporal validity | v0.4.0 | `valid_from`/`valid_to` fields on memories, schema v3 |
+| Progressive loading | v0.4.0 | L0 project identity + L1 compressed brief (~500 tokens) |
+| Conversation import | v0.4.0 | `contynu import` for Claude JSONL, Codex, Gemini, ChatGPT |
+| Auto-import | v0.4.0 | Scans Codex/Gemini session dirs on first launch |
+| Compressed briefs | v0.4.0 | Abbreviated kind prefixes (D/C/F/T), 100-char truncation |
+| OpenClaw plugin | v0.3.0 | afterTurn capture, pre-compaction checkpoint, MEMORY.md write-back |
+| Event ingestion API | v0.3.0 | `contynu ingest` for external event sources |
+| Memory export | v0.3.0 | `contynu export-memory` with marker-delimited sections |
+| Default Markdown fallback | v0.3.0 | Universal format for open-source models |
+
+---
+
+*This document reflects Contynu v0.4.0+ as of April 2026.*

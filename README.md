@@ -31,12 +31,6 @@ Prebuilt binaries are available for:
 - macOS (x86_64, Apple Silicon)
 - Windows (x86_64, aarch64)
 
-You can override the install directory or version:
-
-```bash
-CONTYNU_INSTALL_DIR="$HOME/bin" CONTYNU_VERSION="v0.2.1" sh ./scripts/install.sh
-```
-
 ## Quick Start
 
 ```bash
@@ -48,11 +42,13 @@ contynu gemini     # wraps Gemini CLI — has full context from both
 
 That's it. No configuration needed. Contynu auto-detects the LLM, captures the session, and transfers memory on the next handoff.
 
+Existing Codex and Gemini conversation history is **auto-imported** on first launch — your prior work is immediately searchable.
+
 ## How It Works
 
 1. **Capture** — Contynu wraps your LLM CLI and records every interaction to an append-only journal
-2. **Extract** — Facts, decisions, constraints, and context are extracted as structured memory objects
-3. **Transfer** — When you switch models, Contynu delivers the accumulated memory in the format each model understands best (XML for Claude, Markdown for Codex, structured text for Gemini)
+2. **Extract** — Facts, decisions, constraints, and context are extracted as structured memory objects with importance scoring
+3. **Transfer** — When you switch models, Contynu delivers the accumulated memory in the format each model understands best (XML for Claude, Markdown for Codex/GPT, structured text for Gemini)
 4. **Recall** — An MCP server lets any model search the full project history on demand
 
 ## Key Features
@@ -60,19 +56,59 @@ That's it. No configuration needed. Contynu auto-detects the LLM, captures the s
 - **Cross-model memory transfer** — Facts from Claude are available in Codex and Gemini
 - **Importance-ranked memories** — Scored by importance, recency, and confidence so critical decisions always transfer
 - **Model-aware rendering** — Each model receives context in its optimal format
-- **MCP server** — LLMs query the full memory archive via `search_memory`, `list_memories`, and `search_events`
+- **Progressive loading** — L0 project identity (~50 tokens) + L1 compact brief (~500 tokens) always in context, with deep recall via MCP
+- **Temporal validity** — Memories track when facts become stale (valid_from/valid_to)
+- **MCP server** — LLMs query the full memory archive via `search_memory`, `list_memories`, and `search_events` with pagination
 - **Auto-registration** — MCP server registers itself with each CLI automatically
+- **Auto-import** — Existing Codex and Gemini session histories are imported on first launch
+- **Conversation import** — Import from Claude JSONL, Codex rollout, Gemini sessions, and ChatGPT exports
 - **Indefinite memory** — Append-only JSONL journal with SHA-256 checksums; nothing is ever lost
 - **Local-first** — All data stays on your machine. SQLite + JSONL + content-addressed blobs
 - **Zero config** — Replace `claude` with `contynu claude`. Works immediately
 
+## OpenClaw Integration
+
+Contynu provides permanent memory for [OpenClaw](https://github.com/openclaw/openclaw) agents via the `contynu-openclaw` plugin.
+
+### Setup
+
+```bash
+# One-time setup
+contynu openclaw setup
+
+# Install the plugin
+npm install -g contynu-openclaw
+```
+
+### What It Does
+
+- **Captures every conversation turn** — via OpenClaw's `afterTurn()` lifecycle hook
+- **Protects against compaction loss** — checkpoints before compaction fires
+- **Writes back to MEMORY.md** — importance-ranked facts in OpenClaw's native format
+- **MCP tools for deep recall** — agents can search the full project history on demand
+- **Per-agent memory isolation** — each agent gets its own Contynu project
+- **Model-agnostic** — works with any model OpenClaw supports (Anthropic, OpenAI, Google, Llama, Mistral, DeepSeek, Ollama)
+
+### OpenClaw Issues Addressed
+
+| Issue | Problem | With Contynu |
+|-------|---------|-------------|
+| #5429 | 45 hours lost to silent compaction | Pre-compaction checkpoint — nothing lost |
+| #7477 | Compaction fails silently | MEMORY.md + MCP ensure context always available |
+| #25947 | Safety constraints deleted | Constraints ranked highest, persist in MEMORY.md |
+| #31781 | No importance-based memory | Built-in importance scoring and budget management |
+| #39885 | No session memory | Persistent forever in append-only journal |
+
+See [`packages/contynu-openclaw/`](packages/contynu-openclaw/) for the plugin source.
+
 ## Architecture
 
 - **Canonical truth:** Append-only JSONL journal (one per project)
-- **Structured metadata:** SQLite with WAL mode
+- **Structured metadata:** SQLite with WAL mode (schema v3)
 - **Large content:** Content-addressed local blob store (SHA-256)
 - **Recovery:** Deterministic rehydration packets with budget-aware assembly
-- **Memory:** Typed objects (Fact, Constraint, Decision, Todo, Summary) with importance scoring and provenance
+- **Memory:** Typed objects (Fact, Constraint, Decision, Todo, Summary) with importance scoring, temporal validity, and provenance tracking
+- **Progressive loading:** L0 identity + L1 compressed brief always in context; L2/L3 via MCP
 - **MCP:** Stdio JSON-RPC server with search, list, and event query tools
 - **Runtime:** Local CLI wrapper with PTY/pipe/script-based capture
 
@@ -91,6 +127,8 @@ That's it. No configuration needed. Contynu auto-detects the LLM, captures the s
       chk_<id>/
         manifest.json
         rehydration.json
+  imported-sessions.json      # tracks auto-imported session files
+  openclaw-agents.json        # agent-to-project mapping (OpenClaw)
 ```
 
 ## CLI Reference
@@ -116,6 +154,19 @@ contynu search memory "auth"      # Search memory objects
 contynu search exact "JWT"        # Search event payloads
 ```
 
+### Import & Ingest
+
+```bash
+contynu import session.jsonl      # Import Claude JSONL
+contynu import rollout-*.jsonl    # Import Codex sessions
+contynu import session-*.json     # Import Gemini sessions
+contynu import conversations.json # Import ChatGPT export
+contynu ingest --project prj_xxx  # Ingest JSONL events from stdin
+contynu export-memory --with-markers  # Export as Markdown with markers
+```
+
+Formats are auto-detected. Existing Codex and Gemini sessions are auto-imported on first launch.
+
 ### MCP Server
 
 ```bash
@@ -123,6 +174,13 @@ contynu mcp-server                # Start stdio MCP server (used by LLM CLIs)
 ```
 
 The MCP server auto-registers with Claude (`.mcp.json`), Codex (`config.toml`), and Gemini (`gemini mcp add`) on first launch. LLMs can then call `search_memory`, `list_memories`, and `search_events` tools directly.
+
+### OpenClaw Integration
+
+```bash
+contynu openclaw setup            # Configure Contynu for OpenClaw
+contynu openclaw status           # Check integration health
+```
 
 ### Other Commands
 
@@ -160,21 +218,24 @@ Unknown LLM CLIs can be taught to Contynu via `.contynu/config.json`:
 }
 ```
 
-## Developer Setup
-
-```bash
-cargo test
-cargo fmt --check
-```
-
 ## Documentation
 
+- [`docs/contynu-technical-overview.md`](docs/contynu-technical-overview.md) — Complete technical reference
 - [`docs/architecture.md`](docs/architecture.md) — System design blueprint
 - [`docs/cli.md`](docs/cli.md) — CLI command reference
 - [`docs/adapter-architecture.md`](docs/adapter-architecture.md) — Adapter system design
 - [`docs/rehydration.md`](docs/rehydration.md) — Rehydration packet structure
 - [`docs/crash-recovery.md`](docs/crash-recovery.md) — Durability and recovery
 - [`docs/handoff-summary.md`](docs/handoff-summary.md) — Model handoff capabilities
+- [`packages/contynu-openclaw/`](packages/contynu-openclaw/) — OpenClaw plugin
+
+## Developer Setup
+
+```bash
+cargo test
+cargo fmt --check
+cd packages/contynu-openclaw && npm install && npm test
+```
 
 ## Creators
 
