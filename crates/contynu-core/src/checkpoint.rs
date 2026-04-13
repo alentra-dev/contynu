@@ -1,13 +1,17 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
+use crate::blobs::BlobStore;
+use crate::distiller;
+use crate::error::Result;
+use crate::ids::{CheckpointId, ProjectId, SessionId};
+use crate::state::StatePaths;
+use crate::store::{
+    CheckpointRecord, MemoryObject, MemoryObjectKind, MetadataStore, WorkingSetEntry,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use crate::blobs::BlobStore;
-use crate::error::Result;
-use crate::ids::{CheckpointId, MemoryId, ProjectId, SessionId};
-use crate::state::StatePaths;
-use crate::store::{CheckpointRecord, MemoryObject, MemoryObjectKind, MetadataStore};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RehydrationArtifact {
@@ -55,12 +59,49 @@ pub struct RehydrationPacket {
     pub decisions: Vec<String>,
     pub current_state: String,
     pub open_loops: Vec<String>,
+    #[serde(default)]
+    pub user_facts: Vec<String>,
+    #[serde(default)]
+    pub project_knowledge: Vec<String>,
     pub relevant_artifacts: Vec<RehydrationArtifact>,
     pub relevant_files: Vec<String>,
     pub recent_verbatim_context: Vec<String>,
     pub retrieval_guidance: Vec<String>,
     #[serde(default)]
+    pub recent_changes: Vec<String>,
+    #[serde(default)]
+    pub first_run: bool,
+    #[serde(default)]
     pub memory_provenance: Vec<MemoryProvenance>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiRehydrationPacket {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub project_identity: String,
+    #[serde(default)]
+    pub compact_brief: String,
+    pub project_id: ProjectId,
+    pub target_model: Option<String>,
+    pub mission: String,
+    pub stable_facts: Vec<String>,
+    pub constraints: Vec<String>,
+    pub decisions: Vec<String>,
+    pub current_state: String,
+    pub open_loops: Vec<String>,
+    #[serde(default)]
+    pub user_facts: Vec<String>,
+    #[serde(default)]
+    pub project_knowledge: Vec<String>,
+    pub relevant_artifacts: Vec<RehydrationArtifact>,
+    pub relevant_files: Vec<String>,
+    pub recent_verbatim_context: Vec<String>,
+    pub retrieval_guidance: Vec<String>,
+    #[serde(default)]
+    pub recent_changes: Vec<String>,
+    #[serde(default)]
+    pub first_run: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,8 +138,9 @@ impl<'a> CheckpointManager<'a> {
         session_id: &SessionId,
         reason: &str,
         target_model: Option<String>,
+        budget: &PacketBudget,
     ) -> Result<(CheckpointManifest, RehydrationPacket)> {
-        let packet = self.build_packet(session_id, target_model)?;
+        let packet = self.build_packet_with_budget(session_id, target_model, budget)?;
         let packet_json = serde_json::to_string_pretty(&packet)?;
         let packet_blob = self.blob_store.put_text(&packet_json)?;
         self.store
@@ -152,27 +194,103 @@ impl<'a> CheckpointManager<'a> {
     ) -> Result<RehydrationPacket> {
         let memory = self.store.list_active_memories(session_id, None)?;
         let recent_prompts = self.store.list_recent_prompts(session_id, 5)?;
+        let existing_working_set = self
+            .store
+            .list_working_set(session_id, 12)
+            .unwrap_or_default();
+        let working_set_ids: HashSet<_> = existing_working_set
+            .iter()
+            .map(|entry| entry.memory_id.clone())
+            .collect();
+        let now = Utc::now();
 
         // Mission: latest user prompt
         let mission = recent_prompts
             .first()
             .map(|p| p.verbatim.clone())
             .unwrap_or_else(|| "Continue the session faithfully from canonical state.".into());
+        let prompt_query = recent_prompts
+            .first()
+            .map(|p| p.verbatim.as_str())
+            .unwrap_or("");
 
         let mut provenance = Vec::new();
         let mut accessed_ids = Vec::new();
+        let slices = PacketSlices::from_budget(budget);
 
-        let (stable_facts, fact_ids) =
-            select_memories(&memory, MemoryObjectKind::Fact, budget);
-        let (constraints, constraint_ids) =
-            select_memories(&memory, MemoryObjectKind::Constraint, budget);
-        let (decisions, decision_ids) =
-            select_memories(&memory, MemoryObjectKind::Decision, budget);
-        let (open_loops, todo_ids) =
-            select_memories(&memory, MemoryObjectKind::Todo, budget);
+        let constraint_memories = select_ranked_memories(
+            &memory,
+            &[MemoryObjectKind::Constraint],
+            prompt_query,
+            slices.constraint_tokens,
+            budget.max_per_category.min(6),
+            now,
+            &working_set_ids,
+        );
+        let decision_memories = select_ranked_memories(
+            &memory,
+            &[MemoryObjectKind::Decision],
+            prompt_query,
+            slices.decision_tokens,
+            budget.max_per_category.min(6),
+            now,
+            &working_set_ids,
+        );
+        let open_loop_memories = select_ranked_memories(
+            &memory,
+            &[MemoryObjectKind::Todo],
+            prompt_query,
+            slices.open_loop_tokens,
+            budget.max_per_category.min(6),
+            now,
+            &working_set_ids,
+        );
+        let durable_memories = select_ranked_memories(
+            &memory,
+            &[
+                MemoryObjectKind::Fact,
+                MemoryObjectKind::UserFact,
+                MemoryObjectKind::ProjectKnowledge,
+            ],
+            prompt_query,
+            slices.durable_tokens,
+            budget.max_per_category.max(8),
+            now,
+            &working_set_ids,
+        );
 
-        for ids in [&fact_ids, &constraint_ids, &decision_ids, &todo_ids] {
-            accessed_ids.extend(ids.iter().cloned());
+        let constraints = memories_to_texts(&constraint_memories);
+        let decisions = memories_to_texts(&decision_memories);
+        let open_loops = memories_to_texts(&open_loop_memories);
+        let stable_facts = memories_to_texts(
+            &durable_memories
+                .iter()
+                .copied()
+                .filter(|m| m.kind == MemoryObjectKind::Fact)
+                .collect::<Vec<_>>(),
+        );
+        let user_facts = memories_to_texts(
+            &durable_memories
+                .iter()
+                .copied()
+                .filter(|m| m.kind == MemoryObjectKind::UserFact)
+                .collect::<Vec<_>>(),
+        );
+        let project_knowledge = memories_to_texts(
+            &durable_memories
+                .iter()
+                .copied()
+                .filter(|m| m.kind == MemoryObjectKind::ProjectKnowledge)
+                .collect::<Vec<_>>(),
+        );
+
+        for selected in [
+            &constraint_memories,
+            &decision_memories,
+            &open_loop_memories,
+            &durable_memories,
+        ] {
+            accessed_ids.extend(selected.iter().map(|m| m.memory_id.clone()));
         }
 
         // Build provenance from the selected memories
@@ -189,11 +307,29 @@ impl<'a> CheckpointManager<'a> {
 
         // Track access for included memories
         let _ = self.store.increment_memory_access(&accessed_ids);
+        self.refresh_working_set(
+            session_id,
+            &constraint_memories,
+            &decision_memories,
+            &open_loop_memories,
+            &durable_memories,
+            now,
+        );
+        self.record_packet_observation(
+            session_id,
+            &constraint_memories,
+            &decision_memories,
+            &open_loop_memories,
+            &durable_memories,
+            budget,
+            now,
+        );
 
         // Recent verbatim context from recorded prompts
         let recent_verbatim_context: Vec<String> = recent_prompts
             .iter()
             .rev()
+            .take(3)
             .map(|p| {
                 if let Some(ref interp) = p.interpretation {
                     format!("User: {} (interpreted as: {})", p.verbatim, interp)
@@ -203,13 +339,15 @@ impl<'a> CheckpointManager<'a> {
             })
             .collect();
 
+        let first_run = memory.is_empty() && recent_prompts.is_empty();
+        let recent_changes = build_recent_changes(&memory, &recent_prompts, prompt_query, now);
+
         let current_state = if let Some(prompt) = recent_prompts.first() {
             format!("The latest user request was: {}", prompt.verbatim)
+        } else if first_run {
+            "This project is starting fresh. No prior Contynu memory has been recorded yet.".into()
         } else {
-            format!(
-                "Session has {} active memory objects.",
-                memory.len(),
-            )
+            format!("Session has {} active memory objects.", memory.len(),)
         };
 
         // L0: Project identity
@@ -225,11 +363,18 @@ impl<'a> CheckpointManager<'a> {
             format!("Project {}", session_id)
         };
 
-        // L1: Compact brief — top 15 memories, one line each
+        // L1: Compact brief — selected memories only, ordered by relevance.
         let mut brief_lines = Vec::new();
         let mut brief_chars = 0usize;
-        let max_brief_chars = 2000;
-        for m in &memory {
+        let max_brief_chars = 1200;
+        let mut brief_memories = Vec::new();
+        brief_memories.extend(decision_memories.iter().copied());
+        brief_memories.extend(constraint_memories.iter().copied());
+        brief_memories.extend(open_loop_memories.iter().copied());
+        brief_memories.extend(durable_memories.iter().copied());
+        dedup_memories(&mut brief_memories);
+
+        for m in brief_memories {
             let text = m.text.trim();
             let kind_abbrev = match m.kind {
                 MemoryObjectKind::Fact => "F",
@@ -245,7 +390,7 @@ impl<'a> CheckpointManager<'a> {
             }
             brief_lines.push(line.clone());
             brief_chars += line.len();
-            if brief_lines.len() >= 15 {
+            if brief_lines.len() >= 10 {
                 break;
             }
         }
@@ -258,6 +403,7 @@ impl<'a> CheckpointManager<'a> {
             "Call record_prompt with the user's verbatim input at each stop point.".into(),
             "Call search_memory to check for existing knowledge before duplicating.".into(),
             "Call update_memory to correct or refine existing memories instead of creating duplicates.".into(),
+            "Call suggest_consolidation periodically to find redundant memory clusters, then call consolidate_memories to merge them into Golden Facts.".into(),
         ];
 
         Ok(RehydrationPacket {
@@ -272,12 +418,132 @@ impl<'a> CheckpointManager<'a> {
             decisions,
             current_state,
             open_loops,
+            user_facts,
+            project_knowledge,
             relevant_artifacts: Vec::new(),
             relevant_files: Vec::new(),
             recent_verbatim_context,
             retrieval_guidance,
+            recent_changes,
+            first_run,
             memory_provenance: provenance,
         })
+    }
+
+    fn refresh_working_set(
+        &self,
+        session_id: &SessionId,
+        constraint_memories: &[&MemoryObject],
+        decision_memories: &[&MemoryObject],
+        open_loop_memories: &[&MemoryObject],
+        durable_memories: &[&MemoryObject],
+        now: DateTime<Utc>,
+    ) {
+        let mut ordered = Vec::new();
+        ordered.extend(
+            decision_memories
+                .iter()
+                .copied()
+                .map(|m| (m, 1.0, "decision")),
+        );
+        ordered.extend(
+            constraint_memories
+                .iter()
+                .copied()
+                .map(|m| (m, 0.95, "constraint")),
+        );
+        ordered.extend(
+            open_loop_memories
+                .iter()
+                .copied()
+                .map(|m| (m, 0.9, "open_loop")),
+        );
+        ordered.extend(
+            durable_memories
+                .iter()
+                .copied()
+                .map(|m| (m, 0.8, "durable")),
+        );
+
+        let mut seen = HashSet::new();
+        let entries: Vec<WorkingSetEntry> = ordered
+            .into_iter()
+            .filter(|(m, _, _)| seen.insert(m.memory_id.to_string()))
+            .take(12)
+            .map(|(m, rank_score, reason)| WorkingSetEntry {
+                session_id: session_id.clone(),
+                memory_id: m.memory_id.clone(),
+                rank_score,
+                source_reason: Some(reason.into()),
+                refreshed_at: now,
+            })
+            .collect();
+
+        let _ = self.store.replace_working_set(session_id, &entries);
+    }
+
+    fn record_packet_observation(
+        &self,
+        session_id: &SessionId,
+        constraint_memories: &[&MemoryObject],
+        decision_memories: &[&MemoryObject],
+        open_loop_memories: &[&MemoryObject],
+        durable_memories: &[&MemoryObject],
+        budget: &PacketBudget,
+        now: DateTime<Utc>,
+    ) {
+        let hygiene_candidates = distiller::suggest_consolidation(self.store, session_id)
+            .map(|c| c.len())
+            .unwrap_or(0);
+        let summary = serde_json::json!({
+            "session_id": session_id,
+            "created_at": now.to_rfc3339(),
+            "budget": {
+                "max_total_tokens": budget.max_total_tokens,
+                "max_per_category": budget.max_per_category,
+                "min_per_category": budget.min_per_category,
+            },
+            "packet": {
+                "constraint_count": constraint_memories.len(),
+                "decision_count": decision_memories.len(),
+                "open_loop_count": open_loop_memories.len(),
+                "durable_count": durable_memories.len(),
+                "hygiene_candidate_count": hygiene_candidates,
+            },
+            "selected": {
+                "constraints": summarize_selected(constraint_memories),
+                "decisions": summarize_selected(decision_memories),
+                "open_loops": summarize_selected(open_loop_memories),
+                "durable": summarize_selected(durable_memories),
+            }
+        });
+        let _ = self
+            .store
+            .record_packet_observation(session_id, &summary.to_string());
+    }
+}
+
+pub fn sanitize_packet(packet: &RehydrationPacket) -> AiRehydrationPacket {
+    AiRehydrationPacket {
+        schema_version: packet.schema_version,
+        project_identity: packet.project_identity.clone(),
+        compact_brief: packet.compact_brief.clone(),
+        project_id: packet.project_id.clone(),
+        target_model: packet.target_model.clone(),
+        mission: packet.mission.clone(),
+        stable_facts: packet.stable_facts.clone(),
+        constraints: packet.constraints.clone(),
+        decisions: packet.decisions.clone(),
+        current_state: packet.current_state.clone(),
+        open_loops: packet.open_loops.clone(),
+        user_facts: packet.user_facts.clone(),
+        project_knowledge: packet.project_knowledge.clone(),
+        relevant_artifacts: packet.relevant_artifacts.clone(),
+        relevant_files: packet.relevant_files.clone(),
+        recent_verbatim_context: packet.recent_verbatim_context.clone(),
+        retrieval_guidance: packet.retrieval_guidance.clone(),
+        recent_changes: packet.recent_changes.clone(),
+        first_run: packet.first_run,
     }
 }
 
@@ -295,38 +561,203 @@ pub fn render_launcher_prompt(packet: &RehydrationPacket) -> String {
     crate::rendering::render_launcher(packet, crate::rendering::PromptFormat::StructuredText)
 }
 
-/// Selects the top memories by importance within the budget.
-/// Returns (selected texts, selected memory IDs).
-fn select_memories(
-    memories: &[MemoryObject],
-    kind: MemoryObjectKind,
-    budget: &PacketBudget,
-) -> (Vec<String>, Vec<MemoryId>) {
-    // Memories are already sorted by importance DESC from the store query
-    let filtered: Vec<&MemoryObject> = memories
+struct PacketSlices {
+    constraint_tokens: usize,
+    decision_tokens: usize,
+    open_loop_tokens: usize,
+    durable_tokens: usize,
+}
+
+impl PacketSlices {
+    fn from_budget(budget: &PacketBudget) -> Self {
+        let total = budget.max_total_tokens.max(400);
+        let available = total.saturating_sub(220);
+        Self {
+            constraint_tokens: available * 18 / 100,
+            decision_tokens: available * 18 / 100,
+            open_loop_tokens: available * 18 / 100,
+            durable_tokens: available * 46 / 100,
+        }
+    }
+}
+
+fn memories_to_texts(memories: &[&MemoryObject]) -> Vec<String> {
+    memories.iter().map(|m| m.text.clone()).collect()
+}
+
+fn dedup_memories(memories: &mut Vec<&MemoryObject>) {
+    let mut seen = HashSet::new();
+    memories.retain(|m| seen.insert(m.memory_id.to_string()));
+}
+
+fn select_ranked_memories<'a>(
+    memories: &'a [MemoryObject],
+    kinds: &[MemoryObjectKind],
+    prompt_query: &str,
+    token_budget: usize,
+    max_items: usize,
+    now: DateTime<Utc>,
+    working_set_ids: &HashSet<crate::ids::MemoryId>,
+) -> Vec<&'a MemoryObject> {
+    let mut ranked: Vec<&MemoryObject> = memories
         .iter()
-        .filter(|m| m.kind == kind)
+        .filter(|m| kinds.contains(&m.kind))
         .collect();
+    ranked.sort_by(|a, b| {
+        let score_a = memory_priority(a, prompt_query, now, working_set_ids);
+        let score_b = memory_priority(b, prompt_query, now, working_set_ids);
+        score_b
+            .partial_cmp(&score_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.created_at.cmp(&a.created_at))
+    });
 
-    let limit = budget.max_per_category.max(budget.min_per_category);
-    let token_budget = budget.max_total_tokens / 4;
-    let mut texts = Vec::new();
-    let mut ids = Vec::new();
-    let mut token_estimate = 0usize;
-
-    for m in filtered.iter().take(limit) {
-        let word_count = m.text.split_whitespace().count();
-        let tokens = (word_count as f64 * 1.3) as usize;
-        if token_estimate + tokens > token_budget && texts.len() >= budget.min_per_category {
+    let mut selected = Vec::new();
+    let mut used_tokens = 0usize;
+    for memory in ranked {
+        let tokens = estimate_tokens(&memory.text);
+        if !selected.is_empty() && used_tokens + tokens > token_budget {
+            continue;
+        }
+        selected.push(memory);
+        used_tokens += tokens;
+        if selected.len() >= max_items {
             break;
         }
-        // Full text, no truncation
-        texts.push(m.text.clone());
-        ids.push(m.memory_id.clone());
-        token_estimate += tokens;
+    }
+    selected
+}
+
+fn memory_priority(
+    memory: &MemoryObject,
+    prompt_query: &str,
+    now: DateTime<Utc>,
+    working_set_ids: &HashSet<crate::ids::MemoryId>,
+) -> f64 {
+    let age_days = now
+        .signed_duration_since(memory.updated_at.unwrap_or(memory.created_at))
+        .num_hours()
+        .max(0) as f64
+        / 24.0;
+    let recency = 1.0 / (1.0 + age_days / 7.0);
+    let lexical = lexical_relevance(prompt_query, &memory.text);
+    let access = ((memory.access_count.min(10) as f64) / 10.0).clamp(0.0, 1.0);
+    let scope = match memory.scope {
+        crate::store::MemoryScope::Project => 1.0,
+        crate::store::MemoryScope::User => 0.9,
+        crate::store::MemoryScope::Session => 0.75,
+    };
+    let working_set_boost = if working_set_ids.contains(&memory.memory_id) {
+        0.12
+    } else {
+        0.0
+    };
+
+    (memory.importance * 0.4)
+        + (lexical * 0.3)
+        + (recency * 0.1)
+        + (access * 0.05)
+        + (scope * 0.03)
+        + working_set_boost
+}
+
+fn lexical_relevance(query: &str, text: &str) -> f64 {
+    let query_terms = normalize_terms(query);
+    if query_terms.is_empty() {
+        return 0.0;
+    }
+    let text_terms = normalize_terms(text);
+    if text_terms.is_empty() {
+        return 0.0;
+    }
+    let overlap = query_terms.intersection(&text_terms).count() as f64;
+    overlap / query_terms.len() as f64
+}
+
+fn normalize_terms(text: &str) -> HashSet<String> {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|token| token.len() >= 3)
+        .map(|token| token.to_ascii_lowercase())
+        .collect()
+}
+
+fn estimate_tokens(text: &str) -> usize {
+    ((text.split_whitespace().count() as f64) * 1.3).ceil() as usize
+}
+
+fn summarize_selected(memories: &[&MemoryObject]) -> Vec<serde_json::Value> {
+    memories
+        .iter()
+        .map(|memory| {
+            serde_json::json!({
+                "memory_id": memory.memory_id.as_str(),
+                "kind": memory.kind.as_str(),
+                "importance": memory.importance,
+                "source": memory.source_model,
+                "text_preview": one_line_preview(&memory.text, 120),
+            })
+        })
+        .collect()
+}
+
+fn one_line_preview(text: &str, max_chars: usize) -> String {
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.len() <= max_chars {
+        one_line
+    } else {
+        format!("{}...", &one_line[..max_chars.saturating_sub(3)])
+    }
+}
+
+fn build_recent_changes(
+    memories: &[MemoryObject],
+    recent_prompts: &[crate::store::PromptRecord],
+    prompt_query: &str,
+    now: DateTime<Utc>,
+) -> Vec<String> {
+    let mut changes = Vec::new();
+    let empty_working_set = HashSet::new();
+
+    if let Some(prompt) = recent_prompts.first() {
+        changes.push(format!("Latest user request: {}", prompt.verbatim.trim()));
     }
 
-    (texts, ids)
+    let mut recent_memories: Vec<&MemoryObject> = memories.iter().collect();
+    recent_memories.sort_by(|a, b| {
+        let score_a = memory_priority(a, prompt_query, now, &empty_working_set);
+        let score_b = memory_priority(b, prompt_query, now, &empty_working_set);
+        score_b
+            .partial_cmp(&score_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    for memory in recent_memories {
+        let label = match memory.kind {
+            MemoryObjectKind::Decision => Some("Decision"),
+            MemoryObjectKind::Constraint => Some("Constraint"),
+            MemoryObjectKind::Todo => Some("Open thread"),
+            MemoryObjectKind::Fact => Some("Fact"),
+            MemoryObjectKind::UserFact => Some("User fact"),
+            MemoryObjectKind::ProjectKnowledge => Some("Project knowledge"),
+        };
+
+        if let Some(label) = label {
+            let text = memory.text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            let line = format!("{label}: {text}");
+            if !changes.contains(&line) {
+                changes.push(line);
+            }
+        }
+
+        if changes.len() >= 6 {
+            break;
+        }
+    }
+
+    changes
 }
 
 fn path_string(path: &Path) -> String {
@@ -337,7 +768,9 @@ fn path_string(path: &Path) -> String {
 mod tests {
     use tempfile::tempdir;
 
-    use super::{render_launcher_prompt, CheckpointManager, RehydrationPacket};
+    use super::{
+        render_launcher_prompt, sanitize_packet, CheckpointManager, PacketBudget, RehydrationPacket,
+    };
     use crate::blobs::BlobStore;
     use crate::ids::{MemoryId, ProjectId, SessionId};
     use crate::state::StatePaths;
@@ -353,21 +786,22 @@ mod tests {
             project_id: ProjectId::parse("prj_019d503680a475a3ae465200a90cd4fa").unwrap(),
             target_model: None,
             mission: "Continue the session faithfully from canonical state.".into(),
-            stable_facts: vec![
-                "Frank secret santa is Dun".into(),
-            ],
+            stable_facts: vec!["Frank secret santa is Dun".into()],
             constraints: Vec::new(),
             decisions: vec!["Keep this in continuity memory".into()],
-            current_state:
-                "The latest user request was: what is the name of Frank's secret santa?"
-                    .into(),
+            current_state: "The latest user request was: what is the name of Frank's secret santa?"
+                .into(),
             open_loops: vec!["Confirm the next model can recall Frank's secret santa.".into()],
+            user_facts: Vec::new(),
+            project_knowledge: Vec::new(),
             relevant_artifacts: Vec::new(),
             relevant_files: Vec::new(),
-            recent_verbatim_context: vec![
-                "User: what is the name of Frank's secret santa?".into(),
-            ],
+            recent_verbatim_context: vec!["User: what is the name of Frank's secret santa?".into()],
             retrieval_guidance: Vec::new(),
+            recent_changes: vec![
+                "Latest user request: what is the name of Frank's secret santa?".into(),
+            ],
+            first_run: false,
             memory_provenance: Vec::new(),
         }
     }
@@ -386,7 +820,7 @@ mod tests {
             "The user corrected the spelling of Frank's name and wants that remembered.".into();
         let prompt = render_launcher_prompt(&packet);
         assert!(prompt.contains(
-            "Current focus: The user corrected the spelling of Frank's name and wants that remembered."
+            "Last Focus: The user corrected the spelling of Frank's name and wants that remembered."
         ));
     }
 
@@ -449,7 +883,7 @@ mod tests {
 
         let manager = CheckpointManager::new(&state, &store, &blobs);
         let (manifest, packet) = manager
-            .create_checkpoint(&session_id, "test", None)
+            .create_checkpoint(&session_id, "test", None, &PacketBudget::default())
             .unwrap();
 
         assert_eq!(manifest.project_id, session_id);
@@ -484,7 +918,10 @@ mod tests {
 
         for (verbatim, interp) in [
             ("why is the sky blue?", None),
-            ("what did you just say about the sky?", Some("Recalling previous answer about Rayleigh scattering")),
+            (
+                "what did you just say about the sky?",
+                Some("Recalling previous answer about Rayleigh scattering"),
+            ),
         ] {
             store
                 .insert_prompt(&PromptRecord {
@@ -507,5 +944,224 @@ mod tests {
             .recent_verbatim_context
             .iter()
             .any(|line| line.contains("why is the sky blue?")));
+        assert!(
+            packet
+                .recent_changes
+                .iter()
+                .any(|line| line
+                    .contains("Latest user request: what did you just say about the sky?"))
+        );
+    }
+
+    #[test]
+    fn build_packet_marks_first_run_when_no_memory_exists() {
+        let dir = tempdir().unwrap();
+        let state = StatePaths::new(dir.path().join(".contynu"));
+        state.ensure_layout().unwrap();
+
+        let store = MetadataStore::open(state.sqlite_db()).unwrap();
+        let blobs = BlobStore::new(state.blobs_root());
+        let session_id = SessionId::new();
+
+        store
+            .register_session(&SessionRecord {
+                session_id: session_id.clone(),
+                project_id: None,
+                status: "started".into(),
+                cli_name: Some("codex_cli".into()),
+                cli_version: None,
+                model_name: None,
+                cwd: None,
+                repo_root: None,
+                host_fingerprint: None,
+                started_at: chrono::Utc::now(),
+                ended_at: None,
+            })
+            .unwrap();
+
+        let manager = CheckpointManager::new(&state, &store, &blobs);
+        let packet = manager.build_packet(&session_id, None).unwrap();
+
+        assert!(packet.first_run);
+        assert!(packet.current_state.contains("starting fresh"));
+        assert!(packet.recent_changes.is_empty());
+    }
+
+    #[test]
+    fn build_packet_prefers_prompt_relevant_memory_under_budget() {
+        let dir = tempdir().unwrap();
+        let state = StatePaths::new(dir.path().join(".contynu"));
+        state.ensure_layout().unwrap();
+
+        let store = MetadataStore::open(state.sqlite_db()).unwrap();
+        let blobs = BlobStore::new(state.blobs_root());
+        let session_id = SessionId::new();
+
+        store
+            .register_session(&SessionRecord {
+                session_id: session_id.clone(),
+                project_id: None,
+                status: "started".into(),
+                cli_name: Some("codex_cli".into()),
+                cli_version: None,
+                model_name: None,
+                cwd: None,
+                repo_root: None,
+                host_fingerprint: None,
+                started_at: chrono::Utc::now(),
+                ended_at: None,
+            })
+            .unwrap();
+
+        store
+            .insert_prompt(&PromptRecord {
+                prompt_id: "pmt_rel".into(),
+                session_id: session_id.clone(),
+                verbatim: "Fix the authentication bug in the login flow".into(),
+                interpretation: None,
+                interpretation_confidence: None,
+                source_model: None,
+                created_at: chrono::Utc::now(),
+            })
+            .unwrap();
+
+        for (text, importance) in [
+            (
+                "Authentication bug occurs in the login flow because the token parser trims the bearer prefix incorrectly",
+                0.65,
+            ),
+            (
+                "The project mascot is a blue heron used in marketing screenshots and stickers",
+                0.95,
+            ),
+        ] {
+            store
+                .insert_memory_object(&MemoryObject {
+                    memory_id: MemoryId::new(),
+                    session_id: session_id.clone(),
+                    kind: MemoryObjectKind::Fact,
+                    scope: MemoryScope::Project,
+                    status: "active".into(),
+                    text: text.into(),
+                    importance,
+                    reason: None,
+                    source_model: None,
+                    superseded_by: None,
+                    created_at: chrono::Utc::now(),
+                    updated_at: None,
+                    access_count: 0,
+                    last_accessed_at: None,
+                })
+                .unwrap();
+        }
+
+        let manager = CheckpointManager::new(&state, &store, &blobs);
+        let packet = manager
+            .build_packet_with_budget(
+                &session_id,
+                None,
+                &PacketBudget {
+                    max_total_tokens: 260,
+                    max_per_category: 4,
+                    min_per_category: 1,
+                },
+            )
+            .unwrap();
+
+        assert!(packet
+            .stable_facts
+            .iter()
+            .any(|fact| fact.contains("Authentication bug occurs in the login flow")));
+    }
+
+    #[test]
+    fn build_packet_promotes_ingested_external_memory_into_working_set() {
+        let dir = tempdir().unwrap();
+        let state = StatePaths::new(dir.path().join(".contynu"));
+        state.ensure_layout().unwrap();
+
+        let store = MetadataStore::open(state.sqlite_db()).unwrap();
+        let blobs = BlobStore::new(state.blobs_root());
+        let session_id = SessionId::new();
+
+        store
+            .register_session(&SessionRecord {
+                session_id: session_id.clone(),
+                project_id: None,
+                status: "started".into(),
+                cli_name: Some("codex_cli".into()),
+                cli_version: None,
+                model_name: None,
+                cwd: None,
+                repo_root: None,
+                host_fingerprint: None,
+                started_at: chrono::Utc::now(),
+                ended_at: None,
+            })
+            .unwrap();
+
+        store
+            .insert_prompt(&PromptRecord {
+                prompt_id: "pmt_ingested".into(),
+                session_id: session_id.clone(),
+                verbatim: "Continue debugging the authentication bug".into(),
+                interpretation: None,
+                interpretation_confidence: None,
+                source_model: None,
+                created_at: chrono::Utc::now(),
+            })
+            .unwrap();
+
+        let external_memory_id = MemoryId::new();
+        store
+            .insert_memory_object(&MemoryObject {
+                memory_id: external_memory_id.clone(),
+                session_id: session_id.clone(),
+                kind: MemoryObjectKind::ProjectKnowledge,
+                scope: MemoryScope::Project,
+                status: "active".into(),
+                text:
+                    "Authentication bug narrowed down to the bearer token parser in the login flow"
+                        .into(),
+                importance: 0.72,
+                reason: Some("Ingested from Codex history session abc123".into()),
+                source_model: Some("codex".into()),
+                superseded_by: None,
+                created_at: chrono::Utc::now(),
+                updated_at: None,
+                access_count: 0,
+                last_accessed_at: None,
+            })
+            .unwrap();
+
+        let manager = CheckpointManager::new(&state, &store, &blobs);
+        let packet = manager.build_packet(&session_id, None).unwrap();
+        assert!(packet
+            .project_knowledge
+            .iter()
+            .any(|item| item.contains("bearer token parser")));
+
+        let working_set = store.list_working_set(&session_id, 10).unwrap();
+        assert!(working_set
+            .iter()
+            .any(|entry| entry.memory_id == external_memory_id));
+    }
+
+    #[test]
+    fn sanitize_packet_removes_provenance_for_ai_delivery() {
+        let mut packet = prompt_packet();
+        packet
+            .memory_provenance
+            .push(crate::checkpoint::MemoryProvenance {
+                memory_id: "mem_123".into(),
+                kind: "fact".into(),
+                source_model: Some("codex/gpt-5".into()),
+                importance: 0.9,
+            });
+
+        let value = serde_json::to_value(sanitize_packet(&packet)).unwrap();
+        assert!(value.get("memory_provenance").is_none());
+        let rendered = serde_json::to_string(&value).unwrap();
+        assert!(!rendered.contains("source_model"));
     }
 }

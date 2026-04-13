@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Contynu - Persistent Memory for AI Coding Assistants | Claude, Codex, Gemini</title>
-  <meta name="description" content="Give your AI coding tools persistent memory across sessions. Contynu lets Claude, Codex, and Gemini remember facts, decisions, and context — so you never re-explain your project again. Open source, local-first, model-agnostic.">
+  <meta name="description" content="Give your AI coding tools persistent memory across sessions. Contynu lets Claude, Codex, and Gemini continue with ranked durable context, startup session ingestion, and provider-native hydration surfaces. Open source, local-first, model-agnostic.">
   <meta name="keywords" content="AI memory, LLM memory, Claude memory, Codex memory, Gemini memory, persistent context, AI coding assistant, MCP server, model context protocol, cross-model memory, AI developer tools">
   <meta name="author" content="Udonna Eke-Okoro">
   <meta name="robots" content="index, follow">
@@ -12,7 +12,7 @@
 
   <!-- Open Graph -->
   <meta property="og:title" content="Contynu - Persistent Memory for AI Coding Assistants">
-  <meta property="og:description" content="Your AI tools forget everything between sessions. Contynu fixes this. Model-agnostic persistent memory for Claude, Codex, and Gemini.">
+  <meta property="og:description" content="Your AI tools forget everything between sessions. Contynu fixes this with invisible continuity, startup ingestion, and provider-native hydration for Claude, Codex, and Gemini.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://contynu.com/">
   <meta property="og:site_name" content="Contynu">
@@ -21,7 +21,7 @@
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Contynu - Persistent Memory for AI Coding Assistants">
-  <meta name="twitter:description" content="Stop re-explaining your project to every AI model. Contynu gives Claude, Codex, and Gemini persistent memory that transfers across sessions.">
+  <meta name="twitter:description" content="Stop re-explaining your project to every AI model. Contynu gives Claude, Codex, and Gemini persistent memory that transfers across sessions and feels like continuation instead of rehydration.">
 
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
 
@@ -60,7 +60,7 @@
         "name": "How does Contynu give AI models persistent memory?",
         "acceptedAnswer": {
           "@type": "Answer",
-          "text": "Contynu provides MCP (Model Context Protocol) tools that let AI models write, update, and search memories directly. When you start a new session, the model receives a rehydration packet containing all relevant memories from prior sessions — facts, decisions, constraints, and recent context."
+          "text": "Contynu provides MCP tools that let AI models write, update, search, and consolidate memories directly. On startup it ingests missing external session state, then delivers a ranked rehydration packet that emphasizes current goals, recent changes, constraints, and durable context."
         }
       },
       {
@@ -68,7 +68,7 @@
         "name": "Which AI coding assistants does Contynu support?",
         "acceptedAnswer": {
           "@type": "Answer",
-          "text": "Contynu works with Claude Code, OpenAI Codex CLI, Google Gemini CLI, and OpenClaw agents. It renders context in the optimal format for each model: XML for Claude, Markdown for Codex, and structured text for Gemini."
+          "text": "Contynu works with Claude Code, OpenAI Codex CLI, Google Gemini CLI, and OpenClaw agents. It renders context in the optimal format for each model: XML for Claude, AGENTS.md-first Markdown for Codex, and structured text for Gemini."
         }
       },
       {
@@ -84,7 +84,7 @@
         "name": "How is Contynu different from CLAUDE.md or AGENTS.md memory files?",
         "acceptedAnswer": {
           "@type": "Answer",
-          "text": "Memory files are static text that models can't update during a session. Contynu provides live MCP tools (write_memory, update_memory, delete_memory, search_memory) that let models actively curate their own memory in real-time, with scoped memories (user-level, project-level, session-level), importance ratings, and structured kinds (facts, decisions, constraints, todos)."
+          "text": "Memory files are static text that models can't update during a session. Contynu provides live MCP tools that let models actively curate their own memory in real time, plus Dream Phase consolidation tools, working-set carry-forward, and provider-native hydration surfaces such as AGENTS.md for Codex and GEMINI.md for Gemini."
         }
       }
     ]
@@ -399,7 +399,7 @@
     </div>
     <div class="hero-badge">Open Source &middot; Early Access</div>
     <h1>Memory that<br><span class="gradient">persists</span></h1>
-    <p>Persistent memory for AI coding assistants. Facts, decisions, and context transfer seamlessly between Claude, Codex, and Gemini &mdash; so you never re-explain your project again.</p>
+    <p>Persistent memory for AI coding assistants. Ranked durable context, startup session ingestion, and provider-native hydration let Claude, Codex, and Gemini continue work instead of starting cold.</p>
     <div class="hero-actions">
       <a href="https://github.com/alentra-dev/contynu" class="btn-primary" target="_blank" rel="noopener">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
@@ -470,17 +470,17 @@
       <div class="feature-card">
         <div class="feature-icon">&harr;</div>
         <h3>Cross-Model Memory Transfer</h3>
-        <p>Memory flows seamlessly between Claude, Codex, and Gemini. Each model receives context in its optimal format &mdash; XML, Markdown, or structured text. Switch models without losing a single fact.</p>
+        <p>Memory flows seamlessly between Claude, Codex, and Gemini. Each model receives context in its optimal format &mdash; XML for Claude, AGENTS.md-first continuation for Codex, and structured text for Gemini. Switch models without losing a single fact.</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon" style="font-size:1.1rem;">&#x1F9E0;</div>
         <h3>Model-Driven Memory</h3>
-        <p>AI models write their own memories via MCP tools &mdash; <code>write_memory</code>, <code>update_memory</code>, <code>delete_memory</code>. The model decides what's worth remembering. No heuristics, no noise.</p>
+        <p>AI models write their own memories via MCP tools &mdash; including write, update, delete, search, and Dream Phase consolidation. The model decides what's worth remembering. No transcript heuristics, no fake summaries.</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">&#x1F50D;</div>
-        <h3>MCP Memory Recall</h3>
-        <p>Models search and browse memories on demand via <code>search_memory</code> and <code>list_memories</code>. Keyword search, kind filtering, scope filtering, and pagination. Auto-registers with every CLI.</p>
+        <h3>Invisible Continuity</h3>
+        <p>Contynu now ranks memories against the latest prompt, carries forward a working set, and ingests missing Claude/Codex/Gemini session files at startup. The next model sees what matters now, not a memory dump.</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">&#x26A1;</div>
@@ -490,12 +490,12 @@
       <div class="feature-card">
         <div class="feature-icon" style="font-size:1.2rem;">&#x1F419;</div>
         <h3>OpenClaw Plugin</h3>
-        <p>Give OpenClaw agents permanent memory. Survives compaction, model switches, and session boundaries. Addresses issues <a href="https://github.com/openclaw/openclaw/issues/5429" target="_blank" rel="noopener">#5429</a>, <a href="https://github.com/openclaw/openclaw/issues/25947" target="_blank" rel="noopener">#25947</a>, and more.</p>
+        <p>Give OpenClaw agents permanent memory. It records prompts, writes project knowledge, checkpoints before compaction, writes back to <code>MEMORY.md</code>, and keeps the full Contynu MCP tool surface available. Addresses issues <a href="https://github.com/openclaw/openclaw/issues/5429" target="_blank" rel="noopener">#5429</a>, <a href="https://github.com/openclaw/openclaw/issues/25947" target="_blank" rel="noopener">#25947</a>, and more.</p>
       </div>
       <div class="feature-card">
         <div class="feature-icon">&#x1F512;</div>
         <h3>Local-First &amp; Zero Config</h3>
-        <p>All data stays on your machine. No cloud, no accounts, no fees. Replace <code>claude</code> with <code>contynu claude</code>. Auto-detection, auto-registration, auto-hydration. Works immediately.</p>
+        <p>All data stays on your machine. No cloud, no accounts, no fees. Replace <code>claude</code> with <code>contynu claude</code>. Auto-detection, auto-registration, auto-hydration, and startup release checks are built in.</p>
       </div>
     </div>
   </div>
@@ -537,6 +537,14 @@
 <span style="color:var(--violet)">&gt;</span> search_memory(query="authentication")
 <span style="color:var(--sky)">&#x2713;</span> Found: "Use HMAC-SHA256 for tokens" (decision, importance: 0.9)</code></pre>
     </div>
+    <div class="code-tabs">
+      <span class="label">Startup updates and continuity checks</span>
+      <pre><code><span style="color:var(--slate-400)"># On launch, Contynu checks for a newer binary for this OS/arch:</span>
+<span style="color:var(--violet)">&gt;</span> A newer Contynu release is available for this environment: v0.x.y
+<span style="color:var(--violet)">&gt;</span> [m] manual update  [a] auto update now  [s] skip for this launch
+
+<span style="color:var(--slate-400)"># It also ingests missing external session memory before the next turn.</span></code></pre>
+    </div>
   </div>
 </section>
 
@@ -545,7 +553,7 @@
   <div class="container">
     <h2>OpenClaw agents forget. <span style="background:var(--gradient);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;">Contynu makes them remember.</span></h2>
     <p style="text-align:center; color:var(--slate-400); max-width:640px; margin:-2rem auto 3rem;">
-      The <code>contynu-openclaw</code> plugin gives every OpenClaw agent permanent memory that survives compaction, model switches, and session boundaries. Zero changes to OpenClaw's codebase.
+      The <code>contynu-openclaw</code> plugin gives every OpenClaw agent permanent memory that survives compaction, model switches, and session boundaries. It records prompts after each turn, checkpoints before compaction, writes ranked facts back to <code>MEMORY.md</code>, and uses the bundled <code>contynu mcp-server</code> for direct memory access.
     </p>
     <div class="features-grid" style="grid-template-columns: repeat(2, 1fr);">
       <div class="feature-card">
@@ -554,13 +562,14 @@
       </div>
       <div class="feature-card">
         <h3 style="color:var(--sky);">The fix</h3>
-        <p>Contynu checkpoints before compaction fires, writes importance-ranked facts to MEMORY.md, and gives agents MCP tools to write, search, and update the full memory archive. One setup command, then it works silently in the background.</p>
+        <p>Contynu checkpoints before compaction fires, writes importance-ranked facts to <code>MEMORY.md</code>, and gives agents the full MCP tool surface for write, search, update, delete, prompt recording, and Dream Phase consolidation. The plugin runs Contynu subprocesses non-interactively, so normal OpenClaw hooks stay silent and deterministic.</p>
       </div>
     </div>
     <div class="code-tabs" style="margin-top:2rem;">
       <span class="label">Setup (one time)</span>
       <pre><code><span style="color:var(--sky)">$</span> contynu openclaw setup
-<span style="color:var(--sky)">$</span> npm install -g contynu-openclaw</code></pre>
+<span style="color:var(--sky)">$</span> openclaw plugins install contynu-openclaw --dangerously-force-unsafe-install
+<span style="color:var(--sky)">$</span> openclaw plugins enable contynu-openclaw</code></pre>
     </div>
   </div>
 </section>
@@ -572,15 +581,19 @@
     <div class="faq-list">
       <article class="faq-item">
         <h3>How does Contynu give AI models persistent memory?</h3>
-        <p>Contynu provides MCP (Model Context Protocol) tools that let AI models write, update, and search memories directly. When you start a new session, the model receives a rehydration packet containing all relevant memories from prior sessions &mdash; facts, decisions, constraints, and recent prompts. The model is a conscious participant in its own memory management.</p>
+        <p>Contynu provides MCP tools that let AI models write, update, search, and consolidate memories directly. When you start a new session, Contynu first ingests missing external session state, then delivers a ranked packet focused on current goals, recent changes, constraints, and durable context. The model is a conscious participant in its own memory management.</p>
       </article>
       <article class="faq-item">
         <h3>Which AI coding assistants does Contynu support?</h3>
-        <p>Contynu works with Claude Code, OpenAI Codex CLI, Google Gemini CLI, and OpenClaw agents. It renders context in the optimal format for each model: XML for Claude, Markdown for Codex, and structured text for Gemini.</p>
+        <p>Contynu works with Claude Code, OpenAI Codex CLI, Google Gemini CLI, and OpenClaw agents. It renders context in the optimal format for each model: XML for Claude, AGENTS.md-first Markdown for Codex, and structured text for Gemini.</p>
       </article>
       <article class="faq-item">
         <h3>How is this different from CLAUDE.md or memory files?</h3>
-        <p>Memory files are static text that models can't update during a session. Contynu provides live MCP tools (<code>write_memory</code>, <code>update_memory</code>, <code>delete_memory</code>, <code>search_memory</code>) that let models actively curate their own memory in real-time, with scoped memories (user-level, project-level, session-level), importance ratings, and structured kinds.</p>
+        <p>Memory files are static text that models can't update during a session. Contynu provides live MCP tools plus Dream Phase consolidation, working-set carry-forward, and startup ingestion of missing external session files. It behaves more like continuous state than a static memory note.</p>
+      </article>
+      <article class="faq-item">
+        <h3>How do updates work?</h3>
+        <p>Interactive Contynu launches check GitHub Releases for a newer binary that matches the OS and architecture of the currently running environment. If one exists, Contynu offers an exact manual update command or an auto-update path using the release installer. The MCP server subcommand skips the prompt because stdio must stay clean.</p>
       </article>
       <article class="faq-item">
         <h3>Is my data sent to the cloud?</h3>

@@ -4,7 +4,8 @@ use serde_json::{json, Value};
 use chrono::{DateTime, Utc};
 
 use crate::blobs::BlobStore;
-use crate::checkpoint::CheckpointManager;
+use crate::checkpoint::{sanitize_packet, CheckpointManager};
+use crate::config::ContynuConfig;
 use crate::error::Result;
 use crate::ids::{MemoryId, ProjectId};
 use crate::state::StatePaths;
@@ -47,7 +48,12 @@ pub struct JsonRpcError {
 
 impl JsonRpcResponse {
     pub fn ok(id: Option<Value>, result: Value) -> Self {
-        Self { jsonrpc: "2.0", id, result: Some(result), error: None }
+        Self {
+            jsonrpc: "2.0",
+            id,
+            result: Some(result),
+            error: None,
+        }
     }
 
     pub fn err(id: Option<Value>, code: i64, message: impl Into<String>) -> Self {
@@ -55,7 +61,11 @@ impl JsonRpcResponse {
             jsonrpc: "2.0",
             id,
             result: None,
-            error: Some(JsonRpcError { code, message: message.into(), data: None }),
+            error: Some(JsonRpcError {
+                code,
+                message: message.into(),
+                data: None,
+            }),
         }
     }
 
@@ -110,14 +120,20 @@ pub struct McpContent {
 impl McpToolResult {
     fn text(s: String) -> Self {
         Self {
-            content: vec![McpContent { content_type: "text".into(), text: s }],
+            content: vec![McpContent {
+                content_type: "text".into(),
+                text: s,
+            }],
             is_error: None,
         }
     }
 
     fn error(msg: String) -> Self {
         Self {
-            content: vec![McpContent { content_type: "text".into(), text: msg }],
+            content: vec![McpContent {
+                content_type: "text".into(),
+                text: msg,
+            }],
             is_error: Some(true),
         }
     }
@@ -138,14 +154,16 @@ pub struct McpDispatcher {
 }
 
 impl McpDispatcher {
-    pub fn new(
-        state_dir: &std::path::Path,
-        active_project: ProjectId,
-    ) -> Result<Self> {
+    pub fn new(state_dir: &std::path::Path, active_project: ProjectId) -> Result<Self> {
         let state = StatePaths::new(state_dir);
         let store = MetadataStore::open(state.sqlite_db())?;
         let blob_store = BlobStore::new(state.blobs_root());
-        Ok(Self { store, state, blob_store, active_project })
+        Ok(Self {
+            store,
+            state,
+            blob_store,
+            active_project,
+        })
     }
 
     /// For testing: construct from already-opened components.
@@ -155,7 +173,12 @@ impl McpDispatcher {
         blob_store: BlobStore,
         active_project: ProjectId,
     ) -> Self {
-        Self { store, state, blob_store, active_project }
+        Self {
+            store,
+            state,
+            blob_store,
+            active_project,
+        }
     }
 
     pub fn handle_request(&self, req: &JsonRpcRequest) -> Option<JsonRpcResponse> {
@@ -171,17 +194,20 @@ impl McpDispatcher {
     }
 
     fn handle_initialize(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
-        JsonRpcResponse::ok(req.id.clone(), json!({
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {
-                "tools": {},
-                "resources": {}
-            },
-            "serverInfo": {
-                "name": SERVER_NAME,
-                "version": env!("CARGO_PKG_VERSION")
-            }
-        }))
+        JsonRpcResponse::ok(
+            req.id.clone(),
+            json!({
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {
+                    "tools": {},
+                    "resources": {}
+                },
+                "serverInfo": {
+                    "name": SERVER_NAME,
+                    "version": env!("CARGO_PKG_VERSION")
+                }
+            }),
+        )
     }
 
     fn handle_tools_list(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
@@ -189,10 +215,16 @@ impl McpDispatcher {
     }
 
     fn handle_tools_call(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
-        let name = req.params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let name = req
+            .params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let arguments = req.params.get("arguments").cloned().unwrap_or(json!({}));
         match self.call_tool(name, &arguments) {
-            Ok(result) => JsonRpcResponse::ok(req.id.clone(), serde_json::to_value(result).unwrap()),
+            Ok(result) => {
+                JsonRpcResponse::ok(req.id.clone(), serde_json::to_value(result).unwrap())
+            }
             Err(e) => JsonRpcResponse::ok(
                 req.id.clone(),
                 serde_json::to_value(McpToolResult::error(e.to_string())).unwrap(),
@@ -201,15 +233,21 @@ impl McpDispatcher {
     }
 
     fn handle_resources_list(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
-        JsonRpcResponse::ok(req.id.clone(), json!({ "resources": self.list_resources() }))
+        JsonRpcResponse::ok(
+            req.id.clone(),
+            json!({ "resources": self.list_resources() }),
+        )
     }
 
     fn handle_resources_read(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let uri = req.params.get("uri").and_then(|v| v.as_str()).unwrap_or("");
         match self.read_resource(uri) {
-            Ok(content) => JsonRpcResponse::ok(req.id.clone(), json!({
-                "contents": [content]
-            })),
+            Ok(content) => JsonRpcResponse::ok(
+                req.id.clone(),
+                json!({
+                    "contents": [content]
+                }),
+            ),
             Err(e) => JsonRpcResponse::invalid_params(
                 req.id.clone(),
                 format!("Failed to read resource: {e}"),
@@ -307,6 +345,33 @@ impl McpDispatcher {
                     "required": ["verbatim"]
                 }),
             },
+            McpTool {
+                name: "suggest_consolidation".into(),
+                description: "Dream Phase: scan project memories for clusters of related, redundant memories that could be consolidated into a single high-fidelity 'Golden Fact'. Returns candidate clusters with their texts and similarity scores. Call this when you notice memory noise, or periodically to keep the memory clean.".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+            McpTool {
+                name: "consolidate_memories".into(),
+                description: "Dream Phase: merge multiple related memories into a single consolidated 'Golden Fact'. The original memories are atomically superseded (not deleted — they remain traceable via the superseded_by chain). Provide the IDs of the memories to merge and your synthesized summary. The summary MUST preserve all specific technical details (SHAs, paths, versions) from the originals.".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "memory_ids": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "IDs of the memories to consolidate (mem_xxx format). Minimum 2."
+                        },
+                        "consolidated_text": { "type": "string", "description": "Your synthesized Golden Fact — a single, unified memory that captures all critical information from the originals" },
+                        "kind": { "type": "string", "description": "Kind for the consolidated memory: fact, constraint, decision, todo, user_fact, project_knowledge" },
+                        "importance": { "type": "number", "description": "Importance score for the Golden Fact (0.0-1.0). Should typically be >= the max importance of the originals." },
+                        "reason": { "type": "string", "description": "Why these memories were consolidated — cite the date range or topic" }
+                    },
+                    "required": ["memory_ids", "consolidated_text", "kind"]
+                }),
+            },
         ]
     }
 
@@ -318,6 +383,8 @@ impl McpDispatcher {
             "update_memory" => self.tool_update_memory(arguments),
             "delete_memory" => self.tool_delete_memory(arguments),
             "record_prompt" => self.tool_record_prompt(arguments),
+            "suggest_consolidation" => self.tool_suggest_consolidation(arguments),
+            "consolidate_memories" => self.tool_consolidate_memories(arguments),
             _ => Ok(McpToolResult::error(format!("Unknown tool: {name}"))),
         }
     }
@@ -326,8 +393,14 @@ impl McpDispatcher {
         let query = MemoryQuery {
             session_id: Some(self.active_project.clone()),
             text_query: args.get("query").and_then(|v| v.as_str()).map(String::from),
-            kind: args.get("kind").and_then(|v| v.as_str()).and_then(MemoryObjectKind::from_str),
-            scope: args.get("scope").and_then(|v| v.as_str()).and_then(MemoryScope::from_str),
+            kind: args
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .and_then(MemoryObjectKind::from_str),
+            scope: args
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .and_then(MemoryScope::from_str),
             after: parse_datetime_arg(args, "after"),
             before: parse_datetime_arg(args, "before"),
             sort_by: parse_sort_by(args),
@@ -342,15 +415,7 @@ impl McpDispatcher {
             "end of results"
         };
 
-        let results: Vec<Value> = memories.iter().map(|m| json!({
-            "memory_id": m.memory_id.as_str(),
-            "kind": m.kind.as_str(),
-            "scope": m.scope.as_str(),
-            "text": m.text,
-            "importance": m.importance,
-            "source_model": m.source_model,
-            "created_at": m.created_at.to_rfc3339(),
-        })).collect();
+        let results: Vec<Value> = memories.iter().map(|m| format_memory_result(m)).collect();
 
         let output = json!({
             "results": results,
@@ -365,8 +430,14 @@ impl McpDispatcher {
         let query = MemoryQuery {
             session_id: Some(self.active_project.clone()),
             text_query: None,
-            kind: args.get("kind").and_then(|v| v.as_str()).and_then(MemoryObjectKind::from_str),
-            scope: args.get("scope").and_then(|v| v.as_str()).and_then(MemoryScope::from_str),
+            kind: args
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .and_then(MemoryObjectKind::from_str),
+            scope: args
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .and_then(MemoryScope::from_str),
             after: None,
             before: None,
             sort_by: parse_sort_by(args),
@@ -381,14 +452,7 @@ impl McpDispatcher {
             "end of results"
         };
 
-        let results: Vec<Value> = memories.iter().map(|m| json!({
-            "memory_id": m.memory_id.as_str(),
-            "kind": m.kind.as_str(),
-            "scope": m.scope.as_str(),
-            "text": m.text,
-            "importance": m.importance,
-            "created_at": m.created_at.to_rfc3339(),
-        })).collect();
+        let results: Vec<Value> = memories.iter().map(|m| format_memory_result(m)).collect();
 
         let output = json!({
             "results": results,
@@ -410,16 +474,35 @@ impl McpDispatcher {
                 "kind parameter is required and must be one of: fact, constraint, decision, todo, user_fact, project_knowledge".into()
             )),
         };
-        let scope = args.get("scope")
+        let scope = args
+            .get("scope")
             .and_then(|v| v.as_str())
             .and_then(MemoryScope::from_str)
             .unwrap_or(MemoryScope::Project);
-        let importance = args.get("importance").and_then(|v| v.as_f64()).unwrap_or(0.5).clamp(0.0, 1.0);
-        let reason = args.get("reason").and_then(|v| v.as_str()).map(String::from);
+        let importance = args
+            .get("importance")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.5)
+            .clamp(0.0, 1.0);
+        let reason = args
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
-        // Detect the source model from environment if available
+        // Detect source from environment if available (stored internally, not exposed to AI)
         let source_model = std::env::var("CONTYNU_SOURCE_MODEL").ok();
+        let source_adapter = std::env::var("CONTYNU_SOURCE_ADAPTER").ok();
+        // Combine adapter and model for richer internal tracking
+        let source_info = source_adapter
+            .map(|a| {
+                source_model
+                    .as_ref()
+                    .map(|m| format!("{a}/{m}"))
+                    .unwrap_or(a)
+            })
+            .or(source_model);
 
+        let now = Utc::now();
         let memory_id = MemoryId::new();
         self.store.insert_memory_object(&MemoryObject {
             memory_id: memory_id.clone(),
@@ -430,25 +513,33 @@ impl McpDispatcher {
             text: text.into(),
             importance,
             reason,
-            source_model,
+            source_model: source_info,
             superseded_by: None,
-            created_at: Utc::now(),
+            created_at: now,
             updated_at: None,
             access_count: 0,
             last_accessed_at: None,
         })?;
 
-        Ok(McpToolResult::text(json!({
-            "status": "ok",
-            "memory_id": memory_id.as_str(),
-            "message": "Memory stored successfully"
-        }).to_string()))
+        Ok(McpToolResult::text(
+            json!({
+                "status": "ok",
+                "memory_id": memory_id.as_str(),
+                "message": "Memory stored successfully",
+                "created_at": now.to_rfc3339(),
+            })
+            .to_string(),
+        ))
     }
 
     fn tool_update_memory(&self, args: &Value) -> Result<McpToolResult> {
         let memory_id_str = match args.get("memory_id").and_then(|v| v.as_str()) {
             Some(id) => id,
-            None => return Ok(McpToolResult::error("memory_id parameter is required".into())),
+            None => {
+                return Ok(McpToolResult::error(
+                    "memory_id parameter is required".into(),
+                ))
+            }
         };
         let memory_id = match MemoryId::parse(memory_id_str) {
             Ok(id) => id,
@@ -458,22 +549,36 @@ impl McpDispatcher {
             Some(t) if !t.is_empty() => t,
             _ => return Ok(McpToolResult::error("text parameter is required".into())),
         };
-        let importance = args.get("importance").and_then(|v| v.as_f64()).unwrap_or(0.5).clamp(0.0, 1.0);
+        let importance = args
+            .get("importance")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.5)
+            .clamp(0.0, 1.0);
         let reason = args.get("reason").and_then(|v| v.as_str());
 
-        self.store.update_memory_text(&memory_id, text, importance, reason)?;
+        self.store
+            .update_memory_text(&memory_id, text, importance, reason)?;
+        let now = Utc::now();
 
-        Ok(McpToolResult::text(json!({
-            "status": "ok",
-            "memory_id": memory_id.as_str(),
-            "message": "Memory updated successfully"
-        }).to_string()))
+        Ok(McpToolResult::text(
+            json!({
+                "status": "ok",
+                "memory_id": memory_id.as_str(),
+                "message": "Memory updated successfully",
+                "updated_at": now.to_rfc3339(),
+            })
+            .to_string(),
+        ))
     }
 
     fn tool_delete_memory(&self, args: &Value) -> Result<McpToolResult> {
         let memory_id_str = match args.get("memory_id").and_then(|v| v.as_str()) {
             Some(id) => id,
-            None => return Ok(McpToolResult::error("memory_id parameter is required".into())),
+            None => {
+                return Ok(McpToolResult::error(
+                    "memory_id parameter is required".into(),
+                ))
+            }
         };
         let memory_id = match MemoryId::parse(memory_id_str) {
             Ok(id) => id,
@@ -481,23 +586,38 @@ impl McpDispatcher {
         };
 
         self.store.delete_memory(&memory_id)?;
+        let now = Utc::now();
 
-        Ok(McpToolResult::text(json!({
-            "status": "ok",
-            "memory_id": memory_id.as_str(),
-            "message": "Memory deleted"
-        }).to_string()))
+        Ok(McpToolResult::text(
+            json!({
+                "status": "ok",
+                "memory_id": memory_id.as_str(),
+                "message": "Memory deleted",
+                "deleted_at": now.to_rfc3339(),
+            })
+            .to_string(),
+        ))
     }
 
     fn tool_record_prompt(&self, args: &Value) -> Result<McpToolResult> {
         let verbatim = match args.get("verbatim").and_then(|v| v.as_str()) {
             Some(v) if !v.is_empty() => v,
-            _ => return Ok(McpToolResult::error("verbatim parameter is required".into())),
+            _ => {
+                return Ok(McpToolResult::error(
+                    "verbatim parameter is required".into(),
+                ))
+            }
         };
-        let interpretation = args.get("interpretation").and_then(|v| v.as_str()).map(String::from);
-        let interpretation_confidence = args.get("interpretation_confidence").and_then(|v| v.as_f64());
+        let interpretation = args
+            .get("interpretation")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let interpretation_confidence = args
+            .get("interpretation_confidence")
+            .and_then(|v| v.as_f64());
         let source_model = std::env::var("CONTYNU_SOURCE_MODEL").ok();
 
+        let now = Utc::now();
         let prompt_id = format!("pmt_{}", uuid::Uuid::now_v7().simple());
         self.store.insert_prompt(&PromptRecord {
             prompt_id: prompt_id.clone(),
@@ -506,14 +626,167 @@ impl McpDispatcher {
             interpretation,
             interpretation_confidence,
             source_model,
-            created_at: Utc::now(),
+            created_at: now,
         })?;
 
-        Ok(McpToolResult::text(json!({
+        Ok(McpToolResult::text(
+            json!({
+                "status": "ok",
+                "prompt_id": prompt_id,
+                "message": "Prompt recorded",
+                "created_at": now.to_rfc3339(),
+            })
+            .to_string(),
+        ))
+    }
+
+    fn tool_suggest_consolidation(&self, _args: &Value) -> Result<McpToolResult> {
+        let candidates =
+            crate::distiller::suggest_consolidation(&self.store, &self.active_project)?;
+
+        if candidates.is_empty() {
+            return Ok(McpToolResult::text(
+                json!({
+                    "status": "ok",
+                    "message": "No consolidation candidates found. Memory is clean.",
+                    "candidates": [],
+                })
+                .to_string(),
+            ));
+        }
+
+        let candidate_json: Vec<Value> = candidates
+            .iter()
+            .map(|c| {
+                json!({
+                    "kind": c.kind.as_str(),
+                    "memory_ids": c.memory_ids.iter().map(|id| id.as_str()).collect::<Vec<_>>(),
+                    "texts": c.texts,
+                    "avg_similarity": (c.avg_similarity * 100.0).round() / 100.0,
+                })
+            })
+            .collect();
+
+        Ok(McpToolResult::text(serde_json::to_string_pretty(&json!({
             "status": "ok",
-            "prompt_id": prompt_id,
-            "message": "Prompt recorded"
-        }).to_string()))
+            "message": format!("Found {} consolidation candidates. Review each cluster and call consolidate_memories with your synthesized Golden Fact.", candidates.len()),
+            "candidates": candidate_json,
+        }))?))
+    }
+
+    fn tool_consolidate_memories(&self, args: &Value) -> Result<McpToolResult> {
+        // Parse memory_ids
+        let memory_ids: Vec<MemoryId> = match args.get("memory_ids").and_then(|v| v.as_array()) {
+            Some(arr) if arr.len() >= 2 => {
+                let mut ids = Vec::new();
+                for v in arr {
+                    match v.as_str().and_then(|s| MemoryId::parse(s).ok()) {
+                        Some(id) => ids.push(id),
+                        None => {
+                            return Ok(McpToolResult::error(format!("Invalid memory_id: {}", v)))
+                        }
+                    }
+                }
+                ids
+            }
+            Some(_) => {
+                return Ok(McpToolResult::error(
+                    "memory_ids must contain at least 2 IDs".into(),
+                ))
+            }
+            None => {
+                return Ok(McpToolResult::error(
+                    "memory_ids parameter is required (array of mem_xxx strings)".into(),
+                ))
+            }
+        };
+
+        let consolidated_text = match args.get("consolidated_text").and_then(|v| v.as_str()) {
+            Some(t) if !t.is_empty() => t,
+            _ => {
+                return Ok(McpToolResult::error(
+                    "consolidated_text parameter is required".into(),
+                ))
+            }
+        };
+
+        let kind = match args.get("kind").and_then(|v| v.as_str()).and_then(MemoryObjectKind::from_str) {
+            Some(k) => k,
+            None => return Ok(McpToolResult::error(
+                "kind parameter is required and must be one of: fact, constraint, decision, todo, user_fact, project_knowledge".into()
+            )),
+        };
+
+        let importance = args
+            .get("importance")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.8)
+            .clamp(0.0, 1.0);
+        let reason = args
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        // Verify all memories exist and are active before consolidating
+        for id in &memory_ids {
+            match self.store.get_memory(id)? {
+                Some(m) if m.status == "active" => {}
+                Some(_) => {
+                    return Ok(McpToolResult::error(format!(
+                        "Memory {} is not active — cannot consolidate",
+                        id.as_str()
+                    )))
+                }
+                None => {
+                    return Ok(McpToolResult::error(format!(
+                        "Memory {} not found",
+                        id.as_str()
+                    )))
+                }
+            }
+        }
+
+        let source_model = std::env::var("CONTYNU_SOURCE_MODEL").ok();
+        let source_adapter = std::env::var("CONTYNU_SOURCE_ADAPTER").ok();
+        let source_info = source_adapter
+            .map(|a| {
+                source_model
+                    .as_ref()
+                    .map(|m| format!("{a}/{m}"))
+                    .unwrap_or(a)
+            })
+            .or(source_model);
+
+        let now = Utc::now();
+        let golden = MemoryObject {
+            memory_id: MemoryId::new(),
+            session_id: self.active_project.clone(),
+            kind,
+            scope: MemoryScope::Project,
+            status: "active".into(),
+            text: consolidated_text.into(),
+            importance,
+            reason,
+            source_model: source_info,
+            superseded_by: None,
+            created_at: now,
+            updated_at: None,
+            access_count: 0,
+            last_accessed_at: None,
+        };
+
+        let superseded = self.store.consolidate_memories(&memory_ids, &golden)?;
+
+        Ok(McpToolResult::text(
+            json!({
+                "status": "ok",
+                "message": format!("Consolidated {} memories into Golden Fact", superseded),
+                "golden_memory_id": golden.memory_id.as_str(),
+                "superseded_count": superseded,
+                "created_at": now.to_rfc3339(),
+            })
+            .to_string(),
+        ))
     }
 
     // -----------------------------------------------------------------------
@@ -535,34 +808,56 @@ impl McpDispatcher {
         match uri {
             "contynu://project/brief" => {
                 let manager = CheckpointManager::new(&self.state, &self.store, &self.blob_store);
-                let packet = manager.build_packet(&self.active_project, None)?;
+                let budget = ContynuConfig::load(&self.state.config_path())?
+                    .packet_budget
+                    .to_budget();
+                let packet =
+                    manager.build_packet_with_budget(&self.active_project, None, &budget)?;
                 Ok(json!({
                     "uri": uri,
                     "mimeType": "application/json",
-                    "text": serde_json::to_string_pretty(&packet)?,
+                    "text": serde_json::to_string_pretty(&sanitize_packet(&packet))?,
                 }))
             }
-            _ => Err(crate::error::ContynuError::Validation(
-                format!("Unknown resource URI: {uri}"),
-            )),
+            _ => Err(crate::error::ContynuError::Validation(format!(
+                "Unknown resource URI: {uri}"
+            ))),
         }
     }
 }
 
+/// Normalize memory result fields across all tool responses.
+/// Intentionally excludes source_model — each AI tool should treat all memories as its own.
+fn format_memory_result(m: &MemoryObject) -> Value {
+    let mut result = json!({
+        "memory_id": m.memory_id.as_str(),
+        "kind": m.kind.as_str(),
+        "scope": m.scope.as_str(),
+        "text": m.text,
+        "importance": m.importance,
+        "created_at": m.created_at.to_rfc3339(),
+    });
+    if let Some(ref reason) = m.reason {
+        result["reason"] = json!(reason);
+    }
+    if let Some(updated) = m.updated_at {
+        result["updated_at"] = json!(updated.to_rfc3339());
+    }
+    result
+}
+
 fn parse_datetime_arg(args: &Value, key: &str) -> Option<DateTime<Utc>> {
-    args.get(key)
-        .and_then(|v| v.as_str())
-        .and_then(|s| {
-            chrono::DateTime::parse_from_rfc3339(s)
-                .map(|dt| dt.with_timezone(&Utc))
-                .ok()
-                .or_else(|| {
-                    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
-                        .ok()
-                        .and_then(|d| d.and_hms_opt(0, 0, 0))
-                        .map(|dt| dt.and_utc())
-                })
-        })
+    args.get(key).and_then(|v| v.as_str()).and_then(|s| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .map(|dt| dt.with_timezone(&Utc))
+            .ok()
+            .or_else(|| {
+                chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                    .ok()
+                    .and_then(|d| d.and_hms_opt(0, 0, 0))
+                    .map(|dt| dt.and_utc())
+            })
+    })
 }
 
 fn parse_sort_by(args: &Value) -> MemorySortBy {
@@ -585,46 +880,80 @@ mod tests {
         let blob_store = BlobStore::new(state.blobs_root());
         let project_id = ProjectId::new();
 
-        store.register_session(&SessionRecord {
-            session_id: project_id.clone(),
-            project_id: None,
-            status: "active".into(),
-            cli_name: Some("claude_cli".into()),
-            cli_version: None,
-            model_name: None,
-            cwd: Some("/tmp/test".into()),
-            repo_root: None,
-            host_fingerprint: None,
-            started_at: chrono::Utc::now(),
-            ended_at: None,
-        }).unwrap();
+        store
+            .register_session(&SessionRecord {
+                session_id: project_id.clone(),
+                project_id: None,
+                status: "active".into(),
+                cli_name: Some("claude_cli".into()),
+                cli_version: None,
+                model_name: None,
+                cwd: Some("/tmp/test".into()),
+                repo_root: None,
+                host_fingerprint: None,
+                started_at: chrono::Utc::now(),
+                ended_at: None,
+            })
+            .unwrap();
         store.set_primary_project_id(&project_id).unwrap();
 
         // Insert test memories
         for (kind, scope, text, importance) in [
-            (MemoryObjectKind::Fact, MemoryScope::Project, "The API uses JWT authentication", 0.8),
-            (MemoryObjectKind::Fact, MemoryScope::Project, "Database is PostgreSQL 15", 0.7),
-            (MemoryObjectKind::Decision, MemoryScope::Project, "Use HMAC-SHA256 for token signing", 0.85),
-            (MemoryObjectKind::Constraint, MemoryScope::Project, "Must support backward compatibility", 0.9),
-            (MemoryObjectKind::Todo, MemoryScope::Project, "Implement token refresh endpoint", 0.75),
-            (MemoryObjectKind::Todo, MemoryScope::Project, "Add rate limiting", 0.75),
+            (
+                MemoryObjectKind::Fact,
+                MemoryScope::Project,
+                "The API uses JWT authentication",
+                0.8,
+            ),
+            (
+                MemoryObjectKind::Fact,
+                MemoryScope::Project,
+                "Database is PostgreSQL 15",
+                0.7,
+            ),
+            (
+                MemoryObjectKind::Decision,
+                MemoryScope::Project,
+                "Use HMAC-SHA256 for token signing",
+                0.85,
+            ),
+            (
+                MemoryObjectKind::Constraint,
+                MemoryScope::Project,
+                "Must support backward compatibility",
+                0.9,
+            ),
+            (
+                MemoryObjectKind::Todo,
+                MemoryScope::Project,
+                "Implement token refresh endpoint",
+                0.75,
+            ),
+            (
+                MemoryObjectKind::Todo,
+                MemoryScope::Project,
+                "Add rate limiting",
+                0.75,
+            ),
         ] {
-            store.insert_memory_object(&MemoryObject {
-                memory_id: crate::ids::MemoryId::new(),
-                session_id: project_id.clone(),
-                kind,
-                scope,
-                status: "active".into(),
-                text: text.into(),
-                importance,
-                reason: None,
-                source_model: None,
-                superseded_by: None,
-                created_at: chrono::Utc::now(),
-                updated_at: None,
-                access_count: 0,
-                last_accessed_at: None,
-            }).unwrap();
+            store
+                .insert_memory_object(&MemoryObject {
+                    memory_id: crate::ids::MemoryId::new(),
+                    session_id: project_id.clone(),
+                    kind,
+                    scope,
+                    status: "active".into(),
+                    text: text.into(),
+                    importance,
+                    reason: None,
+                    source_model: None,
+                    superseded_by: None,
+                    created_at: chrono::Utc::now(),
+                    updated_at: None,
+                    access_count: 0,
+                    last_accessed_at: None,
+                })
+                .unwrap();
         }
 
         McpDispatcher::from_parts(store, state, blob_store, project_id)
@@ -657,7 +986,7 @@ mod tests {
         };
         let resp = dispatcher.handle_request(&req).unwrap();
         let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 8);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"search_memory"));
         assert!(names.contains(&"list_memories"));
@@ -665,6 +994,8 @@ mod tests {
         assert!(names.contains(&"update_memory"));
         assert!(names.contains(&"delete_memory"));
         assert!(names.contains(&"record_prompt"));
+        assert!(names.contains(&"suggest_consolidation"));
+        assert!(names.contains(&"consolidate_memories"));
     }
 
     #[test]
@@ -692,7 +1023,10 @@ mod tests {
             params: json!({"name": "list_memories", "arguments": {"kind": "decision"}}),
         };
         let resp = dispatcher.handle_request(&req).unwrap();
-        let text = resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
+        let text = resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
         assert!(text.contains("HMAC-SHA256"));
         assert!(!text.contains("JWT authentication"));
     }
@@ -727,7 +1061,10 @@ mod tests {
             params: json!({"name": "search_memory", "arguments": {"query": "GitHub Actions"}}),
         };
         let search_resp = dispatcher.handle_request(&search_req).unwrap();
-        let search_text = search_resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
+        let search_text = search_resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
         assert!(search_text.contains("GitHub Actions"));
     }
 
@@ -741,7 +1078,10 @@ mod tests {
             params: json!({}),
         };
         let resp = dispatcher.handle_request(&req).unwrap();
-        let resources = resp.result.unwrap()["resources"].as_array().unwrap().clone();
+        let resources = resp.result.unwrap()["resources"]
+            .as_array()
+            .unwrap()
+            .clone();
         assert_eq!(resources.len(), 1);
     }
 }

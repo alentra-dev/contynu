@@ -19,6 +19,9 @@ pub fn run(state_dir: &Path) -> Result<()> {
     let state = StatePaths::new(&effective_dir);
     let active_project = resolve_active_project(&state)?;
 
+    // Auto-ingest unrecorded sessions from external AI tools
+    run_auto_ingestion(&state, &active_project);
+
     let dispatcher = McpDispatcher::new(&effective_dir, active_project)
         .map_err(|e| anyhow!("Failed to start MCP server: {e}"))?;
 
@@ -44,9 +47,7 @@ pub fn run(state_dir: &Path) -> Result<()> {
         // the server and tears down the stdio transport. The agent on the
         // other end relies on this stream staying open across many calls.
         let request_id = request.id.clone();
-        let result = panic::catch_unwind(AssertUnwindSafe(|| {
-            dispatcher.handle_request(&request)
-        }));
+        let result = panic::catch_unwind(AssertUnwindSafe(|| dispatcher.handle_request(&request)));
         match result {
             Ok(Some(response)) => write_response(&mut stdout, &response)?,
             Ok(None) => {} // notification, no response expected
@@ -109,6 +110,46 @@ fn discover_state_dir() -> Option<std::path::PathBuf> {
             return Some(candidate);
         }
         dir = dir.parent()?;
+    }
+}
+
+/// Run auto-ingestion of external AI tool sessions on MCP server startup.
+/// Non-fatal: failures are logged to stderr and don't prevent server operation.
+fn run_auto_ingestion(state: &StatePaths, project_id: &ProjectId) {
+    let cwd = std::env::var("CONTYNU_CWD")
+        .map(std::path::PathBuf::from)
+        .or_else(|_| std::env::current_dir())
+        .unwrap_or_default();
+
+    if cwd.as_os_str().is_empty() {
+        return;
+    }
+
+    let cwd_abs = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+
+    let store = match MetadataStore::open(state.sqlite_db()) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[contynu] Auto-ingestion: failed to open store: {e}");
+            return;
+        }
+    };
+
+    match contynu_core::discovery::discover_all(&store, &cwd_abs) {
+        Ok(report) if report.total_new > 0 => {
+            match contynu_core::discovery::ingest_memories(&store, project_id, &report) {
+                Ok(count) => {
+                    eprintln!("[contynu] Auto-ingested {count} memories from external AI tools");
+                }
+                Err(e) => {
+                    eprintln!("[contynu] Auto-ingestion failed: {e}");
+                }
+            }
+        }
+        Ok(_) => {} // nothing new to ingest
+        Err(e) => {
+            eprintln!("[contynu] Auto-discovery failed: {e}");
+        }
     }
 }
 

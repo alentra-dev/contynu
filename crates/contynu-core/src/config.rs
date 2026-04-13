@@ -41,8 +41,12 @@ impl PacketBudgetConfig {
     }
 }
 
-fn default_4000() -> usize { 4000 }
-fn default_20() -> usize { 20 }
+fn default_4000() -> usize {
+    4000
+}
+fn default_20() -> usize {
+    20
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConfiguredLlmLauncher {
@@ -154,7 +158,7 @@ fn builtin_launchers() -> Vec<ConfiguredLlmLauncher> {
             aliases: vec!["codex-cli".into()],
             hydrate: true,
             use_pty: true,
-            hydration_delivery: HydrationDelivery::EnvAndStdin,
+            hydration_delivery: HydrationDelivery::EnvOnly,
             hydration_args: Vec::new(),
             extra_env: BTreeMap::new(),
             prompt_format: None,
@@ -261,6 +265,18 @@ mod tests {
     }
 
     #[test]
+    fn builtin_codex_launcher_prefers_env_only_hydration() {
+        let config = ContynuConfig::with_builtin_launchers();
+        assert_eq!(
+            config
+                .find_llm_launcher("codex")
+                .unwrap()
+                .hydration_delivery,
+            HydrationDelivery::EnvOnly
+        );
+    }
+
+    #[test]
     fn ensure_exists_writes_builtin_launchers() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.json");
@@ -273,7 +289,7 @@ mod tests {
                 .find_llm_launcher("codex")
                 .unwrap()
                 .hydration_delivery,
-            HydrationDelivery::EnvAndStdin
+            HydrationDelivery::EnvOnly
         );
         assert_eq!(
             config

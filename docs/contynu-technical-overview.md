@@ -1,6 +1,6 @@
 # Contynu — Complete Technical Overview
 
-**Version:** 0.5.0+ | **Created:** April 2026 | **Language:** Rust + TypeScript (OpenClaw plugin)
+**Version:** 0.5.1+ | **Created:** April 2026 | **Language:** Rust + TypeScript (OpenClaw plugin)
 **Creators:** Udonna Eke-Okoro & Kelenna Eke-Okoro
 **License:** Mozilla Public License 2.0
 **Website:** [contynu.com](https://contynu.com) | **Source:** [github.com/alentra-dev/contynu](https://github.com/alentra-dev/contynu)
@@ -172,10 +172,12 @@ AI models write memories directly via MCP tools at each generation stop point. T
 | `record_prompt` | Record the user's verbatim prompt with optional interpretation |
 | `search_memory` | Search memories by text, kind, scope, time window |
 | `list_memories` | Browse all active memories with filtering and pagination |
+| `suggest_consolidation` | Find redundant memory clusters suitable for Golden Fact consolidation |
+| `consolidate_memories` | Merge related memories into a single Golden Fact while superseding originals |
 
 ### Importance
 
-The model assigns importance directly (0.0 to 1.0). Contynu does not re-score or override this value. When building rehydration packets, memories are selected by importance within a configurable token budget.
+The model assigns importance directly (0.0 to 1.0). Contynu does not re-score or override this value. When building rehydration packets, memories are selected within a configurable packet budget using a blended relevance score that combines importance, lexical relevance to the latest prompt, recency, access count, scope, and working-set carry-forward state.
 
 ---
 
@@ -188,7 +190,7 @@ Each model receives context in its optimal format:
 | Model | Format | Delivered As |
 |-------|--------|-------------|
 | Claude | XML | `<contynu_memory>` with nested sections |
-| Codex/GPT | Markdown | Headers, bullet lists, blockquotes |
+| Codex/GPT | Markdown | AGENTS.md-first working continuation block plus env/file artifacts |
 | Gemini | StructuredText | Labeled sections with bullet points |
 
 ### Model Instructions
@@ -198,6 +200,7 @@ Every rehydration prompt includes explicit instructions telling the model how to
 - Call `write_memory` for facts, decisions, and constraints worth recalling
 - Call `search_memory` before writing to avoid duplicates
 - Call `update_memory` to correct existing memories
+- Call Dream Phase consolidation tools when redundant memory clusters should be merged
 
 ---
 
@@ -217,9 +220,11 @@ On first launch, Contynu registers itself as an MCP server with:
 
 Each request is wrapped in `catch_unwind` so a single bad request never crashes the server. The stdio transport stays open across all calls.
 
+On MCP startup, Contynu also discovers unrecorded Claude Code, Codex, and Gemini session memory files and ingests missing session state into the archive before the next model turn.
+
 ### Resources
 
-- `contynu://project/brief` — Full rehydration packet
+- `contynu://project/brief` — Sanitized AI-facing rehydration packet
 - `contynu://project/recent` — Recent prompts
 
 ---
@@ -233,7 +238,7 @@ Contynu auto-detects which AI tool is being launched and configures hydration de
 | Adapter | Hydration | Transport |
 |---------|-----------|-----------|
 | Claude | env_only + `--append-system-prompt` | PTY |
-| Codex | env_and_stdin | PTY |
+| Codex | env_only with AGENTS.md-first continuation | PTY |
 | Gemini | env_and_stdin + `--prompt-interactive` | PTY |
 
 ### Custom Adapters
@@ -255,9 +260,9 @@ Configure in `.contynu/config.json`:
 
 ## 10. Storage Layer
 
-### SQLite (Schema v5)
+### SQLite (Schema v8)
 
-The sole data store. Five tables:
+The sole data store. Core tables include:
 
 | Table | Purpose |
 |-------|---------|
@@ -266,6 +271,9 @@ The sole data store. Five tables:
 | `prompts` | User prompts with verbatim text and model interpretation |
 | `blobs` | Content-addressed large content (SHA-256) |
 | `checkpoints` | Recovery bundles with manifest and rehydration packet |
+| `working_set_entries` | Carry-forward working set for the next packet |
+| `packet_observations` | Packet selection observability and hygiene signals |
+| `ingested_sources` | External session ingestion tracking |
 
 ### Blob Store
 
@@ -276,7 +284,7 @@ Content-addressed by SHA-256 hash. File layout: `blobs/sha256/{a}/{b}/{digest}`.
 On first access after upgrade, Contynu automatically:
 1. Drops legacy tables (events, turns, files, artifacts) if present
 2. Removes old journal/ and runtime/ directories
-3. Applies schema v5
+3. Applies the latest schema and migration additions, including working-set and packet-observation tables
 
 ---
 
@@ -286,7 +294,7 @@ On first access after upgrade, Contynu automatically:
 crates/
   contynu-core/          # Core library
     src/
-      mcp.rs             # MCP server with 6 tools (read + write)
+      mcp.rs             # MCP server with 8 tools (read + write + Dream Phase)
       store.rs           # SQLite operations (memories, prompts, sessions)
       checkpoint.rs      # Rehydration packet builder
       rendering.rs       # Multi-format prompt rendering (XML/MD/Text)
@@ -305,7 +313,7 @@ crates/
       mcp_server.rs      # Stdio MCP transport
       mcp_registration.rs # Auto-register with Claude/Codex/Gemini/OpenClaw
     tests/
-      smoke.rs           # Integration tests (8 tests)
+      smoke.rs           # Integration tests
 packages/
   contynu-openclaw/      # OpenClaw plugin (TypeScript)
 ```

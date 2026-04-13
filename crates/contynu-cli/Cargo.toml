@@ -17,6 +17,7 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 contynu-core = { path = "../contynu-core" }
+ureq.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]

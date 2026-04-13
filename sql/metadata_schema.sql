@@ -68,6 +68,38 @@ CREATE INDEX IF NOT EXISTS idx_memory_active_importance ON memory_objects(sessio
 CREATE INDEX IF NOT EXISTS idx_memory_scope ON memory_objects(scope, status, importance DESC);
 CREATE INDEX IF NOT EXISTS idx_prompts_session ON prompts(session_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS ingested_sources (
+  source_path TEXT PRIMARY KEY,
+  source_tool TEXT NOT NULL,
+  ingested_at TEXT NOT NULL,
+  memory_count INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS working_set_entries (
+  session_id TEXT NOT NULL,
+  memory_id TEXT NOT NULL,
+  rank_score REAL NOT NULL DEFAULT 0,
+  source_reason TEXT,
+  refreshed_at TEXT NOT NULL,
+  PRIMARY KEY (session_id, memory_id),
+  FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE,
+  FOREIGN KEY(memory_id) REFERENCES memory_objects(memory_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_working_set_session_rank
+  ON working_set_entries(session_id, rank_score DESC, refreshed_at DESC);
+
+CREATE TABLE IF NOT EXISTS packet_observations (
+  observation_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  summary_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_packet_observations_session_created
+  ON packet_observations(session_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS schema_meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,

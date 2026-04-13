@@ -37,7 +37,8 @@ fn is_ephemeral_path(path: &Path) -> bool {
 
 fn ensure_claude_mcp(state_dir: &Path, cwd: &Path, project_id: &str) -> Result<()> {
     let mcp_path = cwd.join(".mcp.json");
-    let state_dir_abs = std::fs::canonicalize(state_dir).unwrap_or_else(|_| state_dir.to_path_buf());
+    let state_dir_abs =
+        std::fs::canonicalize(state_dir).unwrap_or_else(|_| state_dir.to_path_buf());
 
     let entry = serde_json::json!({
         "command": "contynu",
@@ -70,7 +71,8 @@ fn ensure_claude_mcp(state_dir: &Path, cwd: &Path, project_id: &str) -> Result<(
 fn ensure_codex_mcp(state_dir: &Path, project_id: &str) -> Result<()> {
     let home = dirs_or_home();
     let config_path = home.join(".codex").join("config.toml");
-    let state_dir_abs = std::fs::canonicalize(state_dir).unwrap_or_else(|_| state_dir.to_path_buf());
+    let state_dir_abs =
+        std::fs::canonicalize(state_dir).unwrap_or_else(|_| state_dir.to_path_buf());
 
     if !config_path.exists() {
         return Ok(()); // no codex config, skip
@@ -102,7 +104,9 @@ CONTYNU_ACTIVE_PROJECT = "{}"
         project_id
     );
 
-    let mut file = std::fs::OpenOptions::new().append(true).open(&config_path)?;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&config_path)?;
     std::io::Write::write_all(&mut file, block.as_bytes())?;
     Ok(())
 }
@@ -121,17 +125,11 @@ fn update_codex_project_id(content: &str, state_dir: &Path, project_id: &str) ->
 
         if in_contynu_env {
             if line.starts_with("CONTYNU_STATE_DIR") {
-                result.push_str(&format!(
-                    "CONTYNU_STATE_DIR = \"{}\"",
-                    state_dir.display()
-                ));
+                result.push_str(&format!("CONTYNU_STATE_DIR = \"{}\"", state_dir.display()));
                 result.push('\n');
                 continue;
             } else if line.starts_with("CONTYNU_ACTIVE_PROJECT") {
-                result.push_str(&format!(
-                    "CONTYNU_ACTIVE_PROJECT = \"{}\"",
-                    project_id
-                ));
+                result.push_str(&format!("CONTYNU_ACTIVE_PROJECT = \"{}\"", project_id));
                 result.push('\n');
                 continue;
             } else if line.starts_with('[') {
@@ -146,7 +144,8 @@ fn update_codex_project_id(content: &str, state_dir: &Path, project_id: &str) ->
 }
 
 fn ensure_gemini_mcp(state_dir: &Path, project_id: &str) -> Result<()> {
-    let state_dir_abs = std::fs::canonicalize(state_dir).unwrap_or_else(|_| state_dir.to_path_buf());
+    let state_dir_abs =
+        std::fs::canonicalize(state_dir).unwrap_or_else(|_| state_dir.to_path_buf());
 
     // Check if already registered
     let list_output = std::process::Command::new("gemini")
@@ -169,12 +168,18 @@ fn ensure_gemini_mcp(state_dir: &Path, project_id: &str) -> Result<()> {
     // Register with env vars for state dir and active project
     let _ = std::process::Command::new("gemini")
         .args([
-            "mcp", "add", "contynu",
-            "contynu", "mcp-server",
-            "-e", &format!("CONTYNU_STATE_DIR={}", state_dir_abs.display()),
-            "-e", &format!("CONTYNU_ACTIVE_PROJECT={}", project_id),
+            "mcp",
+            "add",
+            "contynu",
+            "contynu",
+            "mcp-server",
+            "-e",
+            &format!("CONTYNU_STATE_DIR={}", state_dir_abs.display()),
+            "-e",
+            &format!("CONTYNU_ACTIVE_PROJECT={}", project_id),
             "--trust",
-            "--scope", "user",
+            "--scope",
+            "user",
         ])
         .output();
 
@@ -182,7 +187,8 @@ fn ensure_gemini_mcp(state_dir: &Path, project_id: &str) -> Result<()> {
 }
 
 fn ensure_openclaw_mcp(state_dir: &Path, config_path: &Path, project_id: &str) -> Result<()> {
-    let state_dir_abs = std::fs::canonicalize(state_dir).unwrap_or_else(|_| state_dir.to_path_buf());
+    let state_dir_abs =
+        std::fs::canonicalize(state_dir).unwrap_or_else(|_| state_dir.to_path_buf());
 
     // config_path here is the OpenClaw config file path (passed as cwd from openclaw_setup)
     let oc_config = if config_path.is_file() {
@@ -203,8 +209,8 @@ fn ensure_openclaw_mcp(state_dir: &Path, config_path: &Path, project_id: &str) -
     }
 
     // Parse as JSON, add MCP server entry
-    let mut config: serde_json::Value = serde_json::from_str(&content)
-        .unwrap_or_else(|_| serde_json::json!({}));
+    let mut config: serde_json::Value =
+        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}));
 
     if !config.get("mcp").is_some() {
         config["mcp"] = serde_json::json!({});

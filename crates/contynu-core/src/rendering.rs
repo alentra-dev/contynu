@@ -25,7 +25,13 @@ pub fn render_rehydration(
 ) -> String {
     match format {
         PromptFormat::Xml => render_xml(packet, adapter_name),
-        PromptFormat::Markdown => render_markdown(packet, adapter_name),
+        PromptFormat::Markdown => {
+            if adapter_name == "codex_cli" {
+                render_codex_markdown(packet)
+            } else {
+                render_markdown(packet, adapter_name)
+            }
+        }
         PromptFormat::StructuredText => render_structured_text(packet, adapter_name),
     }
 }
@@ -47,6 +53,8 @@ pub fn render_launcher(packet: &RehydrationPacket, format: PromptFormat) -> Stri
 
 fn render_xml(packet: &RehydrationPacket, adapter_name: &str) -> String {
     let mut out = String::new();
+    let recent_dialogue = dedup_lines(packet.recent_verbatim_context.iter().map(|s| s.as_str()), 3);
+    let retrieval_guidance = dedup_lines(packet.retrieval_guidance.iter().map(|s| s.as_str()), 5);
     let _ = writeln!(
         out,
         "<contynu_memory project=\"{}\" schema=\"{}\" adapter=\"{}\">",
@@ -54,7 +62,11 @@ fn render_xml(packet: &RehydrationPacket, adapter_name: &str) -> String {
     );
 
     if !packet.project_identity.is_empty() {
-        let _ = writeln!(out, "  <identity>{}</identity>", xml_escape(&packet.project_identity));
+        let _ = writeln!(
+            out,
+            "  <identity>{}</identity>",
+            xml_escape(&packet.project_identity)
+        );
     }
     if !packet.compact_brief.is_empty() {
         out.push_str("  <brief>\n");
@@ -75,14 +87,21 @@ fn render_xml(packet: &RehydrationPacket, adapter_name: &str) -> String {
         xml_escape(&packet.current_state)
     );
 
-    write_xml_section(&mut out, "facts", "fact", &packet.stable_facts, &packet.memory_provenance);
-    write_xml_section(&mut out, "constraints", "constraint", &packet.constraints, &packet.memory_provenance);
-    write_xml_section(&mut out, "decisions", "decision", &packet.decisions, &packet.memory_provenance);
-    write_xml_section(&mut out, "open_loops", "todo", &packet.open_loops, &packet.memory_provenance);
+    write_xml_section(&mut out, "facts", "fact", &packet.stable_facts);
+    write_xml_section(&mut out, "constraints", "constraint", &packet.constraints);
+    write_xml_section(&mut out, "decisions", "decision", &packet.decisions);
+    write_xml_section(&mut out, "open_loops", "todo", &packet.open_loops);
+    write_xml_section(&mut out, "user_facts", "user_fact", &packet.user_facts);
+    write_xml_section(
+        &mut out,
+        "project_knowledge",
+        "knowledge",
+        &packet.project_knowledge,
+    );
 
-    if !packet.recent_verbatim_context.is_empty() {
+    if !recent_dialogue.is_empty() {
         out.push_str("  <recent_dialogue>\n");
-        for line in &packet.recent_verbatim_context {
+        for line in &recent_dialogue {
             let (role, text) = if let Some(rest) = line.strip_prefix("User: ") {
                 ("user", rest)
             } else if let Some(rest) = line.strip_prefix("Assistant: ") {
@@ -117,9 +136,9 @@ fn render_xml(packet: &RehydrationPacket, adapter_name: &str) -> String {
         out.push_str("  </files>\n");
     }
 
-    if !packet.retrieval_guidance.is_empty() {
+    if !retrieval_guidance.is_empty() {
         out.push_str("  <guidance>\n");
-        for item in &packet.retrieval_guidance {
+        for item in &retrieval_guidance {
             let _ = writeln!(out, "    <item>{}</item>", xml_escape(item));
         }
         out.push_str("  </guidance>\n");
@@ -131,37 +150,25 @@ fn render_xml(packet: &RehydrationPacket, adapter_name: &str) -> String {
     out.push_str("    - write_memory: Write facts, decisions, constraints, or knowledge worth recalling in future sessions. You decide what is worth remembering from your own output. Kinds: fact, constraint, decision, todo, user_fact, project_knowledge. Scopes: user (follows the user everywhere), project (this project only), session (ephemeral).\n");
     out.push_str("    - update_memory: Correct or refine an existing memory by its ID instead of creating duplicates.\n");
     out.push_str("    - delete_memory: Remove a memory that is no longer relevant.\n");
-    out.push_str("    - search_memory: Search existing memories before writing to avoid duplicates.\n");
+    out.push_str(
+        "    - search_memory: Search existing memories before writing to avoid duplicates.\n",
+    );
     out.push_str("    - list_memories: Browse all active memories.\n");
+    out.push_str("    - suggest_consolidation: Scan for redundant memory clusters that can be merged into Golden Facts.\n");
+    out.push_str("    - consolidate_memories: Merge related memories into a single high-fidelity Golden Fact. Originals are superseded, not deleted.\n");
     out.push_str("    Carry this continuity forward naturally. If the user asks about prior work, answer from this memory instead of claiming there is no earlier context.\n");
     out.push_str("  </instruction>\n");
     out.push_str("</contynu_memory>\n");
     out
 }
 
-fn write_xml_section(
-    out: &mut String,
-    section: &str,
-    item_tag: &str,
-    items: &[String],
-    provenance: &[crate::checkpoint::MemoryProvenance],
-) {
+fn write_xml_section(out: &mut String, section: &str, item_tag: &str, items: &[String]) {
     let _ = writeln!(out, "  <{section}>");
     if items.is_empty() {
         let _ = writeln!(out, "    <{item_tag}>None recorded.</{item_tag}>");
     } else {
-        for (i, item) in items.iter().enumerate() {
-            let source_attr = provenance
-                .iter()
-                .filter(|p| p.kind == item_tag || (item_tag == "todo" && p.kind == "todo") || (item_tag == "fact" && p.kind == "fact"))
-                .nth(i)
-                .and_then(|p| p.source_model.as_deref())
-                .unwrap_or("unknown");
-            let _ = writeln!(
-                out,
-                "    <{item_tag} source=\"{source_attr}\">{}</{item_tag}>",
-                xml_escape(item)
-            );
+        for item in items {
+            let _ = writeln!(out, "    <{item_tag}>{}</{item_tag}>", xml_escape(item));
         }
     }
     let _ = writeln!(out, "  </{section}>");
@@ -177,7 +184,11 @@ fn render_launcher_xml(packet: &RehydrationPacket) -> String {
     if !packet.mission.is_empty()
         && packet.mission != "Continue the session faithfully from canonical state."
     {
-        let _ = write!(out, "<mission>{}</mission>", xml_escape(&one_line(&packet.mission)));
+        let _ = write!(
+            out,
+            "<mission>{}</mission>",
+            xml_escape(&one_line(&packet.mission))
+        );
     }
     if !packet.current_state.is_empty() {
         let _ = write!(
@@ -196,6 +207,8 @@ fn render_launcher_xml(packet: &RehydrationPacket) -> String {
 
 fn render_markdown(packet: &RehydrationPacket, adapter_name: &str) -> String {
     let mut out = String::new();
+    let recent_dialogue = dedup_lines(packet.recent_verbatim_context.iter().map(|s| s.as_str()), 3);
+    let durable_context = combined_context(packet);
     let _ = writeln!(out, "# Contynu Memory Context");
     let _ = writeln!(
         out,
@@ -219,14 +232,14 @@ fn render_markdown(packet: &RehydrationPacket, adapter_name: &str) -> String {
     let _ = writeln!(out, "## Mission\n{}\n", packet.mission);
     let _ = writeln!(out, "## Current State\n{}\n", packet.current_state);
 
-    write_md_section(&mut out, "Stable Facts", &packet.stable_facts);
     write_md_section(&mut out, "Constraints", &packet.constraints);
     write_md_section(&mut out, "Decisions", &packet.decisions);
     write_md_section(&mut out, "Open Loops", &packet.open_loops);
+    write_md_section(&mut out, "Durable Context", &durable_context);
 
-    if !packet.recent_verbatim_context.is_empty() {
+    if !recent_dialogue.is_empty() {
         out.push_str("## Recent Dialogue\n\n");
-        for line in &packet.recent_verbatim_context {
+        for line in &recent_dialogue {
             if let Some(rest) = line.strip_prefix("User: ") {
                 let _ = writeln!(out, "> **User:** {rest}");
             } else if let Some(rest) = line.strip_prefix("Assistant: ") {
@@ -262,9 +275,95 @@ fn render_markdown(packet: &RehydrationPacket, adapter_name: &str) -> String {
     out.push_str("- **write_memory**: Write facts, decisions, constraints, or knowledge worth recalling in future sessions. You decide what is worth remembering from your own output. Kinds: `fact`, `constraint`, `decision`, `todo`, `user_fact`, `project_knowledge`. Scopes: `user` (follows the user everywhere), `project` (this project only), `session` (ephemeral).\n");
     out.push_str("- **update_memory**: Correct or refine an existing memory by its ID instead of creating duplicates.\n");
     out.push_str("- **delete_memory**: Remove a memory that is no longer relevant.\n");
-    out.push_str("- **search_memory**: Search existing memories before writing to avoid duplicates.\n");
-    out.push_str("- **list_memories**: Browse all active memories.\n\n");
+    out.push_str(
+        "- **search_memory**: Search existing memories before writing to avoid duplicates.\n",
+    );
+    out.push_str("- **list_memories**: Browse all active memories.\n");
+    out.push_str("- **suggest_consolidation**: Scan for redundant memory clusters that can be merged into Golden Facts.\n");
+    out.push_str("- **consolidate_memories**: Merge related memories into a single high-fidelity Golden Fact. Originals are superseded, not deleted.\n\n");
     out.push_str("*Carry this continuity forward naturally. If the user asks about prior work, answer from this memory instead of claiming there is no earlier context.*\n");
+    out
+}
+
+fn render_codex_markdown(packet: &RehydrationPacket) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Contynu Working Continuation");
+    let _ = writeln!(
+        out,
+        "**Project:** {} | **Schema:** {}\n",
+        packet.project_id, packet.schema_version
+    );
+
+    out.push_str("> Read this as carried-forward working state for this run.\n");
+    out.push_str("> Use it directly. Do not summarize it back unless it becomes relevant.\n\n");
+
+    if packet.first_run {
+        out.push_str("## Startup Mode\n");
+        out.push_str("- This project has no prior Contynu memory yet.\n");
+        out.push_str(
+            "- Treat the repository itself and the user's next requests as the source of truth.\n",
+        );
+        out.push_str("- As durable facts, constraints, decisions, and todos emerge, record them with Contynu tools.\n\n");
+    }
+
+    let _ = writeln!(out, "## Current Goal\n{}\n", packet.mission.trim());
+    let _ = writeln!(out, "## Active State\n{}\n", packet.current_state.trim());
+
+    let mut latest_changes = Vec::new();
+    if let Some(target) = &packet.target_model {
+        latest_changes.push(format!("Target model for this handoff: {target}"));
+    }
+    latest_changes.extend(packet.recent_changes.iter().map(|line| one_line(line)));
+    if latest_changes.is_empty() {
+        latest_changes.extend(
+            packet
+                .recent_verbatim_context
+                .iter()
+                .filter(|line| !is_operational(line))
+                .map(|line| one_line(line))
+                .take(4),
+        );
+    }
+    write_md_section(&mut out, "What Changed", &latest_changes);
+    write_md_section(&mut out, "Constraints In Force", &packet.constraints);
+    write_md_section(&mut out, "Decisions In Force", &packet.decisions);
+    write_md_section(&mut out, "Open Threads", &packet.open_loops);
+
+    let mut durable_context = Vec::new();
+    durable_context.extend(packet.stable_facts.iter().cloned());
+    durable_context.extend(packet.project_knowledge.iter().cloned());
+    durable_context.extend(packet.user_facts.iter().cloned());
+    write_md_section(&mut out, "Durable Context", &durable_context);
+
+    if !packet.relevant_files.is_empty() {
+        write_md_section(&mut out, "Relevant Files", &packet.relevant_files);
+    }
+
+    if !packet.relevant_artifacts.is_empty() {
+        out.push_str("## Relevant Artifacts\n\n");
+        for artifact in &packet.relevant_artifacts {
+            let _ = writeln!(
+                out,
+                "- {}: {} (`{}`)",
+                artifact.kind,
+                artifact.path,
+                &artifact.sha256[..16.min(artifact.sha256.len())]
+            );
+        }
+        out.push('\n');
+    }
+
+    out.push_str("## Contynu Usage\n\n");
+    out.push_str("- Search or browse memory before duplicating context.\n");
+    out.push_str("- Record the user's prompt at each stop point.\n");
+    out.push_str(
+        "- Write only durable facts, decisions, constraints, todos, or project knowledge.\n",
+    );
+    out.push_str("- Update existing memories instead of rewriting the same idea.\n");
+    out.push_str(
+        "- Use consolidation tools only when multiple active memories are clearly redundant.\n\n",
+    );
+    out.push_str("*Continue the work from this state. Treat repository instructions outside this block as still in force.*\n");
     out
 }
 
@@ -294,9 +393,7 @@ fn render_launcher_markdown(packet: &RehydrationPacket) -> String {
     if !packet.current_state.is_empty() {
         sections.push(format!("**State:** {}", one_line(&packet.current_state)));
     }
-    sections.push(
-        "Use this as prior context, but do not restate it unless relevant.".into(),
-    );
+    sections.push("Use this as prior context, but do not restate it unless relevant.".into());
     sections.join(" ")
 }
 
@@ -306,6 +403,8 @@ fn render_launcher_markdown(packet: &RehydrationPacket) -> String {
 
 fn render_structured_text(packet: &RehydrationPacket, adapter_name: &str) -> String {
     let mut prompt = String::new();
+    let durable_context = combined_context(packet);
+    let recent_dialogue = dedup_lines(packet.recent_verbatim_context.iter().map(|s| s.as_str()), 3);
 
     // Quick-reference summary at the top so the model sees key facts immediately.
     prompt.push_str("IMPORTANT: This file contains project memory from prior sessions. READ THIS FIRST before searching files.\n\n");
@@ -313,15 +412,15 @@ fn render_structured_text(packet: &RehydrationPacket, adapter_name: &str) -> Str
         let _ = writeln!(prompt, "{}\n", packet.project_identity);
     }
     if !packet.compact_brief.is_empty() {
-        prompt.push_str("QUICK BRIEF:\n");
+        prompt.push_str("## QUICK BRIEF\n\n");
         for line in packet.compact_brief.lines() {
             let _ = writeln!(prompt, "  {}", line);
         }
         prompt.push('\n');
     }
-    if !packet.stable_facts.is_empty() {
-        prompt.push_str("KEY FACTS FROM PRIOR SESSIONS:\n");
-        for fact in &packet.stable_facts {
+    if !durable_context.is_empty() {
+        prompt.push_str("## KEY CONTEXT FROM PRIOR SESSIONS\n\n");
+        for fact in &durable_context {
             if !is_operational(fact) {
                 let _ = writeln!(prompt, "  * {}", one_line(fact));
             }
@@ -329,10 +428,19 @@ fn render_structured_text(packet: &RehydrationPacket, adapter_name: &str) -> Str
         prompt.push('\n');
     }
 
-    let _ = writeln!(prompt, "Contynu continuity context for {}.", adapter_name);
+    prompt.push_str("## ROLE\n\n");
+    let _ = writeln!(
+        prompt,
+        "You are {} powered by Contynu, an AI agent with persistent cross-session memory.",
+        adapter_name
+    );
+    prompt.push_str("Your primary goal is to carry forward the current project mission by synthesizing prior knowledge and maintaining state across generations.\n\n");
+
+    prompt.push_str("## CONTEXT\n\n");
     prompt
         .push_str("Use this as authoritative project memory carried forward from prior work.\n\n");
-    prompt.push_str("Project\n\n");
+
+    prompt.push_str("### Project\n\n");
     let _ = writeln!(prompt, "- ID: {}", packet.project_id);
     if let Some(target_model) = packet.target_model.as_deref() {
         let _ = writeln!(prompt, "- Target model: {}", target_model);
@@ -340,24 +448,20 @@ fn render_structured_text(packet: &RehydrationPacket, adapter_name: &str) -> Str
     let _ = writeln!(prompt, "- Schema version: {}", packet.schema_version);
     prompt.push('\n');
 
-    prompt.push_str("Mission\n\n");
-    let _ = writeln!(prompt, "- {}", packet.mission);
+    prompt.push_str("### Mission\n\n");
+    let _ = writeln!(prompt, "{}", packet.mission);
     prompt.push('\n');
 
-    prompt.push_str("Current State\n\n");
-    let _ = writeln!(prompt, "- {}", packet.current_state);
+    prompt.push_str("### Current State\n\n");
+    let _ = writeln!(prompt, "{}", packet.current_state);
     prompt.push('\n');
 
-    write_st_bullets(
-        &mut prompt,
-        "Recent Conversation",
-        &packet.recent_verbatim_context,
-    );
-    write_st_bullets(&mut prompt, "Stable Facts", &packet.stable_facts);
-    write_st_bullets(&mut prompt, "Constraints", &packet.constraints);
-    write_st_bullets(&mut prompt, "Decisions", &packet.decisions);
-    write_st_bullets(&mut prompt, "Open Loops", &packet.open_loops);
-    write_st_bullets(&mut prompt, "Relevant Files", &packet.relevant_files);
+    write_st_bullets(&mut prompt, "### Recent Conversation", &recent_dialogue);
+    write_st_bullets(&mut prompt, "### Constraints", &packet.constraints);
+    write_st_bullets(&mut prompt, "### Decisions", &packet.decisions);
+    write_st_bullets(&mut prompt, "### Open Loops", &packet.open_loops);
+    write_st_bullets(&mut prompt, "### Durable Context", &durable_context);
+    write_st_bullets(&mut prompt, "### Relevant Files", &packet.relevant_files);
 
     let artifact_lines = packet
         .relevant_artifacts
@@ -369,21 +473,25 @@ fn render_structured_text(packet: &RehydrationPacket, adapter_name: &str) -> Str
             )
         })
         .collect::<Vec<_>>();
-    write_st_bullets(&mut prompt, "Relevant Artifacts", &artifact_lines);
+    write_st_bullets(&mut prompt, "### Relevant Artifacts", &artifact_lines);
     write_st_bullets(
         &mut prompt,
-        "Retrieval Guidance",
+        "### Retrieval Guidance",
         &packet.retrieval_guidance,
     );
 
-    prompt.push_str("HOW TO USE CONTYNU MEMORY\n\n");
-    prompt.push_str("You have Contynu MCP tools available. Use them to manage your memory:\n");
-    prompt.push_str("- record_prompt: ALWAYS call this with the user's verbatim prompt at each generation stop. If the prompt is ambiguous, include your interpretation.\n");
-    prompt.push_str("- write_memory: Write facts, decisions, constraints, or knowledge worth recalling in future sessions. You decide what is worth remembering from your own output. Kinds: fact, constraint, decision, todo, user_fact, project_knowledge. Scopes: user (follows the user everywhere), project (this project only), session (ephemeral).\n");
-    prompt.push_str("- update_memory: Correct or refine an existing memory by its ID instead of creating duplicates.\n");
-    prompt.push_str("- delete_memory: Remove a memory that is no longer relevant.\n");
-    prompt.push_str("- search_memory: Search existing memories before writing to avoid duplicates.\n");
-    prompt.push_str("- list_memories: Browse all active memories.\n\n");
+    prompt.push_str("## HOW TO USE CONTYNU MEMORY\n\n");
+    prompt.push_str("You have Contynu MCP tools available. Use them to manage your memory:\n\n");
+    prompt.push_str("- **record_prompt**: ALWAYS call this with the user's verbatim prompt at each generation stop. If the prompt is ambiguous, include your interpretation.\n");
+    prompt.push_str("- **write_memory**: Write facts, decisions, constraints, or knowledge worth recalling in future sessions. Kinds: fact, constraint, decision, todo, user_fact, project_knowledge. Scopes: user, project, session.\n");
+    prompt.push_str("- **update_memory**: Correct or refine an existing memory by its ID instead of creating duplicates.\n");
+    prompt.push_str("- **delete_memory**: Remove a memory that is no longer relevant.\n");
+    prompt.push_str(
+        "- **search_memory**: Search existing memories before writing to avoid duplicates.\n",
+    );
+    prompt.push_str("- **list_memories**: Browse all active memories.\n");
+    prompt.push_str("- **suggest_consolidation**: Scan for redundant memory clusters that can be merged into Golden Facts.\n");
+    prompt.push_str("- **consolidate_memories**: Merge related memories into a single high-fidelity Golden Fact. Originals are superseded, not deleted.\n\n");
     prompt.push_str("Carry this continuity forward naturally. If the user asks about prior work, answer from this memory instead of claiming there is no earlier context.\n");
     prompt
 }
@@ -396,7 +504,13 @@ fn write_st_bullets(buffer: &mut String, title: &str, items: &[String]) {
         return;
     }
     for item in items {
-        let _ = writeln!(buffer, "- {}", one_line(item));
+        // Only use one_line for short, bullet-style metadata lists if needed.
+        // For memory content, we want to preserve multi-line structure.
+        if title.contains("Files") || title.contains("Artifacts") {
+            let _ = writeln!(buffer, "- {}", one_line(item));
+        } else {
+            let _ = writeln!(buffer, "- {}", item.trim());
+        }
     }
     buffer.push('\n');
 }
@@ -410,35 +524,35 @@ fn render_launcher_structured(packet: &RehydrationPacket) -> String {
     if !packet.mission.trim().is_empty()
         && packet.mission != "Continue the session faithfully from canonical state."
     {
-        sections.push(format!("Mission: {}", one_line(&packet.mission)));
+        sections.push(format!("Active Mission: {}", one_line(&packet.mission)));
     }
     if !packet.current_state.is_empty() && !is_operational(&packet.current_state) {
-        sections.push(format!("Current focus: {}", one_line(&packet.current_state)));
+        sections.push(format!("Last Focus: {}", one_line(&packet.current_state)));
     }
 
-    let clean_facts: Vec<_> = packet.stable_facts.iter()
+    let clean_facts: Vec<_> = packet
+        .stable_facts
+        .iter()
         .filter(|f| !is_operational(f))
         .map(|f| one_line(f))
         .collect();
     if !clean_facts.is_empty() {
-        sections.push(format!("Stable facts: {}", clean_facts.join(" | ")));
+        sections.push(format!("Key Facts: {}", clean_facts.join(" | ")));
     }
 
-    let clean_decisions: Vec<_> = packet.decisions.iter()
-        .map(|d| one_line(d))
-        .collect();
+    let clean_decisions: Vec<_> = packet.decisions.iter().map(|d| one_line(d)).collect();
     if !clean_decisions.is_empty() {
         sections.push(format!("Decisions: {}", clean_decisions.join(" | ")));
     }
 
-    let clean_loops: Vec<_> = packet.open_loops.iter()
-        .map(|l| one_line(l))
-        .collect();
+    let clean_loops: Vec<_> = packet.open_loops.iter().map(|l| one_line(l)).collect();
     if !clean_loops.is_empty() {
-        sections.push(format!("Open loops: {}", clean_loops.join(" | ")));
+        sections.push(format!("Todos: {}", clean_loops.join(" | ")));
     }
 
-    let dialogue: Vec<_> = packet.recent_verbatim_context.iter()
+    let dialogue: Vec<_> = packet
+        .recent_verbatim_context
+        .iter()
         .filter(|line| !is_operational(line))
         .map(|line| one_line(line))
         .collect();
@@ -446,10 +560,7 @@ fn render_launcher_structured(packet: &RehydrationPacket) -> String {
         sections.push(format!("Recent conversation: {}", dialogue.join(" | ")));
     }
 
-    sections.push(
-        "Use this as prior context, but do not restate it unless relevant. If exact history is needed, use the Contynu rehydration files from the environment."
-            .into(),
-    );
+    sections.push("Use GEMINI.md for full context. Do not restate it.".into());
     sections.join("\n")
 }
 
@@ -470,7 +581,11 @@ pub(crate) fn is_operational(text: &str) -> bool {
 
 /// Render active memories as Markdown for export, optionally wrapped in
 /// HTML comment markers compatible with OpenClaw's MEMORY.md format.
-pub fn render_memory_export(memories: &[MemoryObject], max_chars: usize, with_markers: bool) -> String {
+pub fn render_memory_export(
+    memories: &[MemoryObject],
+    max_chars: usize,
+    with_markers: bool,
+) -> String {
     let mut out = String::new();
 
     if with_markers {
@@ -483,6 +598,8 @@ pub fn render_memory_export(memories: &[MemoryObject], max_chars: usize, with_ma
         (MemoryObjectKind::Decision, "Decisions"),
         (MemoryObjectKind::Constraint, "Constraints"),
         (MemoryObjectKind::Todo, "Open Tasks"),
+        (MemoryObjectKind::UserFact, "User Facts"),
+        (MemoryObjectKind::ProjectKnowledge, "Project Knowledge"),
     ];
 
     for (kind, header) in &kinds_and_headers {
@@ -502,7 +619,11 @@ pub fn render_memory_export(memories: &[MemoryObject], max_chars: usize, with_ma
         out.push_str(&section_header);
 
         for m in &items {
-            let line = format!("- {} [importance: {:.2}]\n", one_line(&m.text), m.importance);
+            let line = format!(
+                "- {} [importance: {:.2}]\n",
+                one_line(&m.text),
+                m.importance
+            );
             if out.len() + line.len() > max_chars.saturating_sub(60) {
                 break;
             }
@@ -532,6 +653,32 @@ fn one_line(text: &str) -> String {
         .join(" ")
 }
 
+fn dedup_lines<'a>(items: impl Iterator<Item = &'a str>, limit: usize) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for item in items {
+        let normalized = one_line(item);
+        if normalized.is_empty() || !seen.insert(normalized.clone()) {
+            continue;
+        }
+        out.push(normalized);
+        if out.len() >= limit {
+            break;
+        }
+    }
+    out
+}
+
+fn combined_context(packet: &RehydrationPacket) -> Vec<String> {
+    let iter = packet
+        .stable_facts
+        .iter()
+        .chain(packet.user_facts.iter())
+        .chain(packet.project_knowledge.iter())
+        .map(|s| s.as_str());
+    dedup_lines(iter, 10)
+}
+
 fn xml_escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -558,6 +705,8 @@ mod tests {
             decisions: vec!["Use HMAC-SHA256 for token signing.".into()],
             current_state: "Auth middleware is half-refactored.".into(),
             open_loops: vec!["Token refresh endpoint not yet implemented.".into()],
+            user_facts: vec!["Developer prefers explicit error handling.".into()],
+            project_knowledge: vec!["Service uses PostgreSQL 15 in production.".into()],
             relevant_artifacts: vec![RehydrationArtifact {
                 path: "src/auth.rs".into(),
                 kind: "source".into(),
@@ -569,6 +718,11 @@ mod tests {
                 "Assistant: I've updated the JWT middleware.".into(),
             ],
             retrieval_guidance: vec!["Use the journal for exact replay.".into()],
+            recent_changes: vec![
+                "Latest user request: Can you fix the token expiry?".into(),
+                "Decision: Use HMAC-SHA256 for token signing.".into(),
+            ],
+            first_run: false,
             memory_provenance: Vec::new(),
         }
     }
@@ -589,29 +743,70 @@ mod tests {
     fn markdown_format_produces_headers_and_bullets() {
         let packet = test_packet();
         let output = render_rehydration(&packet, PromptFormat::Markdown, "codex_cli");
+        assert!(output.contains("# Contynu Working Continuation"));
+        assert!(output.contains("## Current Goal"));
+        assert!(output.contains("## What Changed"));
+        assert!(output.contains("## Open Threads"));
+        assert!(output.contains("## Durable Context"));
+        assert!(output.contains("## Contynu Usage"));
+    }
+
+    #[test]
+    fn codex_markdown_shows_first_run_guidance() {
+        let mut packet = test_packet();
+        packet.first_run = true;
+        packet.recent_changes.clear();
+        packet.recent_verbatim_context.clear();
+        let output = render_rehydration(&packet, PromptFormat::Markdown, "codex_cli");
+        assert!(output.contains("## Startup Mode"));
+        assert!(output.contains("no prior Contynu memory"));
+    }
+
+    #[test]
+    fn generic_markdown_format_still_produces_full_sections() {
+        let packet = test_packet();
+        let output = render_rehydration(&packet, PromptFormat::Markdown, "futurellm");
         assert!(output.contains("# Contynu Memory Context"));
         assert!(output.contains("## Mission"));
-        assert!(output.contains("## Stable Facts"));
+        assert!(output.contains("## Durable Context"));
         assert!(output.contains("> **User:**"));
-        assert!(output.contains("| source |"));
+    }
+
+    #[test]
+    fn structured_text_deduplicates_durable_context() {
+        let mut packet = test_packet();
+        packet.user_facts = vec!["Service uses PostgreSQL 15 in production.".into()];
+        let output = render_rehydration(&packet, PromptFormat::StructuredText, "gemini_cli");
+        assert!(output.contains("## KEY CONTEXT FROM PRIOR SESSIONS"));
+        assert!(output.contains("### Durable Context"));
     }
 
     #[test]
     fn structured_text_matches_legacy_format() {
         let packet = test_packet();
         let output = render_rehydration(&packet, PromptFormat::StructuredText, "gemini_cli");
-        assert!(output.contains("Contynu continuity context for gemini_cli."));
-        assert!(output.contains("Mission\n"));
-        assert!(output.contains("Stable Facts\n"));
+        assert!(output.contains("## ROLE"));
+        assert!(output.contains("You are gemini_cli powered by Contynu"));
+        assert!(output.contains("### Mission"));
+        assert!(output.contains("### Durable Context"));
         assert!(output.contains("Carry this continuity forward naturally."));
     }
 
     #[test]
     fn launcher_prompts_are_compact() {
         let packet = test_packet();
-        for format in [PromptFormat::Xml, PromptFormat::Markdown, PromptFormat::StructuredText] {
+        for format in [
+            PromptFormat::Xml,
+            PromptFormat::Markdown,
+            PromptFormat::StructuredText,
+        ] {
             let output = render_launcher(&packet, format);
-            assert!(output.len() < 1000, "Launcher prompt too long for {:?}: {} chars", format, output.len());
+            assert!(
+                output.len() < 1000,
+                "Launcher prompt too long for {:?}: {} chars",
+                format,
+                output.len()
+            );
             assert!(output.contains(&packet.project_id.to_string()));
         }
     }

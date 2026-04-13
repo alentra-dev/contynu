@@ -18,10 +18,11 @@ Use this checklist before cutting a serious Contynu release.
 
 ## MCP Server
 
-- All 6 MCP tools respond correctly (write_memory, update_memory, delete_memory, record_prompt, search_memory, list_memories)
+- All 8 MCP tools respond correctly (`write_memory`, `update_memory`, `delete_memory`, `record_prompt`, `search_memory`, `list_memories`, `suggest_consolidation`, `consolidate_memories`)
 - Memory writes via MCP are persisted and searchable
 - Prompt recording works with and without interpretation
 - MCP server auto-registration works for Claude, Codex, and Gemini
+- Startup external session ingestion still pulls in missing Claude/Codex/Gemini session files
 
 ## Launcher Layer
 
@@ -35,6 +36,8 @@ Use this checklist before cutting a serious Contynu release.
 - Rehydration packets include model instructions for MCP tool usage
 - Packets render correctly in XML (Claude), Markdown (Codex), and StructuredText (Gemini)
 - Budget-aware memory selection works for large memory stores
+- Working-set carry-forward and recent-change layering still produce compact packets
+- AI-facing packet output remains sanitized and does not leak source-model provenance
 
 ## Product Surface
 
@@ -52,7 +55,9 @@ All should be exercised against a real local state directory before release.
 
 - GitHub release workflow succeeds for the supported release target set
 - release artifacts include installers and checksums
-- `scripts/install.sh` installs correctly on Linux
+- `scripts/install.sh` installs correctly on Linux and macOS
+- `scripts/install.ps1` installs correctly on Windows
+- startup self-update check detects newer platform releases and offers exact manual and auto-update flows
 - README install instructions match the published release assets
 
 ## Documentation

@@ -107,6 +107,9 @@ impl AdapterSpec {
             .iter()
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect::<Vec<_>>();
+
+        // Always set source adapter so MCP tools can track which AI tool is writing memories
+        env.push(("CONTYNU_SOURCE_ADAPTER".into(), self.name.clone()));
         let mut stdin_prelude = None;
         let mut args = args;
 
@@ -147,13 +150,7 @@ impl AdapterSpec {
             if self.hydration_delivery.includes_stdin() {
                 // Use the full rendered rehydration prompt as stdin prelude
                 // so the LLM receives human-readable context, not raw JSON.
-                stdin_prelude = Some(
-                    format!(
-                        "{}\n\n",
-                        hydration.prompt_text
-                    )
-                    .into_bytes(),
-                );
+                stdin_prelude = Some(format!("{}\n\n", hydration.prompt_text).into_bytes());
             }
         }
 
@@ -322,10 +319,14 @@ mod tests {
             decisions: Vec::new(),
             current_state: "No prior summary available.".into(),
             open_loops: Vec::new(),
+            user_facts: Vec::new(),
+            project_knowledge: Vec::new(),
             relevant_artifacts: Vec::new(),
             relevant_files: Vec::new(),
             recent_verbatim_context: Vec::new(),
             retrieval_guidance: Vec::new(),
+            recent_changes: Vec::new(),
+            first_run: false,
             memory_provenance: Vec::new(),
         };
         let hydration = HydrationContext {
@@ -382,10 +383,14 @@ mod tests {
             decisions: Vec::new(),
             current_state: "No prior summary available.".into(),
             open_loops: Vec::new(),
+            user_facts: Vec::new(),
+            project_knowledge: Vec::new(),
             relevant_artifacts: Vec::new(),
             relevant_files: Vec::new(),
             recent_verbatim_context: Vec::new(),
             retrieval_guidance: Vec::new(),
+            recent_changes: Vec::new(),
+            first_run: false,
             memory_provenance: Vec::new(),
         };
         let hydration = HydrationContext {
@@ -452,10 +457,14 @@ mod tests {
             decisions: Vec::new(),
             current_state: "No prior summary available.".into(),
             open_loops: Vec::new(),
+            user_facts: Vec::new(),
+            project_knowledge: Vec::new(),
             relevant_artifacts: Vec::new(),
             relevant_files: Vec::new(),
             recent_verbatim_context: Vec::new(),
             retrieval_guidance: Vec::new(),
+            recent_changes: Vec::new(),
+            first_run: false,
             memory_provenance: Vec::new(),
         };
         let hydration = HydrationContext {

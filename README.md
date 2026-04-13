@@ -35,13 +35,13 @@ contynu codex      # wraps Codex CLI — picks up where Claude left off
 contynu gemini     # wraps Gemini CLI — has full context from both
 ```
 
-That's it. No configuration needed. Contynu auto-detects the AI tool, registers an MCP server, and delivers memory on the next session.
+That's it. No configuration needed. Contynu auto-detects the AI tool, checks for a newer platform release on startup, registers an MCP server, and delivers memory on the next session.
 
 ## How It Works
 
 1. **Launch** — Contynu wraps your AI tool and registers an MCP server for memory access
 2. **Write** — The AI model writes memories via MCP tools (`write_memory`, `record_prompt`) at each generation stop. The model decides what's worth remembering — no heuristics, no noise
-3. **Transfer** — When you switch models, Contynu delivers accumulated memory in each model's optimal format (XML for Claude, Markdown for Codex, structured text for Gemini)
+3. **Transfer** — When you switch models, Contynu delivers accumulated memory in each model's optimal format (XML for Claude, AGENTS.md-first Markdown for Codex, structured text for Gemini)
 4. **Recall** — Models search and browse the full memory archive via `search_memory` and `list_memories` MCP tools
 
 ## Key Features
@@ -51,8 +51,11 @@ That's it. No configuration needed. Contynu auto-detects the AI tool, registers 
 - **Scoped memory system** — User scope (follows you everywhere), project scope (this codebase only), session scope (ephemeral)
 - **Six memory kinds** — fact, constraint, decision, todo, user_fact, project_knowledge
 - **Model-aware rendering** — Each model receives context in its optimal format
-- **MCP server** — 6 tools: `write_memory`, `update_memory`, `delete_memory`, `record_prompt`, `search_memory`, `list_memories`
+- **Invisible continuity** — Ranked packet assembly, working-set carry-forward, startup ingestion from Claude/Codex/Gemini session files, and provider-native hydration surfaces
+- **Dream Phase hygiene** — Redundancy detection plus `suggest_consolidation` and `consolidate_memories` for Golden Fact consolidation
+- **MCP server** — 8 tools: `write_memory`, `update_memory`, `delete_memory`, `record_prompt`, `search_memory`, `list_memories`, `suggest_consolidation`, `consolidate_memories`
 - **Auto-registration** — MCP server registers itself with each CLI automatically
+- **Startup self-update check** — The binary checks GitHub Releases for a newer build for the current OS/architecture and offers exact manual or auto-update flows
 - **Prompt recording** — Every user prompt recorded verbatim with optional model interpretation
 - **Local-first** — All data stays on your machine. SQLite + content-addressed blobs
 - **Zero config** — Replace `claude` with `contynu claude`. Works immediately
@@ -93,7 +96,7 @@ See [`packages/contynu-openclaw/`](packages/contynu-openclaw/) for the plugin so
 
 ## Architecture
 
-- **Memory store:** SQLite with WAL mode (schema v5) — sessions, memory_objects, prompts, blobs, checkpoints
+- **Memory store:** SQLite with WAL mode (schema v8) — sessions, memory_objects, prompts, blobs, checkpoints, working-set state, packet observations, ingestion tracking
 - **Large content:** Content-addressed local blob store (SHA-256)
 - **Recovery:** Deterministic rehydration packets from model-written memories
 - **Memory:** Model-driven with scoped kinds, importance ratings, and provenance
@@ -145,7 +148,7 @@ contynu export-memory             # Export as Markdown
 contynu mcp-server                # Start stdio MCP server (used by LLM CLIs)
 ```
 
-The MCP server auto-registers with Claude (`.mcp.json`), Codex (`config.toml`), and Gemini (`gemini mcp add`) on first launch. Models can then call `write_memory`, `update_memory`, `delete_memory`, `record_prompt`, `search_memory`, and `list_memories` tools directly.
+The MCP server auto-registers with Claude (`.mcp.json`), Codex (`config.toml`), and Gemini (`gemini mcp add`) on first launch. Models can then call `write_memory`, `update_memory`, `delete_memory`, `record_prompt`, `search_memory`, `list_memories`, `suggest_consolidation`, and `consolidate_memories` directly.
 
 ### OpenClaw Integration
 
@@ -159,7 +162,8 @@ contynu openclaw status           # Check integration health
 ```bash
 contynu init                      # Initialize state directory
 contynu projects                  # List all projects
-contynu inspect project           # Inspect project details
+contynu ingest --dry-run          # Preview external Claude/Codex/Gemini session ingestion
+contynu distill                   # Show Dream Phase consolidation candidates
 contynu doctor                    # Diagnostic info
 contynu config validate           # Validate launcher config
 ```

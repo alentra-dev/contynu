@@ -13,7 +13,8 @@ import type { ContynuPluginConfig } from './types';
  * importance-ranked facts back to MEMORY.md.
  *
  * Agents also get MCP tools (write_memory, update_memory, delete_memory,
- * record_prompt, search_memory, list_memories) for direct memory management.
+ * record_prompt, search_memory, list_memories, suggest_consolidation,
+ * consolidate_memories) for direct memory management.
  */
 const plugin = {
   id: 'contynu-openclaw',

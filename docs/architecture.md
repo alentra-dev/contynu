@@ -4,7 +4,7 @@
 
 Contynu is a model-agnostic persistent memory layer for LLM workflows. Its purpose is to persist, index, and rehydrate structured project memory so that sessions can survive crashes, resume seamlessly, and transfer across models without loss of meaningful context.
 
-This document defines the production architecture for Contynu as of the v0.5.0 model-driven memory rewrite.
+This document defines the production architecture for Contynu as of the v0.5+ model-driven memory rewrite and the subsequent invisible-continuity work.
 
 ---
 
@@ -17,7 +17,7 @@ This document defines the production architecture for Contynu as of the v0.5.0 m
    Contynu must not depend on any one vendor's session semantics.
 
 3. **Structured recall**
-   The system supports structured memory retrieval. Memories are typed, scoped, and importance-ranked.
+   The system supports structured memory retrieval. Memories are typed, scoped, and ranked for current relevance.
 
 4. **Local-first trust model**
    The canonical state must be able to live entirely on the user's machine.
@@ -31,6 +31,9 @@ This document defines the production architecture for Contynu as of the v0.5.0 m
 7. **Prompts always recorded**
    User prompts are recorded verbatim and never filtered or summarized away.
 
+8. **Memory should feel invisible**
+   Continuation should bias toward the smallest set of relevant durable context instead of broad document-shaped rehydration.
+
 ---
 
 ## System Overview
@@ -41,7 +44,7 @@ Contynu has four core subsystems:
    Exposes tools for models to write, update, delete, and query memories, and to record user prompts.
 
 2. **Metadata Store**
-   SQLite-backed storage for sessions, memory objects, prompts, checkpoints, and schema metadata.
+   SQLite-backed storage for sessions, memory objects, prompts, checkpoints, working-set state, packet observations, ingestion tracking, and schema metadata.
 
 3. **Rehydration Engine**
    Produces a deterministic state packet from model-written memories for resume, handoff, or model switch.
@@ -57,7 +60,8 @@ Contynu has four core subsystems:
 User <-> Contynu Runtime Wrapper <-> Target LLM CLI / Agent
                 |
                 +-- MCP Server (write_memory, update_memory, delete_memory,
-                |                record_prompt, search_memory, list_memories)
+                |                record_prompt, search_memory, list_memories,
+                |                suggest_consolidation, consolidate_memories)
                 +-- Metadata Store (SQLite)
                 +-- Blob Store (content-addressed)
                 +-- Rehydration Packet Generator
@@ -73,12 +77,15 @@ The Contynu runtime sits between the user and the target LLM environment. Models
 
 A local SQLite database is the primary structured store.
 
-Core tables (schema v5):
+Core tables (schema v8):
 - `sessions` — session metadata
 - `memory_objects` — model-written memories with kind, scope, importance
 - `prompts` — user prompts recorded verbatim with optional model interpretation
 - `blobs` — blob metadata registry
 - `checkpoints` — checkpoint manifests and rehydration references
+- `working_set_entries` — carry-forward working set for next-packet relevance
+- `packet_observations` — observability for why memories were included
+- `ingested_sources` — external session ingestion tracking
 - `schema_meta` — schema version tracking
 
 SQLite is preferred for:
@@ -151,7 +158,7 @@ Fields:
 
 ## MCP Memory Interface
 
-Models interact with Contynu's memory through six MCP tools:
+Models interact with Contynu's memory through eight MCP tools:
 
 ### Write Tools
 - `write_memory` — create a new memory with kind, scope, importance, and reason
@@ -162,6 +169,10 @@ Models interact with Contynu's memory through six MCP tools:
 ### Read Tools
 - `search_memory` — text search with kind, scope, time window, sort, and pagination
 - `list_memories` — browse all memories with filtering and sorting
+
+### Dream Phase Tools
+- `suggest_consolidation` — find redundant memory clusters suitable for consolidation
+- `consolidate_memories` — merge related memories into a Golden Fact while superseding originals
 
 This replaces the previous heuristic-based memory derivation system. The model decides what matters; Contynu stores it faithfully and delivers it back on rehydration.
 
@@ -175,20 +186,21 @@ A fresh model or resumed process receives an authoritative rehydration packet as
 
 ### Rehydration Packet Sections
 1. Mission / project purpose
-2. Stable facts
-3. Constraints and preferences
-4. Decision log
-5. Current state summary
+2. Current state summary
+3. Recent changes since the last meaningful checkpoint
+4. Constraints and preferences
+5. Decision log
 6. Open loops / pending tasks
-7. Recent prompts
-8. Retrieval instructions / memory query interface
+7. Durable context selected by ranked relevance
+8. Recent prompts
+9. Retrieval instructions / memory query interface
 
 ### Rehydration Modes
 - **Resume**: continue the same session after interruption
 - **Handoff**: move to a different model or provider
 
 ### Model Instructions in Rehydration
-Rehydration packets include explicit instructions telling the model how to use the MCP tools (write_memory, update_memory, delete_memory, record_prompt). These instructions are rendered in the model's preferred format (XML for Claude, Markdown for Codex, StructuredText for Gemini).
+Rehydration packets include explicit instructions telling the model how to use the MCP tools (including Dream Phase consolidation tools when relevant). These instructions are rendered in the model's preferred format: XML for Claude, AGENTS.md-first Markdown for Codex, and StructuredText for Gemini.
 
 ---
 
@@ -202,6 +214,8 @@ Contynu supports structured retrieval through the MCP interface:
 - by time window
 - by text search
 - sorted by importance or recency
+
+Packet selection also uses a persistent working set and prompt-aware ranking so recently useful memories can carry forward without repeated full-archive reconstruction.
 
 Semantic retrieval via embeddings remains intentionally deferred.
 

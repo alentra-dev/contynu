@@ -1,5 +1,6 @@
 mod mcp_registration;
 mod mcp_server;
+mod update_check;
 
 use std::ffi::OsString;
 use std::io::{self, Write};
@@ -9,7 +10,7 @@ use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
 use contynu_core::{
     BlobStore, CheckpointManager, ContynuConfig, MetadataStore, ProjectId, RunConfig, RunOutcome,
-    RuntimeEngine, StatePaths,
+    RuntimeEngine, SessionRecord, StatePaths,
 };
 
 #[derive(Debug, Parser)]
@@ -83,6 +84,21 @@ enum Command {
         #[command(subcommand)]
         command: OpenClawCommand,
     },
+    /// Discover and ingest unrecorded sessions from Claude Code, Codex, and Gemini
+    Ingest {
+        /// Show what would be ingested without actually doing it
+        #[arg(long)]
+        dry_run: bool,
+        /// Only ingest from a specific tool (claude, codex, gemini)
+        #[arg(long)]
+        tool: Option<String>,
+    },
+    /// Dream Phase: scan for redundant memories and show consolidation candidates
+    Distill {
+        /// Project ID to distill (defaults to primary project)
+        #[arg(long)]
+        project: Option<String>,
+    },
     Doctor,
     /// Start the Contynu MCP server (stdio transport)
     #[command(name = "mcp-server")]
@@ -148,6 +164,15 @@ enum ConfigCommand {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if matches!(cli.command, Some(Command::McpServer { .. })) {
+        // Skip interactive startup work for stdio MCP transport.
+    } else {
+        match update_check::maybe_handle_startup_update(false)? {
+            update_check::StartupUpdateOutcome::Continue => {}
+            update_check::StartupUpdateOutcome::ExitAfterManualPrompt
+            | update_check::StartupUpdateOutcome::ExitAfterAutoUpdate => return Ok(()),
+        }
+    }
     let state = StatePaths::new(&cli.state_dir);
     maybe_reset_state_for_new(&state, cli.command.as_ref(), cli.new)?;
 
@@ -170,12 +195,18 @@ fn main() -> Result<()> {
             target_model,
         }) => resume(&state, project.as_deref(), Some(target_model)),
         Some(Command::Search { command }) => search(&state, command),
+        Some(Command::Ingest { dry_run, tool }) => ingest(&state, &cli.cwd, dry_run, tool),
+        Some(Command::Distill { project }) => distill(&state, project.as_deref()),
         Some(Command::Doctor) => doctor(&state),
         Some(Command::OpenClaw { command }) => openclaw_command(&state, &cli.cwd, command),
-        Some(Command::ExportMemory { project, max_chars, with_markers }) => {
-            export_memory(&state, project.as_deref(), max_chars, with_markers)
-        }
-        Some(Command::McpServer { state_dir: override_dir }) => {
+        Some(Command::ExportMemory {
+            project,
+            max_chars,
+            with_markers,
+        }) => export_memory(&state, project.as_deref(), max_chars, with_markers),
+        Some(Command::McpServer {
+            state_dir: override_dir,
+        }) => {
             let dir = override_dir.unwrap_or_else(|| {
                 std::env::var("CONTYNU_STATE_DIR")
                     .map(PathBuf::from)
@@ -304,25 +335,14 @@ fn launch_llm(
     executable: &str,
     command: LlmCommand,
 ) -> Result<()> {
-    // Resolve project ID for MCP registration
-    let project_id_for_mcp = {
-        ensure_state(state)?;
-        let store = MetadataStore::open(state.sqlite_db())?;
-        command
-            .project
-            .as_ref()
-            .map(|p| ProjectId::parse(p.clone()))
-            .transpose()?
-            .or(store.primary_project_id()?)
-    };
+    let project_id =
+        reserve_project_for_llm_launch(state, cwd, executable, command.project.as_deref())?;
 
     // Auto-register MCP server for this CLI (non-fatal on failure)
-    if let Some(ref pid) = project_id_for_mcp {
-        if let Err(e) =
-            mcp_registration::ensure_mcp_registered(executable, state.root(), cwd, pid.as_str())
-        {
-            eprintln!("Warning: MCP auto-registration: {e}");
-        }
+    if let Err(e) =
+        mcp_registration::ensure_mcp_registered(executable, state.root(), cwd, project_id.as_str())
+    {
+        eprintln!("Warning: MCP auto-registration: {e}");
     }
 
     let mut argv = vec![executable.to_string()];
@@ -333,10 +353,52 @@ fn launch_llm(
         command: argv.into_iter().map(Into::into).collect(),
         ignore_patterns: command.ignore_patterns,
         checkpoint_on_exit: !command.no_checkpoint,
-        project_id: command.project.map(ProjectId::parse).transpose()?,
+        project_id: Some(project_id),
     })?;
     print_run_footer(&outcome);
     Ok(())
+}
+
+fn reserve_project_for_llm_launch(
+    state: &StatePaths,
+    cwd: &PathBuf,
+    executable: &str,
+    explicit_project: Option<&str>,
+) -> Result<ProjectId> {
+    ensure_state(state)?;
+    let store = MetadataStore::open(state.sqlite_db())?;
+
+    if let Some(project) = explicit_project {
+        let project_id = ProjectId::parse(project)?;
+        if !store.session_exists(&project_id)? {
+            return Err(anyhow!("project `{project_id}` does not exist"));
+        }
+        if store.primary_project_id()?.as_ref() != Some(&project_id) {
+            store.set_primary_project_id(&project_id)?;
+        }
+        return Ok(project_id);
+    }
+
+    if let Some(project_id) = store.primary_project_id()? {
+        return Ok(project_id);
+    }
+
+    let project_id = ProjectId::new();
+    store.register_session(&SessionRecord {
+        session_id: project_id.clone(),
+        project_id: Some(project_id.to_string()),
+        status: "active".into(),
+        cli_name: Some(executable.into()),
+        cli_version: None,
+        model_name: None,
+        cwd: Some(cwd.display().to_string()),
+        repo_root: Some(cwd.display().to_string()),
+        host_fingerprint: None,
+        started_at: chrono::Utc::now(),
+        ended_at: None,
+    })?;
+    store.set_primary_project_id(&project_id)?;
+    Ok(project_id)
 }
 
 fn passthrough(state: &StatePaths, cwd: &PathBuf, command: Vec<OsString>) -> Result<()> {
@@ -356,9 +418,11 @@ fn checkpoint(state: &StatePaths, project: Option<&str>, reason: &str) -> Result
     ensure_state(state)?;
     let project_id = resolve_project_id(state, project)?;
     let store = MetadataStore::open(state.sqlite_db())?;
+    let config = ContynuConfig::load(&state.config_path())?;
     let blobs = BlobStore::new(state.blobs_root());
     let manager = CheckpointManager::new(state, &store, &blobs);
-    let (manifest, packet) = manager.create_checkpoint(&project_id, reason, None)?;
+    let (manifest, packet) =
+        manager.create_checkpoint(&project_id, reason, None, &config.packet_budget.to_budget())?;
     print_checkpoint_result(&manifest, &packet)
 }
 
@@ -366,9 +430,14 @@ fn resume(state: &StatePaths, project: Option<&str>, target_model: Option<String
     ensure_state(state)?;
     let project_id = resolve_project_id(state, project)?;
     let store = MetadataStore::open(state.sqlite_db())?;
+    let config = ContynuConfig::load(&state.config_path())?;
     let blobs = BlobStore::new(state.blobs_root());
     let manager = CheckpointManager::new(state, &store, &blobs);
-    let packet = manager.build_packet(&project_id, target_model)?;
+    let packet = manager.build_packet_with_budget(
+        &project_id,
+        target_model,
+        &config.packet_budget.to_budget(),
+    )?;
     print_rehydration_packet(
         if packet.target_model.is_some() {
             "Handoff Ready"
@@ -535,6 +604,133 @@ fn export_memory(
     Ok(())
 }
 
+fn ingest(
+    state: &StatePaths,
+    cwd: &std::path::PathBuf,
+    dry_run: bool,
+    _tool_filter: Option<String>,
+) -> Result<()> {
+    ensure_state(state)?;
+    let store = MetadataStore::open(state.sqlite_db())?;
+    let project_id = resolve_primary_project(&store)?;
+
+    let cwd_abs = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.clone());
+    let report = contynu_core::discovery::discover_all(&store, &cwd_abs)?;
+
+    if report.total_new == 0 {
+        println!("No new memories discovered from external AI tools.");
+        return Ok(());
+    }
+
+    println!("Discovery results for {}:", cwd_abs.display());
+    println!();
+
+    if !report.claude_memories.is_empty() {
+        println!(
+            "  Claude Code: {} new memories",
+            report.claude_memories.len()
+        );
+        for m in &report.claude_memories {
+            println!(
+                "    [{:>17}] {}",
+                m.kind.as_str(),
+                truncate_text(&m.text, 80)
+            );
+        }
+    }
+    if !report.codex_memories.is_empty() {
+        println!(
+            "  Codex:       {} new memories",
+            report.codex_memories.len()
+        );
+        for m in &report.codex_memories {
+            println!(
+                "    [{:>17}] {}",
+                m.kind.as_str(),
+                truncate_text(&m.text, 80)
+            );
+        }
+    }
+    if !report.gemini_memories.is_empty() {
+        println!(
+            "  Gemini:      {} new memories",
+            report.gemini_memories.len()
+        );
+        for m in &report.gemini_memories {
+            println!(
+                "    [{:>17}] {}",
+                m.kind.as_str(),
+                truncate_text(&m.text, 80)
+            );
+        }
+    }
+
+    println!();
+
+    if dry_run {
+        println!("Dry run — {} memories would be ingested.", report.total_new);
+        return Ok(());
+    }
+
+    let ingested = contynu_core::discovery::ingest_memories(&store, &project_id, &report)?;
+    println!(
+        "Ingested {} memories into project {}.",
+        ingested, project_id
+    );
+    Ok(())
+}
+
+fn truncate_text(text: &str, max_len: usize) -> String {
+    let one = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one.len() <= max_len {
+        one
+    } else {
+        format!("{}...", &one[..max_len.saturating_sub(3)])
+    }
+}
+
+fn distill(state: &StatePaths, project: Option<&str>) -> Result<()> {
+    ensure_state(state)?;
+    let store = MetadataStore::open(state.sqlite_db())?;
+    let project_id = match project {
+        Some(p) => ProjectId::parse(p).map_err(|e| anyhow!("{e}"))?,
+        None => resolve_primary_project(&store)?,
+    };
+
+    let candidates = contynu_core::distiller::suggest_consolidation(&store, &project_id)?;
+
+    if candidates.is_empty() {
+        println!("No consolidation candidates found. Memory is clean.");
+        return Ok(());
+    }
+
+    println!(
+        "Dream Phase: {} consolidation candidates found\n",
+        candidates.len()
+    );
+
+    for (i, candidate) in candidates.iter().enumerate() {
+        println!(
+            "  Cluster {} ({}, {} memories, {:.0}% similarity):",
+            i + 1,
+            candidate.kind.as_str(),
+            candidate.memory_ids.len(),
+            candidate.avg_similarity * 100.0,
+        );
+        for (j, text) in candidate.texts.iter().enumerate() {
+            let id = candidate.memory_ids[j].as_str();
+            let display = truncate_text(text, 70);
+            println!("    [{id}] {display}");
+        }
+        println!();
+    }
+
+    println!("Use the consolidate_memories MCP tool to merge these clusters,");
+    println!("or let your AI agent do it during the next session.");
+
+    Ok(())
+}
+
 fn openclaw_command(
     state: &StatePaths,
     cwd: &std::path::PathBuf,
@@ -583,9 +779,12 @@ fn openclaw_setup(
             .join(".openclaw")
             .join("openclaw.json")
     });
-    if let Err(e) =
-        mcp_registration::ensure_mcp_registered("openclaw", state.root(), &oc_config, project_id.as_str())
-    {
+    if let Err(e) = mcp_registration::ensure_mcp_registered(
+        "openclaw",
+        state.root(),
+        &oc_config,
+        project_id.as_str(),
+    ) {
         eprintln!("Warning: Could not register MCP server in OpenClaw config: {e}");
     }
 
@@ -641,7 +840,11 @@ fn openclaw_status(state: &StatePaths) -> Result<()> {
     }
 
     let oc_config_path = std::env::var("HOME")
-        .map(|h| std::path::PathBuf::from(h).join(".openclaw").join("openclaw.json"))
+        .map(|h| {
+            std::path::PathBuf::from(h)
+                .join(".openclaw")
+                .join("openclaw.json")
+        })
         .unwrap_or_default();
     if oc_config_path.exists() {
         let content = std::fs::read_to_string(&oc_config_path).unwrap_or_default();
@@ -677,18 +880,12 @@ fn print_run_footer(outcome: &RunOutcome) {
     let lines = if outcome.interrupted {
         vec![
             "Contynu paused here.".to_string(),
-            format!(
-                "Project {}.",
-                short_id(outcome.project_id.as_str())
-            ),
+            format!("Project {}.", short_id(outcome.project_id.as_str())),
         ]
     } else {
         vec![
             "Let's contynu another time. Goodbye for now.".to_string(),
-            format!(
-                "Project {}.",
-                short_id(outcome.project_id.as_str())
-            ),
+            format!("Project {}.", short_id(outcome.project_id.as_str())),
         ]
     };
 

@@ -73,26 +73,20 @@ macro_rules! typed_id {
 }
 
 typed_id!(ProjectId, "prj");
-typed_id!(TurnId, "trn");
-typed_id!(EventId, "evt");
-typed_id!(ArtifactId, "art");
 typed_id!(CheckpointId, "chk");
-typed_id!(FileId, "fil");
 typed_id!(MemoryId, "mem");
 
 pub type SessionId = ProjectId;
 
 #[cfg(test)]
 mod tests {
-    use super::{EventId, ProjectId};
+    use super::ProjectId;
 
     #[test]
     fn ids_are_prefixed_and_parseable() {
         let project = ProjectId::new();
-        let event = EventId::new();
 
         assert!(project.as_str().starts_with("prj_"));
-        assert!(event.as_str().starts_with("evt_"));
         assert_eq!(
             ProjectId::parse(project.as_str()).unwrap().as_str(),
             project.as_str()

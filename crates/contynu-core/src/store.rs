@@ -41,7 +41,7 @@ pub struct CheckpointRecord {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryObjectKind {
     Fact,
@@ -133,6 +133,15 @@ pub struct PromptRecord {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkingSetEntry {
+    pub session_id: SessionId,
+    pub memory_id: MemoryId,
+    pub rank_score: f64,
+    pub source_reason: Option<String>,
+    pub refreshed_at: DateTime<Utc>,
+}
+
 /// Query parameters for flexible memory search.
 pub struct MemoryQuery {
     pub session_id: Option<SessionId>,
@@ -196,50 +205,207 @@ impl MetadataStore {
 
     pub fn migrate(&self) -> Result<()> {
         // Check if we need a full reset (v5 architecture) or fresh install
-        let has_schema_meta = self.conn.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_meta'",
-            [],
-            |row| row.get::<_, i64>(0),
-        ).unwrap_or(0) > 0;
+        let has_schema_meta = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_meta'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            > 0;
 
         let current_version = if has_schema_meta {
-            self.conn.query_row(
-                "SELECT value FROM schema_meta WHERE key = 'schema_version'",
-                [],
-                |row| row.get::<_, String>(0),
-            ).optional()?.and_then(|v| v.parse::<i64>().ok()).unwrap_or(0)
+            self.conn
+                .query_row(
+                    "SELECT value FROM schema_meta WHERE key = 'schema_version'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .and_then(|v| v.parse::<i64>().ok())
+                .unwrap_or(0)
         } else {
             0
         };
 
-        if current_version >= 5 {
+        if current_version >= 8 {
+            return Ok(());
+        }
+
+        // v7 → v8: additive migration (packet observations)
+        if current_version == 7 {
+            self.conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS packet_observations (
+                  observation_id TEXT PRIMARY KEY,
+                  session_id TEXT NOT NULL,
+                  summary_json TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_packet_observations_session_created
+                  ON packet_observations(session_id, created_at DESC);
+                "#,
+            )?;
+            self.conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value, updated_at) VALUES (?1, ?2, ?3)",
+                params!["schema_version", "8", Utc::now().to_rfc3339()],
+            )?;
+            return Ok(());
+        }
+
+        // v6 → v7: additive migration (working set)
+        if current_version == 6 {
+            self.conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS working_set_entries (
+                  session_id TEXT NOT NULL,
+                  memory_id TEXT NOT NULL,
+                  rank_score REAL NOT NULL DEFAULT 0,
+                  source_reason TEXT,
+                  refreshed_at TEXT NOT NULL,
+                  PRIMARY KEY (session_id, memory_id),
+                  FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE,
+                  FOREIGN KEY(memory_id) REFERENCES memory_objects(memory_id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_working_set_session_rank
+                  ON working_set_entries(session_id, rank_score DESC, refreshed_at DESC);
+                CREATE TABLE IF NOT EXISTS packet_observations (
+                  observation_id TEXT PRIMARY KEY,
+                  session_id TEXT NOT NULL,
+                  summary_json TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_packet_observations_session_created
+                  ON packet_observations(session_id, created_at DESC);
+                "#,
+            )?;
+            self.conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value, updated_at) VALUES (?1, ?2, ?3)",
+                params!["schema_version", "8", Utc::now().to_rfc3339()],
+            )?;
+            return Ok(());
+        }
+
+        // v5 → v8: additive migration (no drops)
+        if current_version == 5 {
+            self.conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS ingested_sources (
+                  source_path TEXT PRIMARY KEY,
+                  source_tool TEXT NOT NULL,
+                  ingested_at TEXT NOT NULL,
+                  memory_count INTEGER DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS working_set_entries (
+                  session_id TEXT NOT NULL,
+                  memory_id TEXT NOT NULL,
+                  rank_score REAL NOT NULL DEFAULT 0,
+                  source_reason TEXT,
+                  refreshed_at TEXT NOT NULL,
+                  PRIMARY KEY (session_id, memory_id),
+                  FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE,
+                  FOREIGN KEY(memory_id) REFERENCES memory_objects(memory_id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_working_set_session_rank
+                  ON working_set_entries(session_id, rank_score DESC, refreshed_at DESC);
+                CREATE TABLE IF NOT EXISTS packet_observations (
+                  observation_id TEXT PRIMARY KEY,
+                  session_id TEXT NOT NULL,
+                  summary_json TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_packet_observations_session_created
+                  ON packet_observations(session_id, created_at DESC);
+                "#,
+            )?;
+            self.conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value, updated_at) VALUES (?1, ?2, ?3)",
+                params!["schema_version", "8", Utc::now().to_rfc3339()],
+            )?;
             return Ok(());
         }
 
         // If upgrading from old architecture (v1-v4), drop legacy tables
         if current_version > 0 && current_version < 5 {
-            self.conn.execute_batch(
-                r#"
-                DROP TABLE IF EXISTS events;
-                DROP TABLE IF EXISTS turns;
-                DROP TABLE IF EXISTS files;
-                DROP TABLE IF EXISTS artifacts;
-                DROP TABLE IF EXISTS checkpoints;
-                DROP TABLE IF EXISTS memory_objects;
-                DROP TABLE IF EXISTS blobs;
-                DROP TABLE IF EXISTS schema_migrations;
-                DROP TABLE IF EXISTS schema_meta;
-                DROP TABLE IF EXISTS prompts;
-                "#,
-            )?;
+            // Safety check: if memory_objects has v5-compatible data, skip the drop
+            // to prevent accidental data loss from schema_version being reset
+            let has_v5_memories = self.conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memory_objects'",
+                [],
+                |row| row.get::<_, i64>(0),
+            ).unwrap_or(0) > 0
+                && self.conn.query_row(
+                    "SELECT COUNT(*) FROM memory_objects WHERE status = 'active'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                ).unwrap_or(0) > 0;
+
+            if has_v5_memories {
+                eprintln!("[contynu] Warning: skipping migration drop — memory_objects has active data despite schema_version < 5");
+            } else {
+                eprintln!(
+                    "[contynu] Migrating from v{current_version} to v5: dropping legacy tables"
+                );
+                self.conn.execute_batch(
+                    r#"
+                    DROP TABLE IF EXISTS events;
+                    DROP TABLE IF EXISTS turns;
+                    DROP TABLE IF EXISTS files;
+                    DROP TABLE IF EXISTS artifacts;
+                    DROP TABLE IF EXISTS checkpoints;
+                    DROP TABLE IF EXISTS memory_objects;
+                    DROP TABLE IF EXISTS blobs;
+                    DROP TABLE IF EXISTS schema_migrations;
+                    DROP TABLE IF EXISTS schema_meta;
+                    DROP TABLE IF EXISTS prompts;
+                    "#,
+                )?;
+            }
         }
 
         // Apply v5 schema (fresh)
         self.conn.execute_batch(MIGRATION_V5)?;
 
+        // Apply v6/v7/v8 additions
+        self.conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS ingested_sources (
+              source_path TEXT PRIMARY KEY,
+              source_tool TEXT NOT NULL,
+              ingested_at TEXT NOT NULL,
+              memory_count INTEGER DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS working_set_entries (
+              session_id TEXT NOT NULL,
+              memory_id TEXT NOT NULL,
+              rank_score REAL NOT NULL DEFAULT 0,
+              source_reason TEXT,
+              refreshed_at TEXT NOT NULL,
+              PRIMARY KEY (session_id, memory_id),
+              FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE,
+              FOREIGN KEY(memory_id) REFERENCES memory_objects(memory_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_working_set_session_rank
+              ON working_set_entries(session_id, rank_score DESC, refreshed_at DESC);
+            CREATE TABLE IF NOT EXISTS packet_observations (
+              observation_id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL,
+              summary_json TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_packet_observations_session_created
+              ON packet_observations(session_id, created_at DESC);
+            "#,
+        )?;
+
         self.conn.execute(
             "INSERT OR REPLACE INTO schema_meta (key, value, updated_at) VALUES (?1, ?2, ?3)",
-            params!["schema_version", "5", Utc::now().to_rfc3339()],
+            params!["schema_version", "8", Utc::now().to_rfc3339()],
         )?;
 
         Ok(())
@@ -273,18 +439,25 @@ impl MetadataStore {
     }
 
     pub fn primary_project_id(&self) -> Result<Option<SessionId>> {
-        let value = self.conn.query_row(
-            "SELECT value FROM schema_meta WHERE key = ?1",
-            params![PRIMARY_PROJECT_KEY],
-            |row| row.get::<_, String>(0),
-        ).optional()?;
+        let value = self
+            .conn
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = ?1",
+                params![PRIMARY_PROJECT_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
         value.map(SessionId::parse).transpose()
     }
 
     pub fn set_primary_project_id(&self, session_id: &SessionId) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO schema_meta (key, value, updated_at) VALUES (?1, ?2, ?3)",
-            params![PRIMARY_PROJECT_KEY, session_id.as_str(), Utc::now().to_rfc3339()],
+            params![
+                PRIMARY_PROJECT_KEY,
+                session_id.as_str(),
+                Utc::now().to_rfc3339()
+            ],
         )?;
         Ok(())
     }
@@ -297,22 +470,28 @@ impl MetadataStore {
             FROM sessions WHERE session_id = ?1
             "#,
         )?;
-        let session = stmt.query_row(params![session_id.as_str()], |row| {
-            Ok(SessionRecord {
-                session_id: SessionId::parse(row.get::<_, String>(0)?).map_err(into_sql_error)?,
-                project_id: row.get(1)?,
-                status: row.get(2)?,
-                cli_name: row.get(3)?,
-                cli_version: row.get(4)?,
-                model_name: row.get(5)?,
-                cwd: row.get(6)?,
-                repo_root: row.get(7)?,
-                host_fingerprint: row.get(8)?,
-                started_at: parse_rfc3339(&row.get::<_, String>(9)?).map_err(into_sql_error)?,
-                ended_at: row.get::<_, Option<String>>(10)?
-                    .map(|v| parse_rfc3339(&v)).transpose().map_err(into_sql_error)?,
+        let session = stmt
+            .query_row(params![session_id.as_str()], |row| {
+                Ok(SessionRecord {
+                    session_id: SessionId::parse(row.get::<_, String>(0)?)
+                        .map_err(into_sql_error)?,
+                    project_id: row.get(1)?,
+                    status: row.get(2)?,
+                    cli_name: row.get(3)?,
+                    cli_version: row.get(4)?,
+                    model_name: row.get(5)?,
+                    cwd: row.get(6)?,
+                    repo_root: row.get(7)?,
+                    host_fingerprint: row.get(8)?,
+                    started_at: parse_rfc3339(&row.get::<_, String>(9)?).map_err(into_sql_error)?,
+                    ended_at: row
+                        .get::<_, Option<String>>(10)?
+                        .map(|v| parse_rfc3339(&v))
+                        .transpose()
+                        .map_err(into_sql_error)?,
+                })
             })
-        }).optional()?;
+            .optional()?;
         Ok(session)
     }
 
@@ -336,19 +515,30 @@ impl MetadataStore {
                 repo_root: row.get(7)?,
                 host_fingerprint: row.get(8)?,
                 started_at: parse_rfc3339(&row.get::<_, String>(9)?).map_err(into_sql_error)?,
-                ended_at: row.get::<_, Option<String>>(10)?
-                    .map(|v| parse_rfc3339(&v)).transpose().map_err(into_sql_error)?,
+                ended_at: row
+                    .get::<_, Option<String>>(10)?
+                    .map(|v| parse_rfc3339(&v))
+                    .transpose()
+                    .map_err(into_sql_error)?,
             })
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub fn update_session_status(
-        &self, session_id: &SessionId, status: &str, ended_at: Option<DateTime<Utc>>,
+        &self,
+        session_id: &SessionId,
+        status: &str,
+        ended_at: Option<DateTime<Utc>>,
     ) -> Result<()> {
         self.conn.execute(
             "UPDATE sessions SET status = ?2, ended_at = ?3 WHERE session_id = ?1",
-            params![session_id.as_str(), status, ended_at.map(|v| v.to_rfc3339())],
+            params![
+                session_id.as_str(),
+                status,
+                ended_at.map(|v| v.to_rfc3339())
+            ],
         )?;
         Ok(())
     }
@@ -378,7 +568,9 @@ impl MetadataStore {
     // -- Checkpoint operations ------------------------------------------------
 
     pub fn register_checkpoint(
-        &self, checkpoint: &CheckpointRecord, manifest: &CheckpointManifest,
+        &self,
+        checkpoint: &CheckpointRecord,
+        manifest: &CheckpointManifest,
     ) -> Result<()> {
         self.conn.execute(
             r#"
@@ -430,7 +622,11 @@ impl MetadataStore {
     }
 
     pub fn update_memory_text(
-        &self, memory_id: &MemoryId, text: &str, importance: f64, reason: Option<&str>,
+        &self,
+        memory_id: &MemoryId,
+        text: &str,
+        importance: f64,
+        reason: Option<&str>,
     ) -> Result<()> {
         let rows = self.conn.execute(
             r#"
@@ -438,7 +634,13 @@ impl MetadataStore {
             SET text = ?2, importance = ?3, reason = ?4, updated_at = ?5
             WHERE memory_id = ?1 AND status = 'active'
             "#,
-            params![memory_id.as_str(), text, importance, reason, Utc::now().to_rfc3339()],
+            params![
+                memory_id.as_str(),
+                text,
+                importance,
+                reason,
+                Utc::now().to_rfc3339()
+            ],
         )?;
         if rows == 0 {
             return Err(ContynuError::MemoryNotFound(memory_id.to_string()));
@@ -457,9 +659,7 @@ impl MetadataStore {
         Ok(())
     }
 
-    pub fn supersede_memory(
-        &self, memory_id: &MemoryId, superseded_by: &MemoryId,
-    ) -> Result<()> {
+    pub fn supersede_memory(&self, memory_id: &MemoryId, superseded_by: &MemoryId) -> Result<()> {
         self.conn.execute(
             r#"
             UPDATE memory_objects
@@ -471,16 +671,94 @@ impl MetadataStore {
         Ok(())
     }
 
+    /// Atomically consolidate multiple memories into a single Golden Fact.
+    /// Inserts the new memory and supersedes all originals in one transaction.
+    /// Returns the number of memories superseded.
+    pub fn consolidate_memories(
+        &self,
+        originals: &[MemoryId],
+        golden: &MemoryObject,
+    ) -> Result<usize> {
+        if originals.is_empty() {
+            return Err(ContynuError::Validation(
+                "consolidate_memories requires at least one original memory".into(),
+            ));
+        }
+
+        self.conn.execute_batch("BEGIN")?;
+        let result = (|| {
+            // Insert the Golden Fact
+            self.conn.execute(
+                r#"
+                INSERT INTO memory_objects (
+                  memory_id, session_id, kind, scope, status, text, importance, reason,
+                  source_model, superseded_by, created_at, updated_at,
+                  access_count, last_accessed_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                "#,
+                params![
+                    golden.memory_id.as_str(),
+                    golden.session_id.as_str(),
+                    golden.kind.as_str(),
+                    golden.scope.as_str(),
+                    "active",
+                    golden.text,
+                    golden.importance,
+                    golden.reason,
+                    golden.source_model,
+                    None::<String>,
+                    golden.created_at.to_rfc3339(),
+                    None::<String>,
+                    0,
+                    None::<String>,
+                ],
+            )?;
+
+            // Supersede each original
+            let mut superseded = 0usize;
+            for id in originals {
+                let rows = self.conn.execute(
+                    r#"
+                    UPDATE memory_objects
+                    SET status = 'superseded', superseded_by = ?2, updated_at = ?3
+                    WHERE memory_id = ?1 AND status = 'active'
+                    "#,
+                    params![
+                        id.as_str(),
+                        golden.memory_id.as_str(),
+                        Utc::now().to_rfc3339()
+                    ],
+                )?;
+                superseded += rows;
+            }
+            Ok::<usize, ContynuError>(superseded)
+        })();
+        match result {
+            Ok(count) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(count)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
     pub fn get_memory(&self, memory_id: &MemoryId) -> Result<Option<MemoryObject>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {MEMORY_COLUMNS} FROM memory_objects WHERE memory_id = ?1"
         ))?;
-        let memory = stmt.query_row(params![memory_id.as_str()], map_memory).optional()?;
+        let memory = stmt
+            .query_row(params![memory_id.as_str()], map_memory)
+            .optional()?;
         Ok(memory)
     }
 
     pub fn list_active_memories(
-        &self, session_id: &SessionId, kind: Option<MemoryObjectKind>,
+        &self,
+        session_id: &SessionId,
+        kind: Option<MemoryObjectKind>,
     ) -> Result<Vec<MemoryObject>> {
         let sql = if kind.is_some() {
             format!(
@@ -501,9 +779,11 @@ impl MetadataStore {
         } else {
             stmt.query_map(params![session_id.as_str()], map_memory)?
         };
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
+    #[allow(unused_assignments)] // param_idx final increment is intentional for consistency
     pub fn query_memories(&self, query: &MemoryQuery) -> Result<Vec<MemoryObject>> {
         let mut conditions = vec!["status = 'active'".to_string()];
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -537,7 +817,7 @@ impl MetadataStore {
         if let Some(ref before) = query.before {
             conditions.push(format!("created_at <= ?{param_idx}"));
             param_values.push(Box::new(before.to_rfc3339()));
-            let _ = param_idx;
+            param_idx += 1;
         }
 
         let order = match query.sort_by {
@@ -546,15 +826,18 @@ impl MetadataStore {
         };
         let limit = query.limit.min(50).max(1);
 
-        let sql = format!(
+        let sql =
+            format!(
             "SELECT {MEMORY_COLUMNS} FROM memory_objects WHERE {} ORDER BY {} LIMIT {} OFFSET {}",
             conditions.join(" AND "), order, limit, query.offset
         );
 
-        let params: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let params: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params.as_slice(), map_memory)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub fn search_memory(&self, query: &str) -> Result<Vec<MemoryObject>> {
@@ -567,11 +850,14 @@ impl MetadataStore {
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![needle], map_memory)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub fn count_active_memories(
-        &self, session_id: &SessionId, kind: Option<MemoryObjectKind>,
+        &self,
+        session_id: &SessionId,
+        kind: Option<MemoryObjectKind>,
     ) -> Result<usize> {
         let count = if let Some(kind) = kind {
             self.conn.query_row(
@@ -590,13 +876,118 @@ impl MetadataStore {
     }
 
     pub fn increment_memory_access(&self, memory_ids: &[MemoryId]) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        for id in memory_ids {
-            self.conn.execute(
-                "UPDATE memory_objects SET access_count = access_count + 1, last_accessed_at = ?2 WHERE memory_id = ?1",
-                params![id.as_str(), now],
-            )?;
+        if memory_ids.is_empty() {
+            return Ok(());
         }
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute_batch("BEGIN")?;
+        let result = (|| {
+            for id in memory_ids {
+                self.conn.execute(
+                    "UPDATE memory_objects SET access_count = access_count + 1, last_accessed_at = ?2 WHERE memory_id = ?1",
+                    params![id.as_str(), now],
+                )?;
+            }
+            Ok::<_, crate::error::ContynuError>(())
+        })();
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    pub fn replace_working_set(
+        &self,
+        session_id: &SessionId,
+        entries: &[WorkingSetEntry],
+    ) -> Result<()> {
+        self.conn.execute_batch("BEGIN")?;
+        let result = (|| {
+            self.conn.execute(
+                "DELETE FROM working_set_entries WHERE session_id = ?1",
+                params![session_id.as_str()],
+            )?;
+            for entry in entries {
+                self.conn.execute(
+                    r#"
+                    INSERT INTO working_set_entries (
+                      session_id, memory_id, rank_score, source_reason, refreshed_at
+                    ) VALUES (?1, ?2, ?3, ?4, ?5)
+                    "#,
+                    params![
+                        entry.session_id.as_str(),
+                        entry.memory_id.as_str(),
+                        entry.rank_score,
+                        entry.source_reason,
+                        entry.refreshed_at.to_rfc3339(),
+                    ],
+                )?;
+            }
+            Ok::<_, crate::error::ContynuError>(())
+        })();
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    pub fn list_working_set(
+        &self,
+        session_id: &SessionId,
+        limit: usize,
+    ) -> Result<Vec<WorkingSetEntry>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT session_id, memory_id, rank_score, source_reason, refreshed_at
+            FROM working_set_entries
+            WHERE session_id = ?1
+            ORDER BY rank_score DESC, refreshed_at DESC
+            LIMIT ?2
+            "#,
+        )?;
+        let rows = stmt.query_map(params![session_id.as_str(), limit as i64], |row| {
+            Ok(WorkingSetEntry {
+                session_id: SessionId::parse(row.get::<_, String>(0)?).map_err(into_sql_error)?,
+                memory_id: MemoryId::parse(row.get::<_, String>(1)?).map_err(into_sql_error)?,
+                rank_score: row.get(2)?,
+                source_reason: row.get(3)?,
+                refreshed_at: parse_rfc3339(&row.get::<_, String>(4)?).map_err(into_sql_error)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn record_packet_observation(
+        &self,
+        session_id: &SessionId,
+        summary_json: &str,
+    ) -> Result<()> {
+        let observation_id = format!("obs_{}", uuid::Uuid::now_v7().simple());
+        self.conn.execute(
+            r#"
+            INSERT INTO packet_observations (observation_id, session_id, summary_json, created_at)
+            VALUES (?1, ?2, ?3, ?4)
+            "#,
+            params![
+                observation_id,
+                session_id.as_str(),
+                summary_json,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
         Ok(())
     }
 
@@ -623,7 +1014,11 @@ impl MetadataStore {
         Ok(())
     }
 
-    pub fn list_recent_prompts(&self, session_id: &SessionId, limit: usize) -> Result<Vec<PromptRecord>> {
+    pub fn list_recent_prompts(
+        &self,
+        session_id: &SessionId,
+        limit: usize,
+    ) -> Result<Vec<PromptRecord>> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT prompt_id, session_id, verbatim, interpretation, interpretation_confidence,
@@ -643,7 +1038,35 @@ impl MetadataStore {
                 created_at: parse_rfc3339(&row.get::<_, String>(6)?).map_err(into_sql_error)?,
             })
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    // -- Ingestion tracking ----------------------------------------------------
+
+    pub fn is_source_ingested(&self, source_path: &str) -> Result<bool> {
+        let count = self.conn.query_row(
+            "SELECT COUNT(*) FROM ingested_sources WHERE source_path = ?1",
+            params![source_path],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn mark_source_ingested(
+        &self,
+        source_path: &str,
+        source_tool: &str,
+        memory_count: usize,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT OR REPLACE INTO ingested_sources (source_path, source_tool, ingested_at, memory_count)
+            VALUES (?1, ?2, ?3, ?4)
+            "#,
+            params![source_path, source_tool, Utc::now().to_rfc3339(), memory_count as i64],
+        )?;
+        Ok(())
     }
 
     /// Purge all data from old architecture (events, turns, files, etc.)
@@ -688,14 +1111,23 @@ fn map_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryObject> {
         importance: row.get::<_, Option<f64>>(6)?.unwrap_or(0.5),
         reason: row.get(7)?,
         source_model: row.get(8)?,
-        superseded_by: row.get::<_, Option<String>>(9)?
-            .map(MemoryId::parse).transpose().map_err(into_sql_error)?,
+        superseded_by: row
+            .get::<_, Option<String>>(9)?
+            .map(MemoryId::parse)
+            .transpose()
+            .map_err(into_sql_error)?,
         created_at: parse_rfc3339(&row.get::<_, String>(10)?).map_err(into_sql_error)?,
-        updated_at: row.get::<_, Option<String>>(11)?
-            .map(|s| parse_rfc3339(&s)).transpose().map_err(into_sql_error)?,
+        updated_at: row
+            .get::<_, Option<String>>(11)?
+            .map(|s| parse_rfc3339(&s))
+            .transpose()
+            .map_err(into_sql_error)?,
         access_count: row.get::<_, Option<u32>>(12)?.unwrap_or(0),
-        last_accessed_at: row.get::<_, Option<String>>(13)?
-            .map(|s| parse_rfc3339(&s)).transpose().map_err(into_sql_error)?,
+        last_accessed_at: row
+            .get::<_, Option<String>>(13)?
+            .map(|s| parse_rfc3339(&s))
+            .transpose()
+            .map_err(into_sql_error)?,
     })
 }
 
@@ -709,14 +1141,17 @@ fn into_sql_error(error: impl ToString) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(
         0,
         rusqlite::types::Type::Text,
-        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())),
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            error.to_string(),
+        )),
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use tempfile::tempdir;
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn fresh_migration_works() {
@@ -724,19 +1159,21 @@ mod tests {
         let db = dir.path().join("contynu.db");
         let store = MetadataStore::open(&db).unwrap();
         let session_id = SessionId::new();
-        store.register_session(&SessionRecord {
-            session_id: session_id.clone(),
-            project_id: None,
-            status: "active".into(),
-            cli_name: Some("claude_cli".into()),
-            cli_version: None,
-            model_name: None,
-            cwd: None,
-            repo_root: None,
-            host_fingerprint: None,
-            started_at: chrono::Utc::now(),
-            ended_at: None,
-        }).unwrap();
+        store
+            .register_session(&SessionRecord {
+                session_id: session_id.clone(),
+                project_id: None,
+                status: "active".into(),
+                cli_name: Some("claude_cli".into()),
+                cli_version: None,
+                model_name: None,
+                cwd: None,
+                repo_root: None,
+                host_fingerprint: None,
+                started_at: chrono::Utc::now(),
+                ended_at: None,
+            })
+            .unwrap();
         store.set_primary_project_id(&session_id).unwrap();
         assert_eq!(store.primary_project_id().unwrap().unwrap(), session_id);
     }
@@ -747,39 +1184,50 @@ mod tests {
         let db = dir.path().join("contynu.db");
         let store = MetadataStore::open(&db).unwrap();
         let session_id = SessionId::new();
-        store.register_session(&SessionRecord {
-            session_id: session_id.clone(),
-            project_id: None,
-            status: "active".into(),
-            cli_name: None, cli_version: None, model_name: None,
-            cwd: None, repo_root: None, host_fingerprint: None,
-            started_at: chrono::Utc::now(), ended_at: None,
-        }).unwrap();
+        store
+            .register_session(&SessionRecord {
+                session_id: session_id.clone(),
+                project_id: None,
+                status: "active".into(),
+                cli_name: None,
+                cli_version: None,
+                model_name: None,
+                cwd: None,
+                repo_root: None,
+                host_fingerprint: None,
+                started_at: chrono::Utc::now(),
+                ended_at: None,
+            })
+            .unwrap();
 
         let mem_id = MemoryId::new();
-        store.insert_memory_object(&MemoryObject {
-            memory_id: mem_id.clone(),
-            session_id: session_id.clone(),
-            kind: MemoryObjectKind::Fact,
-            scope: MemoryScope::Project,
-            status: "active".into(),
-            text: "The API uses JWT auth".into(),
-            importance: 0.8,
-            reason: Some("Model observed this".into()),
-            source_model: Some("claude-opus-4-6".into()),
-            superseded_by: None,
-            created_at: chrono::Utc::now(),
-            updated_at: None,
-            access_count: 0,
-            last_accessed_at: None,
-        }).unwrap();
+        store
+            .insert_memory_object(&MemoryObject {
+                memory_id: mem_id.clone(),
+                session_id: session_id.clone(),
+                kind: MemoryObjectKind::Fact,
+                scope: MemoryScope::Project,
+                status: "active".into(),
+                text: "The API uses JWT auth".into(),
+                importance: 0.8,
+                reason: Some("Model observed this".into()),
+                source_model: Some("claude-opus-4-6".into()),
+                superseded_by: None,
+                created_at: chrono::Utc::now(),
+                updated_at: None,
+                access_count: 0,
+                last_accessed_at: None,
+            })
+            .unwrap();
 
         let memories = store.list_active_memories(&session_id, None).unwrap();
         assert_eq!(memories.len(), 1);
         assert_eq!(memories[0].text, "The API uses JWT auth");
 
         // Update
-        store.update_memory_text(&mem_id, "The API uses OAuth2", 0.9, Some("Corrected")).unwrap();
+        store
+            .update_memory_text(&mem_id, "The API uses OAuth2", 0.9, Some("Corrected"))
+            .unwrap();
         let updated = store.get_memory(&mem_id).unwrap().unwrap();
         assert_eq!(updated.text, "The API uses OAuth2");
         assert_eq!(updated.importance, 0.9);
@@ -796,27 +1244,64 @@ mod tests {
         let db = dir.path().join("contynu.db");
         let store = MetadataStore::open(&db).unwrap();
         let session_id = SessionId::new();
-        store.register_session(&SessionRecord {
-            session_id: session_id.clone(),
-            project_id: None, status: "active".into(),
-            cli_name: None, cli_version: None, model_name: None,
-            cwd: None, repo_root: None, host_fingerprint: None,
-            started_at: chrono::Utc::now(), ended_at: None,
-        }).unwrap();
+        store
+            .register_session(&SessionRecord {
+                session_id: session_id.clone(),
+                project_id: None,
+                status: "active".into(),
+                cli_name: None,
+                cli_version: None,
+                model_name: None,
+                cwd: None,
+                repo_root: None,
+                host_fingerprint: None,
+                started_at: chrono::Utc::now(),
+                ended_at: None,
+            })
+            .unwrap();
 
-        store.insert_prompt(&PromptRecord {
-            prompt_id: "pmt_test1".into(),
-            session_id: session_id.clone(),
-            verbatim: "proceed".into(),
-            interpretation: Some("Continue with Bug 2 reproduction".into()),
-            interpretation_confidence: Some(0.9),
-            source_model: Some("claude-opus-4-6".into()),
-            created_at: chrono::Utc::now(),
-        }).unwrap();
+        store
+            .insert_prompt(&PromptRecord {
+                prompt_id: "pmt_test1".into(),
+                session_id: session_id.clone(),
+                verbatim: "proceed".into(),
+                interpretation: Some("Continue with Bug 2 reproduction".into()),
+                interpretation_confidence: Some(0.9),
+                source_model: Some("claude-opus-4-6".into()),
+                created_at: chrono::Utc::now(),
+            })
+            .unwrap();
 
         let prompts = store.list_recent_prompts(&session_id, 10).unwrap();
         assert_eq!(prompts.len(), 1);
         assert_eq!(prompts[0].verbatim, "proceed");
+    }
+
+    #[test]
+    fn packet_observation_recording_works() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("contynu.db");
+        let store = MetadataStore::open(&db).unwrap();
+        let session_id = SessionId::new();
+        store
+            .register_session(&SessionRecord {
+                session_id: session_id.clone(),
+                project_id: None,
+                status: "active".into(),
+                cli_name: None,
+                cli_version: None,
+                model_name: None,
+                cwd: None,
+                repo_root: None,
+                host_fingerprint: None,
+                started_at: chrono::Utc::now(),
+                ended_at: None,
+            })
+            .unwrap();
+
+        store
+            .record_packet_observation(&session_id, "{\"selected\":1}")
+            .unwrap();
     }
 
     #[test]
@@ -825,28 +1310,60 @@ mod tests {
         let db = dir.path().join("contynu.db");
         let store = MetadataStore::open(&db).unwrap();
         let session_id = SessionId::new();
-        store.register_session(&SessionRecord {
-            session_id: session_id.clone(),
-            project_id: None, status: "active".into(),
-            cli_name: None, cli_version: None, model_name: None,
-            cwd: None, repo_root: None, host_fingerprint: None,
-            started_at: chrono::Utc::now(), ended_at: None,
-        }).unwrap();
+        store
+            .register_session(&SessionRecord {
+                session_id: session_id.clone(),
+                project_id: None,
+                status: "active".into(),
+                cli_name: None,
+                cli_version: None,
+                model_name: None,
+                cwd: None,
+                repo_root: None,
+                host_fingerprint: None,
+                started_at: chrono::Utc::now(),
+                ended_at: None,
+            })
+            .unwrap();
 
         for (kind, scope, text, importance) in [
-            (MemoryObjectKind::Fact, MemoryScope::Project, "JWT authentication is used", 0.8),
-            (MemoryObjectKind::UserFact, MemoryScope::User, "Udonna created Contynu", 0.9),
-            (MemoryObjectKind::Constraint, MemoryScope::Project, "Must support backward compat", 0.95),
+            (
+                MemoryObjectKind::Fact,
+                MemoryScope::Project,
+                "JWT authentication is used",
+                0.8,
+            ),
+            (
+                MemoryObjectKind::UserFact,
+                MemoryScope::User,
+                "Udonna created Contynu",
+                0.9,
+            ),
+            (
+                MemoryObjectKind::Constraint,
+                MemoryScope::Project,
+                "Must support backward compat",
+                0.95,
+            ),
         ] {
-            store.insert_memory_object(&MemoryObject {
-                memory_id: MemoryId::new(),
-                session_id: session_id.clone(),
-                kind, scope, status: "active".into(),
-                text: text.into(), importance,
-                reason: None, source_model: None, superseded_by: None,
-                created_at: chrono::Utc::now(), updated_at: None,
-                access_count: 0, last_accessed_at: None,
-            }).unwrap();
+            store
+                .insert_memory_object(&MemoryObject {
+                    memory_id: MemoryId::new(),
+                    session_id: session_id.clone(),
+                    kind,
+                    scope,
+                    status: "active".into(),
+                    text: text.into(),
+                    importance,
+                    reason: None,
+                    source_model: None,
+                    superseded_by: None,
+                    created_at: chrono::Utc::now(),
+                    updated_at: None,
+                    access_count: 0,
+                    last_accessed_at: None,
+                })
+                .unwrap();
         }
 
         // Search by text
@@ -854,11 +1371,13 @@ mod tests {
         assert_eq!(results.len(), 1);
 
         // Query by scope
-        let results = store.query_memories(&MemoryQuery {
-            session_id: Some(session_id.clone()),
-            scope: Some(MemoryScope::User),
-            ..Default::default()
-        }).unwrap();
+        let results = store
+            .query_memories(&MemoryQuery {
+                session_id: Some(session_id.clone()),
+                scope: Some(MemoryScope::User),
+                ..Default::default()
+            })
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].text.contains("Udonna"));
     }

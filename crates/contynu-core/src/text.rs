@@ -60,8 +60,7 @@ mod tests {
     fn box_drawing_at_byte_200_does_not_panic() {
         // Reproduces the exact MCP server crash: a string where byte 200 lands
         // inside a U+2500 box-drawing char, the same shape Codex emits.
-        let s = "─ Worked for 1m 38s ".to_string()
-            + &"─".repeat(100); // many em-dashes
+        let s = "─ Worked for 1m 38s ".to_string() + &"─".repeat(100); // many em-dashes
         assert!(s.len() > 200);
         let out = truncate_at_char_boundary(&s, 200);
         assert!(out.len() <= 200);

@@ -1,8 +1,9 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { MemoryWrite, PromptWrite, ExportOptions } from './types';
 
 const exec = promisify(execFile);
+const CHILD_TIMEOUT_MS = 10_000;
 
 /**
  * JSON-RPC request/response types for MCP communication.
@@ -21,6 +22,11 @@ interface JsonRpcResponse {
   error?: { code: number; message: string };
 }
 
+interface SpawnResult {
+  stdout: string;
+  stderr: string;
+}
+
 /**
  * Wrapper around the contynu CLI binary.
  * Uses subprocess calls for CLI commands and MCP JSON-RPC for memory writes.
@@ -34,6 +40,16 @@ export class ContynuCli {
     this.binary = binary;
   }
 
+  private baseEnv(extra: Record<string, string> = {}): Record<string, string> {
+    return {
+      ...(process.env as Record<string, string>),
+      CONTYNU_STATE_DIR: this.stateDir,
+      // Plugin-driven subprocesses should remain silent and deterministic.
+      CONTYNU_SKIP_UPDATE_CHECK: '1',
+      ...extra,
+    };
+  }
+
   private baseArgs(): string[] {
     return ['--state-dir', this.stateDir];
   }
@@ -41,7 +57,10 @@ export class ContynuCli {
   /** Initialize the Contynu state directory if not already set up. */
   async ensureInit(): Promise<void> {
     try {
-      await exec(this.binary, [...this.baseArgs(), 'init']);
+      await exec(this.binary, [...this.baseArgs(), 'init'], {
+        env: this.baseEnv(),
+        timeout: CHILD_TIMEOUT_MS,
+      });
     } catch {
       // May already be initialized — that's fine
     }
@@ -49,7 +68,10 @@ export class ContynuCli {
 
   /** Create a new project and return its ID. */
   async startProject(): Promise<string> {
-    const { stdout } = await exec(this.binary, [...this.baseArgs(), 'start-project']);
+    const { stdout } = await exec(this.binary, [...this.baseArgs(), 'start-project'], {
+      env: this.baseEnv(),
+      timeout: CHILD_TIMEOUT_MS,
+    });
     const match = stdout.match(/prj_[a-f0-9]{32}/);
     if (!match) throw new Error(`Could not parse project ID from: ${stdout}`);
     return match[0];
@@ -95,7 +117,10 @@ export class ContynuCli {
       projectId,
       '--reason',
       reason,
-    ]);
+    ], {
+      env: this.baseEnv(),
+      timeout: CHILD_TIMEOUT_MS,
+    });
   }
 
   /** Export importance-ranked memories as Markdown with markers. */
@@ -109,7 +134,11 @@ export class ContynuCli {
     if (opts.withMarkers) args.push('--with-markers');
     if (opts.maxChars) args.push('--max-chars', String(opts.maxChars));
 
-    const { stdout } = await exec(this.binary, args);
+    const { stdout } = await exec(this.binary, args, {
+      env: this.baseEnv(),
+      timeout: CHILD_TIMEOUT_MS,
+      maxBuffer: 10 * 1024 * 1024,
+    });
     return stdout;
   }
 
@@ -146,17 +175,14 @@ export class ContynuCli {
 
     const input = JSON.stringify(initRequest) + '\n' + JSON.stringify(toolRequest) + '\n';
 
-    const env: Record<string, string> = {
-      ...process.env as Record<string, string>,
-      CONTYNU_STATE_DIR: this.stateDir,
-      CONTYNU_ACTIVE_PROJECT: projectId,
-    };
-
-    const { stdout } = await exec(this.binary, ['mcp-server'], {
-      env,
-      maxBuffer: 10 * 1024 * 1024,
-      timeout: 10_000,
-    });
+    const { stdout } = await this.execWithInput(
+      this.binary,
+      ['mcp-server'],
+      input,
+      this.baseEnv({
+        CONTYNU_ACTIVE_PROJECT: projectId,
+      }),
+    );
 
     // Parse the last JSON line (tool call response)
     const lines = stdout.trim().split('\n').filter(l => l.trim());
@@ -170,5 +196,56 @@ export class ContynuCli {
     }
 
     return response;
+  }
+
+  private execWithInput(
+    file: string,
+    args: string[],
+    input: string,
+    env: Record<string, string>,
+  ): Promise<SpawnResult> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(file, args, {
+        env,
+        stdio: 'pipe',
+      });
+
+      let stdout = '';
+      let stderr = '';
+      const timer = setTimeout(() => {
+        child.kill('SIGTERM');
+        reject(new Error(`Command timed out after ${CHILD_TIMEOUT_MS}ms: ${file} ${args.join(' ')}`));
+      }, CHILD_TIMEOUT_MS);
+
+      child.stdout.setEncoding('utf8');
+      child.stderr.setEncoding('utf8');
+      child.stdout.on('data', chunk => {
+        stdout += chunk;
+      });
+      child.stderr.on('data', chunk => {
+        stderr += chunk;
+      });
+      child.on('error', err => {
+        clearTimeout(timer);
+        reject(err);
+      });
+      child.on('close', code => {
+        clearTimeout(timer);
+        if (code !== 0) {
+          reject(new Error(`Command failed with exit code ${code}: ${stderr || stdout}`));
+          return;
+        }
+        resolve({ stdout, stderr });
+      });
+
+      child.stdin.write(input, 'utf8', err => {
+        if (err) {
+          clearTimeout(timer);
+          reject(err);
+          return;
+        }
+        child.stdin.end();
+      });
+    });
   }
 }

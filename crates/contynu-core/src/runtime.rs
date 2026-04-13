@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::adapters::{AdapterSpec, HydrationContext};
 use crate::blobs::BlobStore;
-use crate::checkpoint::CheckpointManager;
+use crate::checkpoint::{sanitize_packet, CheckpointManager, PacketBudget};
 use crate::config::ContynuConfig;
 use crate::error::{ContynuError, Result};
 use crate::ids::{ProjectId, SessionId};
@@ -49,7 +49,6 @@ enum StreamKind {
     Stderr,
     Pty,
 }
-
 
 #[derive(Debug, Clone, Copy)]
 enum ExecutionTransport {
@@ -171,6 +170,7 @@ impl RuntimeEngine {
         std::env::set_var("CONTYNU_ACTIVE_PROJECT", session_id.as_str());
         std::env::set_var("CONTYNU_STATE_DIR", config.state_dir.display().to_string());
 
+        let hydration_budget = config_file.packet_budget.to_budget();
         let hydration = if adapter.should_hydrate() && continuing_session {
             Some(Self::prepare_hydration(
                 &state,
@@ -178,6 +178,7 @@ impl RuntimeEngine {
                 &blob_store,
                 &session_id,
                 &adapter,
+                &hydration_budget,
             )?)
         } else {
             None
@@ -225,7 +226,8 @@ impl RuntimeEngine {
 
         if config.checkpoint_on_exit {
             let manager = CheckpointManager::new(&state, &store, &blob_store);
-            let _ = manager.create_checkpoint(&session_id, "run_completed", None)?;
+            let _ =
+                manager.create_checkpoint(&session_id, "run_completed", None, &hydration_budget)?;
         }
 
         Ok(RunOutcome {
@@ -244,11 +246,7 @@ impl RuntimeEngine {
         interrupted: Arc<AtomicBool>,
     ) -> Result<ProcessCapture> {
         match transport {
-            ExecutionTransport::Pipes => Self::execute_with_pipes(
-                cwd,
-                launch_plan,
-                interrupted,
-            ),
+            ExecutionTransport::Pipes => Self::execute_with_pipes(cwd, launch_plan, interrupted),
             ExecutionTransport::InheritTerminal => {
                 #[cfg(unix)]
                 {
@@ -263,29 +261,17 @@ impl RuntimeEngine {
                 #[cfg(not(unix))]
                 {
                     let _ = (state, session_id);
-                    Self::execute_with_inherited_terminal(
-                        cwd,
-                        launch_plan,
-                        interrupted,
-                    )
+                    Self::execute_with_inherited_terminal(cwd, launch_plan, interrupted)
                 }
             }
             ExecutionTransport::Pty => {
                 #[cfg(unix)]
                 {
-                    Self::execute_with_pty(
-                        cwd,
-                        launch_plan,
-                        interrupted,
-                    )
+                    Self::execute_with_pty(cwd, launch_plan, interrupted)
                 }
                 #[cfg(not(unix))]
                 {
-                    Self::execute_with_pipes(
-                        cwd,
-                        launch_plan,
-                        interrupted,
-                    )
+                    Self::execute_with_pipes(cwd, launch_plan, interrupted)
                 }
             }
         }
@@ -538,14 +524,15 @@ impl RuntimeEngine {
         blob_store: &BlobStore,
         project_id: &ProjectId,
         adapter: &AdapterSpec,
+        budget: &PacketBudget,
     ) -> Result<HydrationContext> {
         let manager = CheckpointManager::new(state, store, blob_store);
-        let packet = manager.build_packet(project_id, None)?;
+        let packet = manager.build_packet_with_budget(project_id, None, budget)?;
         let runtime_dir = state.project_runtime_dir(project_id);
         std::fs::create_dir_all(&runtime_dir)?;
         let packet_path = runtime_dir.join("rehydration.json");
         let prompt_path = runtime_dir.join("rehydration.txt");
-        let packet_json = serde_json::to_string_pretty(&packet)?;
+        let packet_json = serde_json::to_string_pretty(&sanitize_packet(&packet))?;
         let format = adapter.prompt_format();
         let adapter_name = adapter.as_str();
         let prompt = crate::rendering::render_rehydration(&packet, format, adapter_name);
@@ -587,15 +574,26 @@ fn write_context_file(
     if path.exists() {
         std::fs::copy(&path, &backup_path)?;
         let existing = std::fs::read_to_string(&path).unwrap_or_default();
-        std::fs::write(
-            &path,
-            format!(
+        let merged = match adapter.kind() {
+            crate::AdapterKind::CodexCli => format!(
+                "<!-- contynu:codex:start -->\n{}\n<!-- contynu:codex:end -->\n\n## Repository Instructions\n\nFollow the repository instructions below together with the carried-forward working state above.\n\n{}",
+                prompt_text, existing
+            ),
+            _ => format!(
                 "{}\n\n---\n# Original {} content below\n---\n\n{}",
                 prompt_text, filename, existing
             ),
-        )?;
+        };
+        std::fs::write(&path, merged)?;
     } else {
-        std::fs::write(&path, prompt_text)?;
+        let content = match adapter.kind() {
+            crate::AdapterKind::CodexCli => format!(
+                "<!-- contynu:codex:start -->\n{}\n<!-- contynu:codex:end -->\n",
+                prompt_text
+            ),
+            _ => prompt_text.to_string(),
+        };
+        std::fs::write(&path, content)?;
     }
 
     Ok(Some(path))

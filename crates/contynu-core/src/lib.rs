@@ -2,6 +2,8 @@ pub mod adapters;
 pub mod blobs;
 pub mod checkpoint;
 pub mod config;
+pub mod discovery;
+pub mod distiller;
 pub mod error;
 pub mod ids;
 pub mod mcp;
@@ -19,12 +21,14 @@ pub use checkpoint::{
     RehydrationPacket,
 };
 pub use config::{ConfiguredLlmLauncher, ContynuConfig, HydrationDelivery, PacketBudgetConfig};
-pub use rendering::PromptFormat;
+pub use discovery::{DiscoveredMemory, DiscoveryReport};
+pub use distiller::ConsolidationCandidate;
 pub use error::{ContynuError, Result};
 pub use ids::{CheckpointId, MemoryId, ProjectId, SessionId};
+pub use rendering::PromptFormat;
 pub use runtime::{RunConfig, RunOutcome, RuntimeEngine};
 pub use state::StatePaths;
 pub use store::{
     CheckpointRecord, MemoryObject, MemoryObjectKind, MemoryQuery, MemoryScope, MemorySortBy,
-    MetadataStore, PromptRecord, ProjectRecord, SessionRecord,
+    MetadataStore, ProjectRecord, PromptRecord, SessionRecord, WorkingSetEntry,
 };
