@@ -8,10 +8,12 @@ import type { ContynuPluginConfig } from './types';
 /**
  * contynu-openclaw — Permanent memory for OpenClaw agents.
  *
- * This plugin captures every conversation turn, checkpoints before
- * compaction, and writes importance-ranked facts back to MEMORY.md.
- * Agents also get MCP tools (search_memory, list_memories, search_events)
- * for on-demand deep recall of any fact from the full project history.
+ * This plugin records user prompts, writes meaningful memories from
+ * assistant output, checkpoints before compaction, and writes
+ * importance-ranked facts back to MEMORY.md.
+ *
+ * Agents also get MCP tools (write_memory, update_memory, delete_memory,
+ * record_prompt, search_memory, list_memories) for direct memory management.
  */
 const plugin = {
   id: 'contynu-openclaw',
@@ -35,7 +37,7 @@ const plugin = {
       }
     });
 
-    // Capture every conversation turn into Contynu's permanent store
+    // Record prompts and write memories after every conversation turn
     api.on('afterTurn', (ctx: any) => handleAfterTurn(ctx, cli, mapping));
 
     // Checkpoint and write back to MEMORY.md before compaction fires
@@ -56,7 +58,8 @@ export { updateMemoryMd } from './writeback';
 export { parseModelSpec, promptFormatForProvider } from './model-detection';
 export type {
   ContynuPluginConfig,
-  IngestEvent,
+  MemoryWrite,
+  PromptWrite,
   AgentProjectMap,
   ModelSpec,
 } from './types';

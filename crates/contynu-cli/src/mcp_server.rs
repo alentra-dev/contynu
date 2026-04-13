@@ -1,8 +1,9 @@
 use std::io::{self, BufRead, Write};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
-use contynu_core::mcp::{JsonRpcRequest, McpDispatcher};
+use contynu_core::mcp::{JsonRpcRequest, JsonRpcResponse, McpDispatcher};
 use contynu_core::{MetadataStore, ProjectId, StatePaths};
 
 pub fn run(state_dir: &Path) -> Result<()> {
@@ -39,12 +40,39 @@ pub fn run(state_dir: &Path) -> Result<()> {
             }
         };
 
-        if let Some(response) = dispatcher.handle_request(&request) {
-            write_response(&mut stdout, &response)?;
+        // Catch panics from any handler so a single bad request never kills
+        // the server and tears down the stdio transport. The agent on the
+        // other end relies on this stream staying open across many calls.
+        let request_id = request.id.clone();
+        let result = panic::catch_unwind(AssertUnwindSafe(|| {
+            dispatcher.handle_request(&request)
+        }));
+        match result {
+            Ok(Some(response)) => write_response(&mut stdout, &response)?,
+            Ok(None) => {} // notification, no response expected
+            Err(panic_payload) => {
+                let msg = panic_message(&panic_payload);
+                let response = JsonRpcResponse::err(
+                    request_id,
+                    -32603,
+                    format!("Internal error: handler panicked: {msg}"),
+                );
+                write_response(&mut stdout, &response)?;
+            }
         }
     }
 
     Ok(())
+}
+
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
 }
 
 fn resolve_active_project(state: &StatePaths) -> Result<ProjectId> {
@@ -55,7 +83,7 @@ fn resolve_active_project(state: &StatePaths) -> Result<ProjectId> {
 
     // Fall back to primary project in the store
     if state.sqlite_db().exists() {
-        let store = MetadataStore::open_readonly(state.sqlite_db())?;
+        let store = MetadataStore::open(state.sqlite_db())?;
         if let Some(id) = store.primary_project_id()? {
             return Ok(id);
         }

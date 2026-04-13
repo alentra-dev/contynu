@@ -20,8 +20,6 @@ pub struct PacketBudgetConfig {
     pub max_total_tokens: usize,
     #[serde(default = "default_20")]
     pub max_per_category: usize,
-    #[serde(default = "default_5")]
-    pub dialogue_turns: usize,
 }
 
 impl Default for PacketBudgetConfig {
@@ -29,7 +27,6 @@ impl Default for PacketBudgetConfig {
         Self {
             max_total_tokens: 4000,
             max_per_category: 20,
-            dialogue_turns: 5,
         }
     }
 }
@@ -40,14 +37,12 @@ impl PacketBudgetConfig {
             max_total_tokens: self.max_total_tokens,
             max_per_category: self.max_per_category,
             min_per_category: 2,
-            dialogue_turns: self.dialogue_turns,
         }
     }
 }
 
 fn default_4000() -> usize { 4000 }
 fn default_20() -> usize { 20 }
-fn default_5() -> usize { 5 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConfiguredLlmLauncher {

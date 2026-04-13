@@ -3,16 +3,17 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::blobs::BlobDescriptor;
 use crate::checkpoint::CheckpointManifest;
 use crate::error::{ContynuError, Result};
-use crate::event::EventEnvelope;
-use crate::ids::{ArtifactId, CheckpointId, EventId, FileId, MemoryId, SessionId, TurnId};
-use crate::journal::{Journal, JournalAppend};
+use crate::ids::{CheckpointId, MemoryId, SessionId};
 
-const MIGRATION_1: &str = include_str!("../../../sql/metadata_schema.sql");
+const MIGRATION_V5: &str = include_str!("../../../sql/metadata_schema.sql");
+
+// ---------------------------------------------------------------------------
+// Record types
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
@@ -32,65 +33,10 @@ pub struct SessionRecord {
 pub type ProjectRecord = SessionRecord;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TurnRecord {
-    pub turn_id: TurnId,
-    pub session_id: SessionId,
-    pub status: String,
-    pub started_at: DateTime<Utc>,
-    pub completed_at: Option<DateTime<Utc>>,
-    pub summary_memory_id: Option<MemoryId>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EventRecord {
-    pub event_id: EventId,
-    pub session_id: SessionId,
-    pub turn_id: Option<TurnId>,
-    pub seq: u64,
-    pub ts: DateTime<Utc>,
-    pub actor: String,
-    pub event_type: String,
-    pub payload_json: Value,
-    pub checksum: String,
-    pub journal_path: String,
-    pub journal_byte_offset: u64,
-    pub journal_line: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ArtifactRecord {
-    pub artifact_id: ArtifactId,
-    pub session_id: SessionId,
-    pub source_event_id: EventId,
-    pub path: Option<String>,
-    pub kind: String,
-    pub mime_type: Option<String>,
-    pub sha256: String,
-    pub blob_relative_path: String,
-    pub size_bytes: u64,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileRecord {
-    pub file_id: FileId,
-    pub session_id: SessionId,
-    pub workspace_relative_path: String,
-    pub kind: String,
-    pub last_known_sha256: Option<String>,
-    pub last_snapshot_event_id: Option<EventId>,
-    pub last_diff_event_id: Option<EventId>,
-    pub observed_at: DateTime<Utc>,
-    pub is_generated: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckpointRecord {
     pub checkpoint_id: CheckpointId,
     pub session_id: SessionId,
-    pub source_event_id: EventId,
     pub reason: String,
-    pub last_seq: u64,
     pub rehydration_sha256: Option<String>,
     pub created_at: DateTime<Utc>,
 }
@@ -102,9 +48,8 @@ pub enum MemoryObjectKind {
     Constraint,
     Decision,
     Todo,
-    Summary,
-    Entity,
-    FileNote,
+    UserFact,
+    ProjectKnowledge,
 }
 
 impl MemoryObjectKind {
@@ -114,9 +59,47 @@ impl MemoryObjectKind {
             Self::Constraint => "constraint",
             Self::Decision => "decision",
             Self::Todo => "todo",
-            Self::Summary => "summary",
-            Self::Entity => "entity",
-            Self::FileNote => "file_note",
+            Self::UserFact => "user_fact",
+            Self::ProjectKnowledge => "project_knowledge",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "fact" => Some(Self::Fact),
+            "constraint" => Some(Self::Constraint),
+            "decision" => Some(Self::Decision),
+            "todo" => Some(Self::Todo),
+            "user_fact" => Some(Self::UserFact),
+            "project_knowledge" => Some(Self::ProjectKnowledge),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryScope {
+    User,
+    Project,
+    Session,
+}
+
+impl MemoryScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Project => "project",
+            Self::Session => "session",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "user" => Some(Self::User),
+            "project" => Some(Self::Project),
+            "session" => Some(Self::Session),
+            _ => None,
         }
     }
 }
@@ -126,21 +109,28 @@ pub struct MemoryObject {
     pub memory_id: MemoryId,
     pub session_id: SessionId,
     pub kind: MemoryObjectKind,
+    pub scope: MemoryScope,
     pub status: String,
     pub text: String,
-    pub confidence: Option<f64>,
-    pub source_event_ids: Vec<EventId>,
-    pub created_at: DateTime<Utc>,
-    pub superseded_by: Option<MemoryId>,
-    pub source_adapter: Option<String>,
-    pub source_model: Option<String>,
     pub importance: f64,
+    pub reason: Option<String>,
+    pub source_model: Option<String>,
+    pub superseded_by: Option<MemoryId>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: Option<DateTime<Utc>>,
     pub access_count: u32,
     pub last_accessed_at: Option<DateTime<Utc>>,
-    pub consolidated_from: Vec<MemoryId>,
-    pub text_hash: Option<String>,
-    pub valid_from: Option<DateTime<Utc>>,
-    pub valid_to: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptRecord {
+    pub prompt_id: String,
+    pub session_id: SessionId,
+    pub verbatim: String,
+    pub interpretation: Option<String>,
+    pub interpretation_confidence: Option<f64>,
+    pub source_model: Option<String>,
+    pub created_at: DateTime<Utc>,
 }
 
 /// Query parameters for flexible memory search.
@@ -148,14 +138,12 @@ pub struct MemoryQuery {
     pub session_id: Option<SessionId>,
     pub text_query: Option<String>,
     pub kind: Option<MemoryObjectKind>,
-    pub source_adapter: Option<String>,
+    pub scope: Option<MemoryScope>,
     pub after: Option<DateTime<Utc>>,
     pub before: Option<DateTime<Utc>>,
     pub sort_by: MemorySortBy,
     pub limit: usize,
     pub offset: usize,
-    /// If true, only return memories where valid_to is NULL (still valid).
-    pub only_valid: bool,
 }
 
 impl Default for MemoryQuery {
@@ -164,13 +152,12 @@ impl Default for MemoryQuery {
             session_id: None,
             text_query: None,
             kind: None,
-            source_adapter: None,
+            scope: None,
             after: None,
             before: None,
             sort_by: MemorySortBy::Importance,
             limit: 20,
             offset: 0,
-            only_valid: false,
         }
     }
 }
@@ -181,28 +168,9 @@ pub enum MemorySortBy {
     Recency,
 }
 
-/// Query parameters for flexible event search.
-pub struct EventQuery {
-    pub session_id: Option<SessionId>,
-    pub text_query: Option<String>,
-    pub after: Option<DateTime<Utc>>,
-    pub before: Option<DateTime<Utc>>,
-    pub limit: usize,
-    pub offset: usize,
-}
-
-impl Default for EventQuery {
-    fn default() -> Self {
-        Self {
-            session_id: None,
-            text_query: None,
-            after: None,
-            before: None,
-            limit: 20,
-            offset: 0,
-        }
-    }
-}
+// ---------------------------------------------------------------------------
+// MetadataStore
+// ---------------------------------------------------------------------------
 
 pub struct MetadataStore {
     conn: Connection,
@@ -222,110 +190,62 @@ impl MetadataStore {
         Ok(store)
     }
 
-    pub fn open_readonly(path: impl AsRef<Path>) -> Result<Self> {
-        let conn = Connection::open_with_flags(
-            path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        conn.execute_batch("PRAGMA query_only = ON;")?;
-        Ok(Self { conn })
+    pub fn open_readwrite(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open(path)
     }
 
     pub fn migrate(&self) -> Result<()> {
-        self.conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS schema_migrations (
-              version INTEGER PRIMARY KEY,
-              applied_at TEXT NOT NULL
-            );
+        // Check if we need a full reset (v5 architecture) or fresh install
+        let has_schema_meta = self.conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_meta'",
+            [],
+            |row| row.get::<_, i64>(0),
+        ).unwrap_or(0) > 0;
 
-            CREATE TABLE IF NOT EXISTS schema_meta (
-              key TEXT PRIMARY KEY,
-              value TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-            "#,
-        )?;
-
-        let applied = self
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version = 1",
+        let current_version = if has_schema_meta {
+            self.conn.query_row(
+                "SELECT value FROM schema_meta WHERE key = 'schema_version'",
                 [],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .unwrap_or(0);
-        if applied == 0 {
-            self.conn.execute_batch(MIGRATION_1)?;
-            self.conn.execute(
-                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
-                params![1_i64, Utc::now().to_rfc3339()],
-            )?;
+                |row| row.get::<_, String>(0),
+            ).optional()?.and_then(|v| v.parse::<i64>().ok()).unwrap_or(0)
+        } else {
+            0
+        };
+
+        if current_version >= 5 {
+            return Ok(());
         }
 
-        let applied_v2 = self
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version = 2",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .unwrap_or(0);
-        if applied_v2 == 0 {
+        // If upgrading from old architecture (v1-v4), drop legacy tables
+        if current_version > 0 && current_version < 5 {
             self.conn.execute_batch(
                 r#"
-                ALTER TABLE memory_objects ADD COLUMN source_adapter TEXT;
-                ALTER TABLE memory_objects ADD COLUMN source_model TEXT;
-                ALTER TABLE memory_objects ADD COLUMN importance REAL DEFAULT 0.5;
-                ALTER TABLE memory_objects ADD COLUMN access_count INTEGER DEFAULT 0;
-                ALTER TABLE memory_objects ADD COLUMN last_accessed_at TEXT;
-                ALTER TABLE memory_objects ADD COLUMN consolidated_from_json TEXT;
-                ALTER TABLE memory_objects ADD COLUMN text_hash TEXT;
-
-                CREATE INDEX IF NOT EXISTS idx_memory_active_importance
-                  ON memory_objects(session_id, status, importance DESC, created_at DESC);
-
-                CREATE INDEX IF NOT EXISTS idx_memory_text_hash
-                  ON memory_objects(session_id, kind, text_hash);
+                DROP TABLE IF EXISTS events;
+                DROP TABLE IF EXISTS turns;
+                DROP TABLE IF EXISTS files;
+                DROP TABLE IF EXISTS artifacts;
+                DROP TABLE IF EXISTS checkpoints;
+                DROP TABLE IF EXISTS memory_objects;
+                DROP TABLE IF EXISTS blobs;
+                DROP TABLE IF EXISTS schema_migrations;
+                DROP TABLE IF EXISTS schema_meta;
+                DROP TABLE IF EXISTS prompts;
                 "#,
-            )?;
-            self.conn.execute(
-                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
-                params![2_i64, Utc::now().to_rfc3339()],
             )?;
         }
 
-        // Migration v3: temporal validity
-        let applied_v3 = self
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version = 3",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .unwrap_or(0);
-        if applied_v3 == 0 {
-            self.conn.execute_batch(
-                r#"
-                ALTER TABLE memory_objects ADD COLUMN valid_from TEXT;
-                ALTER TABLE memory_objects ADD COLUMN valid_to TEXT;
-                "#,
-            )?;
-            self.conn.execute(
-                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
-                params![3_i64, Utc::now().to_rfc3339()],
-            )?;
-        }
+        // Apply v5 schema (fresh)
+        self.conn.execute_batch(MIGRATION_V5)?;
 
         self.conn.execute(
             "INSERT OR REPLACE INTO schema_meta (key, value, updated_at) VALUES (?1, ?2, ?3)",
-            params!["schema_version", "3", Utc::now().to_rfc3339()],
+            params!["schema_version", "5", Utc::now().to_rfc3339()],
         )?;
+
         Ok(())
     }
+
+    // -- Session operations ---------------------------------------------------
 
     pub fn register_session(&self, session: &SessionRecord) -> Result<()> {
         self.conn.execute(
@@ -346,32 +266,25 @@ impl MetadataStore {
                 session.repo_root,
                 session.host_fingerprint,
                 session.started_at.to_rfc3339(),
-                session.ended_at.map(|value| value.to_rfc3339())
+                session.ended_at.map(|v| v.to_rfc3339())
             ],
         )?;
         Ok(())
     }
 
     pub fn primary_project_id(&self) -> Result<Option<SessionId>> {
-        let value = self
-            .conn
-            .query_row(
-                "SELECT value FROM schema_meta WHERE key = ?1",
-                params![PRIMARY_PROJECT_KEY],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
+        let value = self.conn.query_row(
+            "SELECT value FROM schema_meta WHERE key = ?1",
+            params![PRIMARY_PROJECT_KEY],
+            |row| row.get::<_, String>(0),
+        ).optional()?;
         value.map(SessionId::parse).transpose()
     }
 
     pub fn set_primary_project_id(&self, session_id: &SessionId) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO schema_meta (key, value, updated_at) VALUES (?1, ?2, ?3)",
-            params![
-                PRIMARY_PROJECT_KEY,
-                session_id.as_str(),
-                Utc::now().to_rfc3339()
-            ],
+            params![PRIMARY_PROJECT_KEY, session_id.as_str(), Utc::now().to_rfc3339()],
         )?;
         Ok(())
     }
@@ -381,32 +294,25 @@ impl MetadataStore {
             r#"
             SELECT session_id, project_id, status, cli_name, cli_version, model_name, cwd,
                    repo_root, host_fingerprint, started_at, ended_at
-            FROM sessions
-            WHERE session_id = ?1
+            FROM sessions WHERE session_id = ?1
             "#,
         )?;
-        let session = stmt
-            .query_row(params![session_id.as_str()], |row| {
-                Ok(SessionRecord {
-                    session_id: SessionId::parse(row.get::<_, String>(0)?)
-                        .map_err(into_sql_error)?,
-                    project_id: row.get(1)?,
-                    status: row.get(2)?,
-                    cli_name: row.get(3)?,
-                    cli_version: row.get(4)?,
-                    model_name: row.get(5)?,
-                    cwd: row.get(6)?,
-                    repo_root: row.get(7)?,
-                    host_fingerprint: row.get(8)?,
-                    started_at: parse_rfc3339(&row.get::<_, String>(9)?).map_err(into_sql_error)?,
-                    ended_at: row
-                        .get::<_, Option<String>>(10)?
-                        .map(|value| parse_rfc3339(&value))
-                        .transpose()
-                        .map_err(into_sql_error)?,
-                })
+        let session = stmt.query_row(params![session_id.as_str()], |row| {
+            Ok(SessionRecord {
+                session_id: SessionId::parse(row.get::<_, String>(0)?).map_err(into_sql_error)?,
+                project_id: row.get(1)?,
+                status: row.get(2)?,
+                cli_name: row.get(3)?,
+                cli_version: row.get(4)?,
+                model_name: row.get(5)?,
+                cwd: row.get(6)?,
+                repo_root: row.get(7)?,
+                host_fingerprint: row.get(8)?,
+                started_at: parse_rfc3339(&row.get::<_, String>(9)?).map_err(into_sql_error)?,
+                ended_at: row.get::<_, Option<String>>(10)?
+                    .map(|v| parse_rfc3339(&v)).transpose().map_err(into_sql_error)?,
             })
-            .optional()?;
+        }).optional()?;
         Ok(session)
     }
 
@@ -415,8 +321,7 @@ impl MetadataStore {
             r#"
             SELECT session_id, project_id, status, cli_name, cli_version, model_name, cwd,
                    repo_root, host_fingerprint, started_at, ended_at
-            FROM sessions
-            ORDER BY started_at DESC
+            FROM sessions ORDER BY started_at DESC
             "#,
         )?;
         let rows = stmt.query_map([], |row| {
@@ -431,155 +336,33 @@ impl MetadataStore {
                 repo_root: row.get(7)?,
                 host_fingerprint: row.get(8)?,
                 started_at: parse_rfc3339(&row.get::<_, String>(9)?).map_err(into_sql_error)?,
-                ended_at: row
-                    .get::<_, Option<String>>(10)?
-                    .map(|value| parse_rfc3339(&value))
-                    .transpose()
-                    .map_err(into_sql_error)?,
+                ended_at: row.get::<_, Option<String>>(10)?
+                    .map(|v| parse_rfc3339(&v)).transpose().map_err(into_sql_error)?,
             })
         })?;
-        let mut sessions = Vec::new();
-        for row in rows {
-            sessions.push(row?);
-        }
-        Ok(sessions)
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     pub fn update_session_status(
-        &self,
-        session_id: &SessionId,
-        status: &str,
-        ended_at: Option<DateTime<Utc>>,
+        &self, session_id: &SessionId, status: &str, ended_at: Option<DateTime<Utc>>,
     ) -> Result<()> {
         self.conn.execute(
             "UPDATE sessions SET status = ?2, ended_at = ?3 WHERE session_id = ?1",
-            params![
-                session_id.as_str(),
-                status,
-                ended_at.map(|value| value.to_rfc3339())
-            ],
+            params![session_id.as_str(), status, ended_at.map(|v| v.to_rfc3339())],
         )?;
         Ok(())
     }
 
-    pub fn register_turn(&self, turn: &TurnRecord) -> Result<()> {
-        self.conn.execute(
-            r#"
-            INSERT OR REPLACE INTO turns (
-              turn_id, session_id, status, started_at, completed_at, summary_memory_id
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-            "#,
-            params![
-                turn.turn_id.as_str(),
-                turn.session_id.as_str(),
-                turn.status,
-                turn.started_at.to_rfc3339(),
-                turn.completed_at.map(|value| value.to_rfc3339()),
-                turn.summary_memory_id.clone().map(String::from)
-            ],
+    pub fn session_exists(&self, session_id: &SessionId) -> Result<bool> {
+        let count = self.conn.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE session_id = ?1",
+            params![session_id.as_str()],
+            |row| row.get::<_, i64>(0),
         )?;
-        Ok(())
+        Ok(count > 0)
     }
 
-    pub fn update_turn_status(
-        &self,
-        turn_id: &TurnId,
-        status: &str,
-        completed_at: Option<DateTime<Utc>>,
-    ) -> Result<()> {
-        self.conn.execute(
-            "UPDATE turns SET status = ?2, completed_at = ?3 WHERE turn_id = ?1",
-            params![
-                turn_id.as_str(),
-                status,
-                completed_at.map(|value| value.to_rfc3339())
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn list_turns_for_session(&self, session_id: &SessionId) -> Result<Vec<TurnRecord>> {
-        let mut stmt = self.conn.prepare(
-            r#"
-            SELECT turn_id, session_id, status, started_at, completed_at, summary_memory_id
-            FROM turns
-            WHERE session_id = ?1
-            ORDER BY started_at DESC
-            "#,
-        )?;
-        let rows = stmt.query_map(params![session_id.as_str()], |row| {
-            Ok(TurnRecord {
-                turn_id: TurnId::parse(row.get::<_, String>(0)?).map_err(into_sql_error)?,
-                session_id: SessionId::parse(row.get::<_, String>(1)?).map_err(into_sql_error)?,
-                status: row.get(2)?,
-                started_at: parse_rfc3339(&row.get::<_, String>(3)?).map_err(into_sql_error)?,
-                completed_at: row
-                    .get::<_, Option<String>>(4)?
-                    .map(|value| parse_rfc3339(&value))
-                    .transpose()
-                    .map_err(into_sql_error)?,
-                summary_memory_id: row
-                    .get::<_, Option<String>>(5)?
-                    .map(MemoryId::parse)
-                    .transpose()
-                    .map_err(into_sql_error)?,
-            })
-        })?;
-        let mut turns = Vec::new();
-        for row in rows {
-            turns.push(row?);
-        }
-        Ok(turns)
-    }
-
-    pub fn set_turn_summary_memory(
-        &self,
-        turn_id: &TurnId,
-        summary_memory_id: &MemoryId,
-    ) -> Result<()> {
-        self.conn.execute(
-            "UPDATE turns SET summary_memory_id = ?2 WHERE turn_id = ?1",
-            params![turn_id.as_str(), summary_memory_id.as_str()],
-        )?;
-        Ok(())
-    }
-
-    pub fn record_event(
-        &self,
-        event: &EventEnvelope,
-        journal_path: &str,
-        append: JournalAppend,
-    ) -> Result<()> {
-        self.conn.execute(
-            r#"
-            INSERT OR REPLACE INTO events (
-              event_id, session_id, turn_id, seq, ts, actor, event_type, payload_version,
-              payload_json, checksum, parent_event_id, correlation_id, causation_id, tags_json,
-              journal_path, journal_byte_offset, journal_line
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
-            "#,
-            params![
-                event.event_id.as_str(),
-                event.session_id.as_str(),
-                event.turn_id.as_ref().map(|id| id.as_str()),
-                event.seq,
-                event.ts.to_rfc3339(),
-                event.actor.as_str(),
-                event.event_type.as_str(),
-                event.payload_version,
-                serde_json::to_string(&event.payload)?,
-                event.checksum,
-                event.parent_event_id.as_ref().map(|id| id.as_str()),
-                event.correlation_id,
-                event.causation_id.as_ref().map(|id| id.as_str()),
-                serde_json::to_string(&event.tags)?,
-                journal_path,
-                append.byte_offset,
-                append.line_number as i64
-            ],
-        )?;
-        Ok(())
-    }
+    // -- Blob operations ------------------------------------------------------
 
     pub fn register_blob(&self, blob: &BlobDescriptor, mime_type: Option<&str>) -> Result<()> {
         self.conn.execute(
@@ -587,83 +370,26 @@ impl MetadataStore {
             INSERT OR REPLACE INTO blobs (blob_id, sha256, size_bytes, mime_type, storage_path, created_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
             "#,
-            params![
-                blob.sha256,
-                blob.sha256,
-                blob.size_bytes as i64,
-                mime_type,
-                blob.relative_path,
-                Utc::now().to_rfc3339()
-            ],
+            params![blob.sha256, blob.sha256, blob.size_bytes as i64, mime_type, blob.relative_path, Utc::now().to_rfc3339()],
         )?;
         Ok(())
     }
 
-    pub fn register_artifact(&self, record: &ArtifactRecord) -> Result<()> {
-        self.conn.execute(
-            r#"
-            INSERT OR REPLACE INTO artifacts (
-              artifact_id, session_id, source_event_id, path, kind, mime_type, sha256,
-              blob_relative_path, size_bytes, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-            "#,
-            params![
-                record.artifact_id.as_str(),
-                record.session_id.as_str(),
-                record.source_event_id.as_str(),
-                record.path,
-                record.kind,
-                record.mime_type,
-                record.sha256,
-                record.blob_relative_path,
-                record.size_bytes as i64,
-                record.created_at.to_rfc3339()
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn register_file(&self, file: &FileRecord) -> Result<()> {
-        self.conn.execute(
-            r#"
-            INSERT OR REPLACE INTO files (
-              file_id, session_id, workspace_relative_path, kind, last_known_sha256,
-              last_snapshot_event_id, last_diff_event_id, observed_at, is_generated
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-            "#,
-            params![
-                file.file_id.as_str(),
-                file.session_id.as_str(),
-                file.workspace_relative_path,
-                file.kind,
-                file.last_known_sha256,
-                file.last_snapshot_event_id.as_ref().map(|id| id.as_str()),
-                file.last_diff_event_id.as_ref().map(|id| id.as_str()),
-                file.observed_at.to_rfc3339(),
-                if file.is_generated { 1 } else { 0 }
-            ],
-        )?;
-        Ok(())
-    }
+    // -- Checkpoint operations ------------------------------------------------
 
     pub fn register_checkpoint(
-        &self,
-        checkpoint: &CheckpointRecord,
-        manifest: &CheckpointManifest,
+        &self, checkpoint: &CheckpointRecord, manifest: &CheckpointManifest,
     ) -> Result<()> {
         self.conn.execute(
             r#"
             INSERT OR REPLACE INTO checkpoints (
-              checkpoint_id, session_id, source_event_id, reason, last_seq,
-              rehydration_sha256, manifest_json, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+              checkpoint_id, session_id, reason, rehydration_sha256, manifest_json, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
             "#,
             params![
                 checkpoint.checkpoint_id.as_str(),
                 checkpoint.session_id.as_str(),
-                checkpoint.source_event_id.as_str(),
                 checkpoint.reason,
-                checkpoint.last_seq as i64,
                 checkpoint.rehydration_sha256,
                 serde_json::to_string(manifest)?,
                 checkpoint.created_at.to_rfc3339()
@@ -672,385 +398,100 @@ impl MetadataStore {
         Ok(())
     }
 
+    // -- Memory operations (model-driven) -------------------------------------
+
     pub fn insert_memory_object(&self, memory: &MemoryObject) -> Result<()> {
-        let source_event_ids = memory
-            .source_event_ids
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
-        let consolidated_from = memory
-            .consolidated_from
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
         self.conn.execute(
             r#"
             INSERT OR REPLACE INTO memory_objects (
-              memory_id, session_id, kind, status, text, confidence, source_event_ids_json,
-              created_at, superseded_by,
-              source_adapter, source_model, importance, access_count, last_accessed_at,
-              consolidated_from_json, text_hash, valid_from, valid_to
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+              memory_id, session_id, kind, scope, status, text, importance, reason,
+              source_model, superseded_by, created_at, updated_at,
+              access_count, last_accessed_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
             "#,
             params![
                 memory.memory_id.as_str(),
                 memory.session_id.as_str(),
                 memory.kind.as_str(),
+                memory.scope.as_str(),
                 memory.status,
                 memory.text,
-                memory.confidence,
-                serde_json::to_string(&source_event_ids)?,
-                memory.created_at.to_rfc3339(),
-                memory.superseded_by.clone().map(String::from),
-                memory.source_adapter,
-                memory.source_model,
                 memory.importance,
+                memory.reason,
+                memory.source_model,
+                memory.superseded_by.as_ref().map(|id| id.to_string()),
+                memory.created_at.to_rfc3339(),
+                memory.updated_at.map(|dt| dt.to_rfc3339()),
                 memory.access_count,
                 memory.last_accessed_at.map(|dt| dt.to_rfc3339()),
-                serde_json::to_string(&consolidated_from)?,
-                memory.text_hash,
-                memory.valid_from.map(|dt| dt.to_rfc3339()),
-                memory.valid_to.map(|dt| dt.to_rfc3339()),
             ],
         )?;
         Ok(())
     }
 
-    pub fn supersede_memory_kind(
-        &self,
-        session_id: &SessionId,
-        kind: MemoryObjectKind,
-        superseded_by: &MemoryId,
+    pub fn update_memory_text(
+        &self, memory_id: &MemoryId, text: &str, importance: f64, reason: Option<&str>,
     ) -> Result<()> {
-        self.conn.execute(
+        let rows = self.conn.execute(
             r#"
             UPDATE memory_objects
-            SET status = 'superseded', superseded_by = ?3
-            WHERE session_id = ?1 AND kind = ?2 AND status != 'superseded'
+            SET text = ?2, importance = ?3, reason = ?4, updated_at = ?5
+            WHERE memory_id = ?1 AND status = 'active'
             "#,
-            params![session_id.as_str(), kind.as_str(), superseded_by.as_str()],
+            params![memory_id.as_str(), text, importance, reason, Utc::now().to_rfc3339()],
         )?;
+        if rows == 0 {
+            return Err(ContynuError::MemoryNotFound(memory_id.to_string()));
+        }
         Ok(())
     }
 
-    pub fn supersede_memory_kind_single(
-        &self,
-        _session_id: &SessionId,
-        memory_id: &MemoryId,
-        superseded_by: &MemoryId,
+    pub fn delete_memory(&self, memory_id: &MemoryId) -> Result<()> {
+        let rows = self.conn.execute(
+            "UPDATE memory_objects SET status = 'deleted' WHERE memory_id = ?1 AND status = 'active'",
+            params![memory_id.as_str()],
+        )?;
+        if rows == 0 {
+            return Err(ContynuError::MemoryNotFound(memory_id.to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn supersede_memory(
+        &self, memory_id: &MemoryId, superseded_by: &MemoryId,
     ) -> Result<()> {
         self.conn.execute(
             r#"
             UPDATE memory_objects
             SET status = 'superseded', superseded_by = ?2
-            WHERE memory_id = ?1 AND status != 'superseded'
+            WHERE memory_id = ?1 AND status = 'active'
             "#,
             params![memory_id.as_str(), superseded_by.as_str()],
         )?;
         Ok(())
     }
 
-    pub fn find_active_memory_by_text(
-        &self,
-        session_id: &SessionId,
-        kind: MemoryObjectKind,
-        text: &str,
-    ) -> Result<Option<MemoryObject>> {
-        let sql = format!(
-            "SELECT {MEMORY_SELECT_COLUMNS} FROM memory_objects
-             WHERE session_id = ?1 AND kind = ?2 AND text = ?3 AND status != 'superseded'
-             ORDER BY created_at DESC
-             LIMIT 1"
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-        let memory = stmt
-            .query_row(
-                params![session_id.as_str(), kind.as_str(), text],
-                map_memory,
-            )
-            .optional()?;
+    pub fn get_memory(&self, memory_id: &MemoryId) -> Result<Option<MemoryObject>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {MEMORY_COLUMNS} FROM memory_objects WHERE memory_id = ?1"
+        ))?;
+        let memory = stmt.query_row(params![memory_id.as_str()], map_memory).optional()?;
         Ok(memory)
     }
 
-    pub fn find_active_memory_by_hash(
-        &self,
-        session_id: &SessionId,
-        kind: MemoryObjectKind,
-        text_hash: &str,
-    ) -> Result<Option<MemoryObject>> {
-        let sql = format!(
-            "SELECT {MEMORY_SELECT_COLUMNS} FROM memory_objects
-             WHERE session_id = ?1 AND kind = ?2 AND text_hash = ?3 AND status != 'superseded'
-             ORDER BY created_at DESC
-             LIMIT 1"
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-        let memory = stmt
-            .query_row(
-                params![session_id.as_str(), kind.as_str(), text_hash],
-                map_memory,
-            )
-            .optional()?;
-        Ok(memory)
-    }
-
-    pub fn list_events_for_session(&self, session_id: &SessionId) -> Result<Vec<EventRecord>> {
-        let mut stmt = self.conn.prepare(
-            r#"
-            SELECT event_id, session_id, turn_id, seq, ts, actor, event_type, payload_json,
-                   checksum, journal_path, journal_byte_offset, journal_line
-            FROM events
-            WHERE session_id = ?1
-            ORDER BY seq ASC
-            "#,
-        )?;
-        let rows = stmt.query_map(params![session_id.as_str()], |row| {
-            let event_id: String = row.get(0)?;
-            let session_id: String = row.get(1)?;
-            let turn_id: Option<String> = row.get(2)?;
-            let payload_json: String = row.get(7)?;
-            Ok(EventRecord {
-                event_id: EventId::parse(event_id).map_err(into_sql_error)?,
-                session_id: SessionId::parse(session_id).map_err(into_sql_error)?,
-                turn_id: turn_id
-                    .map(TurnId::parse)
-                    .transpose()
-                    .map_err(into_sql_error)?,
-                seq: row.get::<_, i64>(3)? as u64,
-                ts: parse_rfc3339(&row.get::<_, String>(4)?).map_err(into_sql_error)?,
-                actor: row.get(5)?,
-                event_type: row.get(6)?,
-                payload_json: serde_json::from_str(&payload_json).map_err(into_sql_error)?,
-                checksum: row.get(8)?,
-                journal_path: row.get(9)?,
-                journal_byte_offset: row.get::<_, i64>(10)? as u64,
-                journal_line: row.get::<_, i64>(11)? as usize,
-            })
-        })?;
-
-        let mut events = Vec::new();
-        for row in rows {
-            events.push(row?);
-        }
-        Ok(events)
-    }
-
-    pub fn get_event(&self, event_id: &EventId) -> Result<Option<EventRecord>> {
-        let mut events = self.conn.prepare(
-            r#"
-            SELECT event_id, session_id, turn_id, seq, ts, actor, event_type, payload_json,
-                   checksum, journal_path, journal_byte_offset, journal_line
-            FROM events WHERE event_id = ?1
-            "#,
-        )?;
-        let event = events
-            .query_row(params![event_id.as_str()], |row| {
-                let payload_json: String = row.get(7)?;
-                let turn_id: Option<String> = row.get(2)?;
-                Ok(EventRecord {
-                    event_id: EventId::parse(row.get::<_, String>(0)?).map_err(into_sql_error)?,
-                    session_id: SessionId::parse(row.get::<_, String>(1)?)
-                        .map_err(into_sql_error)?,
-                    turn_id: turn_id
-                        .map(TurnId::parse)
-                        .transpose()
-                        .map_err(into_sql_error)?,
-                    seq: row.get::<_, i64>(3)? as u64,
-                    ts: parse_rfc3339(&row.get::<_, String>(4)?).map_err(into_sql_error)?,
-                    actor: row.get(5)?,
-                    event_type: row.get(6)?,
-                    payload_json: serde_json::from_str(&payload_json).map_err(into_sql_error)?,
-                    checksum: row.get(8)?,
-                    journal_path: row.get(9)?,
-                    journal_byte_offset: row.get::<_, i64>(10)? as u64,
-                    journal_line: row.get::<_, i64>(11)? as usize,
-                })
-            })
-            .optional()?;
-        Ok(event)
-    }
-
-    pub fn list_artifacts(&self, session_id: Option<&SessionId>) -> Result<Vec<ArtifactRecord>> {
-        let sql = if session_id.is_some() {
-            r#"
-            SELECT artifact_id, session_id, source_event_id, path, kind, mime_type, sha256,
-                   blob_relative_path, size_bytes, created_at
-            FROM artifacts
-            WHERE session_id = ?1
-            ORDER BY created_at ASC
-            "#
-        } else {
-            r#"
-            SELECT artifact_id, session_id, source_event_id, path, kind, mime_type, sha256,
-                   blob_relative_path, size_bytes, created_at
-            FROM artifacts
-            ORDER BY created_at ASC
-            "#
-        };
-        let mut stmt = self.conn.prepare(sql)?;
-        let mapper = |row: &rusqlite::Row<'_>| {
-            Ok(ArtifactRecord {
-                artifact_id: ArtifactId::parse(row.get::<_, String>(0)?).map_err(into_sql_error)?,
-                session_id: SessionId::parse(row.get::<_, String>(1)?).map_err(into_sql_error)?,
-                source_event_id: EventId::parse(row.get::<_, String>(2)?)
-                    .map_err(into_sql_error)?,
-                path: row.get(3)?,
-                kind: row.get(4)?,
-                mime_type: row.get(5)?,
-                sha256: row.get(6)?,
-                blob_relative_path: row.get(7)?,
-                size_bytes: row.get::<_, i64>(8)? as u64,
-                created_at: parse_rfc3339(&row.get::<_, String>(9)?).map_err(into_sql_error)?,
-            })
-        };
-        let rows = if let Some(session_id) = session_id {
-            stmt.query_map(params![session_id.as_str()], mapper)?
-        } else {
-            stmt.query_map([], mapper)?
-        };
-
-        let mut artifacts = Vec::new();
-        for row in rows {
-            artifacts.push(row?);
-        }
-        Ok(artifacts)
-    }
-
-    pub fn list_current_files(&self, session_id: &SessionId) -> Result<Vec<FileRecord>> {
-        let mut stmt = self.conn.prepare(
-            r#"
-            SELECT file_id, session_id, workspace_relative_path, kind, last_known_sha256,
-                   last_snapshot_event_id, last_diff_event_id, observed_at, is_generated
-            FROM files
-            WHERE session_id = ?1
-            ORDER BY workspace_relative_path ASC, observed_at DESC
-            "#,
-        )?;
-        let rows = stmt.query_map(params![session_id.as_str()], |row| {
-            Ok(FileRecord {
-                file_id: FileId::parse(row.get::<_, String>(0)?).map_err(into_sql_error)?,
-                session_id: SessionId::parse(row.get::<_, String>(1)?).map_err(into_sql_error)?,
-                workspace_relative_path: row.get(2)?,
-                kind: row.get(3)?,
-                last_known_sha256: row.get(4)?,
-                last_snapshot_event_id: row
-                    .get::<_, Option<String>>(5)?
-                    .map(EventId::parse)
-                    .transpose()
-                    .map_err(into_sql_error)?,
-                last_diff_event_id: row
-                    .get::<_, Option<String>>(6)?
-                    .map(EventId::parse)
-                    .transpose()
-                    .map_err(into_sql_error)?,
-                observed_at: parse_rfc3339(&row.get::<_, String>(7)?).map_err(into_sql_error)?,
-                is_generated: row.get::<_, i64>(8)? != 0,
-            })
-        })?;
-
-        let mut deduped = Vec::new();
-        let mut last_path = None::<String>;
-        for row in rows {
-            let file = row?;
-            if last_path.as_deref() == Some(file.workspace_relative_path.as_str()) {
-                continue;
-            }
-            last_path = Some(file.workspace_relative_path.clone());
-            deduped.push(file);
-        }
-        Ok(deduped)
-    }
-
-    pub fn list_events_for_turn(
-        &self,
-        session_id: &SessionId,
-        turn_id: &TurnId,
-    ) -> Result<Vec<EventRecord>> {
-        let mut stmt = self.conn.prepare(
-            r#"
-            SELECT event_id, session_id, turn_id, seq, ts, actor, event_type, payload_json,
-                   checksum, journal_path, journal_byte_offset, journal_line
-            FROM events
-            WHERE session_id = ?1 AND turn_id = ?2
-            ORDER BY seq ASC
-            "#,
-        )?;
-        let rows = stmt.query_map(params![session_id.as_str(), turn_id.as_str()], |row| {
-            let payload_json: String = row.get(7)?;
-            Ok(EventRecord {
-                event_id: EventId::parse(row.get::<_, String>(0)?).map_err(into_sql_error)?,
-                session_id: SessionId::parse(row.get::<_, String>(1)?).map_err(into_sql_error)?,
-                turn_id: row
-                    .get::<_, Option<String>>(2)?
-                    .map(TurnId::parse)
-                    .transpose()
-                    .map_err(into_sql_error)?,
-                seq: row.get::<_, i64>(3)? as u64,
-                ts: parse_rfc3339(&row.get::<_, String>(4)?).map_err(into_sql_error)?,
-                actor: row.get(5)?,
-                event_type: row.get(6)?,
-                payload_json: serde_json::from_str(&payload_json).map_err(into_sql_error)?,
-                checksum: row.get(8)?,
-                journal_path: row.get(9)?,
-                journal_byte_offset: row.get::<_, i64>(10)? as u64,
-                journal_line: row.get::<_, i64>(11)? as usize,
-            })
-        })?;
-
-        let mut events = Vec::new();
-        for row in rows {
-            events.push(row?);
-        }
-        Ok(events)
-    }
-
-    pub fn list_memory_objects(
-        &self,
-        session_id: &SessionId,
-        kind: Option<MemoryObjectKind>,
+    pub fn list_active_memories(
+        &self, session_id: &SessionId, kind: Option<MemoryObjectKind>,
     ) -> Result<Vec<MemoryObject>> {
         let sql = if kind.is_some() {
             format!(
-                "SELECT {MEMORY_SELECT_COLUMNS} FROM memory_objects
-                 WHERE session_id = ?1 AND kind = ?2
-                 ORDER BY created_at ASC"
-            )
-        } else {
-            format!(
-                "SELECT {MEMORY_SELECT_COLUMNS} FROM memory_objects
-                 WHERE session_id = ?1
-                 ORDER BY created_at ASC"
-            )
-        };
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = if let Some(kind) = kind {
-            stmt.query_map(params![session_id.as_str(), kind.as_str()], map_memory)?
-        } else {
-            stmt.query_map(params![session_id.as_str()], map_memory)?
-        };
-
-        let mut memory = Vec::new();
-        for row in rows {
-            memory.push(row?);
-        }
-        Ok(memory)
-    }
-
-    pub fn list_active_memory_objects(
-        &self,
-        session_id: &SessionId,
-        kind: Option<MemoryObjectKind>,
-    ) -> Result<Vec<MemoryObject>> {
-        let sql = if kind.is_some() {
-            format!(
-                "SELECT {MEMORY_SELECT_COLUMNS} FROM memory_objects
-                 WHERE session_id = ?1 AND kind = ?2 AND status != 'superseded'
+                "SELECT {MEMORY_COLUMNS} FROM memory_objects
+                 WHERE session_id = ?1 AND kind = ?2 AND status = 'active'
                  ORDER BY importance DESC, created_at DESC"
             )
         } else {
             format!(
-                "SELECT {MEMORY_SELECT_COLUMNS} FROM memory_objects
-                 WHERE session_id = ?1 AND status != 'superseded'
+                "SELECT {MEMORY_COLUMNS} FROM memory_objects
+                 WHERE session_id = ?1 AND status = 'active'
                  ORDER BY importance DESC, created_at DESC"
             )
         };
@@ -1060,84 +501,11 @@ impl MetadataStore {
         } else {
             stmt.query_map(params![session_id.as_str()], map_memory)?
         };
-
-        let mut memory = Vec::new();
-        for row in rows {
-            memory.push(row?);
-        }
-        Ok(memory)
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    pub fn search_exact(&self, query: &str) -> Result<Vec<EventRecord>> {
-        let needle = format!("%{query}%");
-        let mut stmt = self.conn.prepare(
-            r#"
-            SELECT event_id, session_id, turn_id, seq, ts, actor, event_type, payload_json,
-                   checksum, journal_path, journal_byte_offset, journal_line
-            FROM events
-            WHERE payload_json LIKE ?1 OR event_type LIKE ?1
-            ORDER BY ts DESC
-            LIMIT 50
-            "#,
-        )?;
-        let rows = stmt.query_map(params![needle], |row| {
-            let payload_json: String = row.get(7)?;
-            let turn_id: Option<String> = row.get(2)?;
-            Ok(EventRecord {
-                event_id: EventId::parse(row.get::<_, String>(0)?).map_err(into_sql_error)?,
-                session_id: SessionId::parse(row.get::<_, String>(1)?).map_err(into_sql_error)?,
-                turn_id: turn_id
-                    .map(TurnId::parse)
-                    .transpose()
-                    .map_err(into_sql_error)?,
-                seq: row.get::<_, i64>(3)? as u64,
-                ts: parse_rfc3339(&row.get::<_, String>(4)?).map_err(into_sql_error)?,
-                actor: row.get(5)?,
-                event_type: row.get(6)?,
-                payload_json: serde_json::from_str(&payload_json).map_err(into_sql_error)?,
-                checksum: row.get(8)?,
-                journal_path: row.get(9)?,
-                journal_byte_offset: row.get::<_, i64>(10)? as u64,
-                journal_line: row.get::<_, i64>(11)? as usize,
-            })
-        })?;
-
-        let mut matches = Vec::new();
-        for row in rows {
-            matches.push(row?);
-        }
-        Ok(matches)
-    }
-
-    /// Mark a memory as no longer valid (set valid_to to now).
-    pub fn invalidate_memory(&self, memory_id: &MemoryId) -> Result<()> {
-        self.conn.execute(
-            "UPDATE memory_objects SET valid_to = ?2 WHERE memory_id = ?1 AND valid_to IS NULL",
-            params![memory_id.as_str(), Utc::now().to_rfc3339()],
-        )?;
-        Ok(())
-    }
-
-    pub fn search_memory(&self, query: &str) -> Result<Vec<MemoryObject>> {
-        let needle = format!("%{query}%");
-        let sql = format!(
-            "SELECT {MEMORY_SELECT_COLUMNS} FROM memory_objects
-             WHERE text LIKE ?1 AND status != 'superseded'
-             ORDER BY created_at DESC
-             LIMIT 50"
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![needle], map_memory)?;
-        let mut matches = Vec::new();
-        for row in rows {
-            matches.push(row?);
-        }
-        Ok(matches)
-    }
-
-    /// Flexible memory search with filtering, pagination, and sorting.
     pub fn query_memories(&self, query: &MemoryQuery) -> Result<Vec<MemoryObject>> {
-        let mut conditions = vec!["status != 'superseded'".to_string()];
+        let mut conditions = vec!["status = 'active'".to_string()];
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         let mut param_idx = 1;
 
@@ -1156,9 +524,9 @@ impl MetadataStore {
             param_values.push(Box::new(kind.as_str().to_string()));
             param_idx += 1;
         }
-        if let Some(ref adapter) = query.source_adapter {
-            conditions.push(format!("source_adapter = ?{param_idx}"));
-            param_values.push(Box::new(adapter.clone()));
+        if let Some(ref scope) = query.scope {
+            conditions.push(format!("scope = ?{param_idx}"));
+            param_values.push(Box::new(scope.as_str().to_string()));
             param_idx += 1;
         }
         if let Some(ref after) = query.after {
@@ -1171,151 +539,49 @@ impl MetadataStore {
             param_values.push(Box::new(before.to_rfc3339()));
             let _ = param_idx;
         }
-        if query.only_valid {
-            conditions.push("(valid_to IS NULL)".to_string());
-        }
 
         let order = match query.sort_by {
             MemorySortBy::Importance => "importance DESC, created_at DESC",
             MemorySortBy::Recency => "created_at DESC",
         };
-
         let limit = query.limit.min(50).max(1);
-        let offset = query.offset;
 
         let sql = format!(
-            "SELECT {MEMORY_SELECT_COLUMNS} FROM memory_objects WHERE {} ORDER BY {} LIMIT {} OFFSET {}",
-            conditions.join(" AND "),
-            order,
-            limit,
-            offset
+            "SELECT {MEMORY_COLUMNS} FROM memory_objects WHERE {} ORDER BY {} LIMIT {} OFFSET {}",
+            conditions.join(" AND "), order, limit, query.offset
         );
 
         let params: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params.as_slice(), map_memory)?;
-        let mut results = Vec::new();
-        for row in rows {
-            results.push(row?);
-        }
-        Ok(results)
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    /// Flexible event search with filtering and pagination.
-    pub fn query_events(&self, query: &EventQuery) -> Result<Vec<EventRecord>> {
-        let mut conditions = Vec::new();
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-        let mut param_idx = 1;
-
-        if let Some(ref text) = query.text_query {
-            conditions.push(format!("(payload_json LIKE ?{param_idx} OR event_type LIKE ?{param_idx})"));
-            param_values.push(Box::new(format!("%{text}%")));
-            param_idx += 1;
-        }
-        if let Some(ref session_id) = query.session_id {
-            conditions.push(format!("session_id = ?{param_idx}"));
-            param_values.push(Box::new(session_id.as_str().to_string()));
-            param_idx += 1;
-        }
-        if let Some(ref after) = query.after {
-            conditions.push(format!("ts >= ?{param_idx}"));
-            param_values.push(Box::new(after.to_rfc3339()));
-            param_idx += 1;
-        }
-        if let Some(ref before) = query.before {
-            conditions.push(format!("ts <= ?{param_idx}"));
-            param_values.push(Box::new(before.to_rfc3339()));
-            let _ = param_idx;
-        }
-
-        let where_clause = if conditions.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", conditions.join(" AND "))
-        };
-
-        let limit = query.limit.min(50).max(1);
-        let offset = query.offset;
-
+    pub fn search_memory(&self, query: &str) -> Result<Vec<MemoryObject>> {
+        let needle = format!("%{query}%");
         let sql = format!(
-            r#"SELECT event_id, session_id, turn_id, seq, ts, actor, event_type, payload_json,
-                      checksum, journal_path, journal_byte_offset, journal_line
-               FROM events {where_clause}
-               ORDER BY ts DESC
-               LIMIT {limit} OFFSET {offset}"#
+            "SELECT {MEMORY_COLUMNS} FROM memory_objects
+             WHERE text LIKE ?1 AND status = 'active'
+             ORDER BY importance DESC, created_at DESC
+             LIMIT 50"
         );
-
-        let params: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params.as_slice(), |row| {
-            let payload_json: String = row.get(7)?;
-            let turn_id: Option<String> = row.get(2)?;
-            Ok(EventRecord {
-                event_id: EventId::parse(row.get::<_, String>(0)?).map_err(into_sql_error)?,
-                session_id: SessionId::parse(row.get::<_, String>(1)?).map_err(into_sql_error)?,
-                turn_id: turn_id
-                    .map(TurnId::parse)
-                    .transpose()
-                    .map_err(into_sql_error)?,
-                seq: row.get::<_, i64>(3)? as u64,
-                ts: parse_rfc3339(&row.get::<_, String>(4)?).map_err(into_sql_error)?,
-                actor: row.get(5)?,
-                event_type: row.get(6)?,
-                payload_json: serde_json::from_str(&payload_json).map_err(into_sql_error)?,
-                checksum: row.get(8)?,
-                journal_path: row.get(9)?,
-                journal_byte_offset: row.get::<_, i64>(10)? as u64,
-                journal_line: row.get::<_, i64>(11)? as usize,
-            })
-        })?;
-        let mut results = Vec::new();
-        for row in rows {
-            results.push(row?);
-        }
-        Ok(results)
-    }
-
-    pub fn increment_memory_access(&self, memory_ids: &[MemoryId]) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        for id in memory_ids {
-            self.conn.execute(
-                r#"
-                UPDATE memory_objects
-                SET access_count = access_count + 1, last_accessed_at = ?2
-                WHERE memory_id = ?1
-                "#,
-                params![id.as_str(), now],
-            )?;
-        }
-        Ok(())
-    }
-
-    pub fn update_memory_importance(
-        &self,
-        memory_id: &MemoryId,
-        importance: f64,
-    ) -> Result<()> {
-        self.conn.execute(
-            "UPDATE memory_objects SET importance = ?2 WHERE memory_id = ?1",
-            params![memory_id.as_str(), importance],
-        )?;
-        Ok(())
+        let rows = stmt.query_map(params![needle], map_memory)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     pub fn count_active_memories(
-        &self,
-        session_id: &SessionId,
-        kind: Option<MemoryObjectKind>,
+        &self, session_id: &SessionId, kind: Option<MemoryObjectKind>,
     ) -> Result<usize> {
         let count = if let Some(kind) = kind {
             self.conn.query_row(
-                "SELECT COUNT(*) FROM memory_objects WHERE session_id = ?1 AND kind = ?2 AND status != 'superseded'",
+                "SELECT COUNT(*) FROM memory_objects WHERE session_id = ?1 AND kind = ?2 AND status = 'active'",
                 params![session_id.as_str(), kind.as_str()],
                 |row| row.get::<_, i64>(0),
             )?
         } else {
             self.conn.query_row(
-                "SELECT COUNT(*) FROM memory_objects WHERE session_id = ?1 AND status != 'superseded'",
+                "SELECT COUNT(*) FROM memory_objects WHERE session_id = ?1 AND status = 'active'",
                 params![session_id.as_str()],
                 |row| row.get::<_, i64>(0),
             )?
@@ -1323,119 +589,119 @@ impl MetadataStore {
         Ok(count as usize)
     }
 
-    pub fn session_exists(&self, session_id: &SessionId) -> Result<bool> {
-        let count = self.conn.query_row(
-            "SELECT COUNT(*) FROM sessions WHERE session_id = ?1",
-            params![session_id.as_str()],
-            |row| row.get::<_, i64>(0),
-        )?;
-        Ok(count > 0)
-    }
-
-    pub fn reconcile_session(&self, journal: &Journal, session_id: &SessionId) -> Result<()> {
-        for replay in journal.replay()? {
-            if &replay.event.session_id != session_id {
-                continue;
-            }
-            self.record_event(
-                &replay.event,
-                &journal.path().display().to_string(),
-                JournalAppend {
-                    seq: replay.event.seq,
-                    byte_offset: replay.byte_offset,
-                    line_number: replay.line_number,
-                },
+    pub fn increment_memory_access(&self, memory_ids: &[MemoryId]) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        for id in memory_ids {
+            self.conn.execute(
+                "UPDATE memory_objects SET access_count = access_count + 1, last_accessed_at = ?2 WHERE memory_id = ?1",
+                params![id.as_str(), now],
             )?;
         }
         Ok(())
     }
+
+    // -- Prompt operations ----------------------------------------------------
+
+    pub fn insert_prompt(&self, prompt: &PromptRecord) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO prompts (
+              prompt_id, session_id, verbatim, interpretation, interpretation_confidence,
+              source_model, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                prompt.prompt_id,
+                prompt.session_id.as_str(),
+                prompt.verbatim,
+                prompt.interpretation,
+                prompt.interpretation_confidence,
+                prompt.source_model,
+                prompt.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_recent_prompts(&self, session_id: &SessionId, limit: usize) -> Result<Vec<PromptRecord>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT prompt_id, session_id, verbatim, interpretation, interpretation_confidence,
+                   source_model, created_at
+            FROM prompts WHERE session_id = ?1
+            ORDER BY created_at DESC LIMIT ?2
+            "#,
+        )?;
+        let rows = stmt.query_map(params![session_id.as_str(), limit as i64], |row| {
+            Ok(PromptRecord {
+                prompt_id: row.get(0)?,
+                session_id: SessionId::parse(row.get::<_, String>(1)?).map_err(into_sql_error)?,
+                verbatim: row.get(2)?,
+                interpretation: row.get(3)?,
+                interpretation_confidence: row.get(4)?,
+                source_model: row.get(5)?,
+                created_at: parse_rfc3339(&row.get::<_, String>(6)?).map_err(into_sql_error)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Purge all data from old architecture (events, turns, files, etc.)
+    /// Called on startup when migrating to v5.
+    pub fn purge_old_data(&self) -> Result<()> {
+        // Drop old tables if they exist (idempotent)
+        self.conn.execute_batch(
+            r#"
+            DROP TABLE IF EXISTS events;
+            DROP TABLE IF EXISTS turns;
+            DROP TABLE IF EXISTS files;
+            DROP TABLE IF EXISTS artifacts;
+            "#,
+        )?;
+        Ok(())
+    }
 }
 
-const MEMORY_SELECT_COLUMNS: &str = r#"
-    memory_id, session_id, kind, status, text, confidence, source_event_ids_json,
-    created_at, superseded_by,
-    source_adapter, source_model, importance, access_count, last_accessed_at,
-    consolidated_from_json, text_hash, valid_from, valid_to
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+const MEMORY_COLUMNS: &str = r#"
+    memory_id, session_id, kind, scope, status, text, importance, reason,
+    source_model, superseded_by, created_at, updated_at,
+    access_count, last_accessed_at
 "#;
 
 fn map_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryObject> {
-    let source_event_ids_json: String = row.get(6)?;
-    let source_event_ids =
-        serde_json::from_str::<Vec<String>>(&source_event_ids_json).map_err(into_sql_error)?;
-    let source_event_ids = source_event_ids
-        .into_iter()
-        .map(EventId::parse)
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(into_sql_error)?;
-    let kind = match row.get::<_, String>(2)?.as_str() {
-        "fact" => MemoryObjectKind::Fact,
-        "constraint" => MemoryObjectKind::Constraint,
-        "decision" => MemoryObjectKind::Decision,
-        "todo" => MemoryObjectKind::Todo,
-        "summary" => MemoryObjectKind::Summary,
-        "entity" => MemoryObjectKind::Entity,
-        "file_note" => MemoryObjectKind::FileNote,
-        other => {
-            return Err(into_sql_error(ContynuError::Validation(format!(
-                "unknown memory kind `{other}`"
-            ))))
-        }
-    };
-
-    let consolidated_from_json: Option<String> = row.get(14)?;
-    let consolidated_from = consolidated_from_json
-        .map(|json| {
-            serde_json::from_str::<Vec<String>>(&json)
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|s| MemoryId::parse(s).ok())
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let last_accessed_at = row
-        .get::<_, Option<String>>(13)?
-        .map(|s| parse_rfc3339(&s))
-        .transpose()
-        .map_err(into_sql_error)?;
+    let kind = MemoryObjectKind::from_str(&row.get::<_, String>(2)?)
+        .ok_or_else(|| into_sql_error(ContynuError::Validation("unknown memory kind".into())))?;
+    let scope = MemoryScope::from_str(&row.get::<_, String>(3)?)
+        .ok_or_else(|| into_sql_error(ContynuError::Validation("unknown memory scope".into())))?;
 
     Ok(MemoryObject {
         memory_id: MemoryId::parse(row.get::<_, String>(0)?).map_err(into_sql_error)?,
         session_id: SessionId::parse(row.get::<_, String>(1)?).map_err(into_sql_error)?,
         kind,
-        status: row.get(3)?,
-        text: row.get(4)?,
-        confidence: row.get(5)?,
-        source_event_ids,
-        created_at: parse_rfc3339(&row.get::<_, String>(7)?).map_err(into_sql_error)?,
-        superseded_by: row
-            .get::<_, Option<String>>(8)?
-            .map(MemoryId::parse)
-            .transpose()
-            .map_err(into_sql_error)?,
-        source_adapter: row.get(9)?,
-        source_model: row.get(10)?,
-        importance: row.get::<_, Option<f64>>(11)?.unwrap_or(0.5),
+        scope,
+        status: row.get(4)?,
+        text: row.get(5)?,
+        importance: row.get::<_, Option<f64>>(6)?.unwrap_or(0.5),
+        reason: row.get(7)?,
+        source_model: row.get(8)?,
+        superseded_by: row.get::<_, Option<String>>(9)?
+            .map(MemoryId::parse).transpose().map_err(into_sql_error)?,
+        created_at: parse_rfc3339(&row.get::<_, String>(10)?).map_err(into_sql_error)?,
+        updated_at: row.get::<_, Option<String>>(11)?
+            .map(|s| parse_rfc3339(&s)).transpose().map_err(into_sql_error)?,
         access_count: row.get::<_, Option<u32>>(12)?.unwrap_or(0),
-        last_accessed_at,
-        consolidated_from,
-        text_hash: row.get(15)?,
-        valid_from: row
-            .get::<_, Option<String>>(16)?
-            .map(|s| parse_rfc3339(&s))
-            .transpose()
-            .map_err(into_sql_error)?,
-        valid_to: row
-            .get::<_, Option<String>>(17)?
-            .map(|s| parse_rfc3339(&s))
-            .transpose()
-            .map_err(into_sql_error)?,
+        last_accessed_at: row.get::<_, Option<String>>(13)?
+            .map(|s| parse_rfc3339(&s)).transpose().map_err(into_sql_error)?,
     })
 }
 
 fn parse_rfc3339(value: &str) -> Result<DateTime<Utc>> {
     Ok(DateTime::parse_from_rfc3339(value)
-        .map_err(|error| ContynuError::Validation(error.to_string()))?
+        .map_err(|e| ContynuError::Validation(e.to_string()))?
         .with_timezone(&Utc))
 }
 
@@ -1443,161 +709,157 @@ fn into_sql_error(error: impl ToString) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(
         0,
         rusqlite::types::Type::Text,
-        Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            error.to_string(),
-        )),
+        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())),
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
     use tempfile::tempdir;
-
-    use super::{MemoryObjectKind, MetadataStore, SessionRecord};
-    use crate::event::{Actor, EventDraft, EventType};
-    use crate::ids::SessionId;
-    use crate::journal::Journal;
+    use super::*;
 
     #[test]
-    fn migrations_and_reconcile_work() {
+    fn fresh_migration_works() {
         let dir = tempdir().unwrap();
         let db = dir.path().join("contynu.db");
-        let journal_path = dir.path().join("session.jsonl");
         let store = MetadataStore::open(&db).unwrap();
-        let journal = Journal::open(&journal_path).unwrap();
         let session_id = SessionId::new();
-
-        store
-            .register_session(&SessionRecord {
-                session_id: session_id.clone(),
-                project_id: None,
-                status: "started".into(),
-                cli_name: None,
-                cli_version: None,
-                model_name: None,
-                cwd: None,
-                repo_root: None,
-                host_fingerprint: None,
-                started_at: chrono::Utc::now(),
-                ended_at: None,
-            })
-            .unwrap();
-
-        journal
-            .append(EventDraft::new(
-                session_id.clone(),
-                None,
-                Actor::Runtime,
-                EventType::SessionStarted,
-                json!({"cwd": "/tmp"}),
-            ))
-            .unwrap();
-
-        store.reconcile_session(&journal, &session_id).unwrap();
-        assert_eq!(store.list_events_for_session(&session_id).unwrap().len(), 1);
+        store.register_session(&SessionRecord {
+            session_id: session_id.clone(),
+            project_id: None,
+            status: "active".into(),
+            cli_name: Some("claude_cli".into()),
+            cli_version: None,
+            model_name: None,
+            cwd: None,
+            repo_root: None,
+            host_fingerprint: None,
+            started_at: chrono::Utc::now(),
+            ended_at: None,
+        }).unwrap();
+        store.set_primary_project_id(&session_id).unwrap();
+        assert_eq!(store.primary_project_id().unwrap().unwrap(), session_id);
     }
 
     #[test]
-    fn list_current_files_and_active_memory_filters_work() {
+    fn memory_crud_works() {
         let dir = tempdir().unwrap();
         let db = dir.path().join("contynu.db");
         let store = MetadataStore::open(&db).unwrap();
         let session_id = SessionId::new();
-
-        store
-            .register_session(&SessionRecord {
-                session_id: session_id.clone(),
-                project_id: None,
-                status: "started".into(),
-                cli_name: None,
-                cli_version: None,
-                model_name: None,
-                cwd: None,
-                repo_root: None,
-                host_fingerprint: None,
-                started_at: chrono::Utc::now(),
-                ended_at: None,
-            })
-            .unwrap();
-
-        let first_memory = crate::store::MemoryObject {
-            memory_id: crate::ids::MemoryId::new(),
+        store.register_session(&SessionRecord {
             session_id: session_id.clone(),
-            kind: MemoryObjectKind::Summary,
-            status: "superseded".into(),
-            text: "old summary".into(),
-            confidence: Some(0.5),
-            source_event_ids: Vec::new(),
-            created_at: chrono::Utc::now(),
-            superseded_by: None,
-            source_adapter: None,
-            source_model: None,
-            importance: 0.5,
-            access_count: 0,
-            last_accessed_at: None,
-            consolidated_from: Vec::new(),
-            text_hash: None,
-            valid_from: None,
-            valid_to: None,
-        };
-        let active_memory = crate::store::MemoryObject {
-            memory_id: crate::ids::MemoryId::new(),
-            session_id: session_id.clone(),
-            kind: MemoryObjectKind::Summary,
+            project_id: None,
             status: "active".into(),
-            text: "current summary".into(),
-            confidence: Some(0.9),
-            source_event_ids: Vec::new(),
-            created_at: chrono::Utc::now(),
+            cli_name: None, cli_version: None, model_name: None,
+            cwd: None, repo_root: None, host_fingerprint: None,
+            started_at: chrono::Utc::now(), ended_at: None,
+        }).unwrap();
+
+        let mem_id = MemoryId::new();
+        store.insert_memory_object(&MemoryObject {
+            memory_id: mem_id.clone(),
+            session_id: session_id.clone(),
+            kind: MemoryObjectKind::Fact,
+            scope: MemoryScope::Project,
+            status: "active".into(),
+            text: "The API uses JWT auth".into(),
+            importance: 0.8,
+            reason: Some("Model observed this".into()),
+            source_model: Some("claude-opus-4-6".into()),
             superseded_by: None,
-            source_adapter: None,
-            source_model: None,
-            importance: 0.5,
+            created_at: chrono::Utc::now(),
+            updated_at: None,
             access_count: 0,
             last_accessed_at: None,
-            consolidated_from: Vec::new(),
-            text_hash: None,
-            valid_from: None,
-            valid_to: None,
-        };
-        store.insert_memory_object(&first_memory).unwrap();
-        store.insert_memory_object(&active_memory).unwrap();
+        }).unwrap();
 
-        store
-            .register_file(&crate::store::FileRecord {
-                file_id: crate::ids::FileId::new(),
+        let memories = store.list_active_memories(&session_id, None).unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].text, "The API uses JWT auth");
+
+        // Update
+        store.update_memory_text(&mem_id, "The API uses OAuth2", 0.9, Some("Corrected")).unwrap();
+        let updated = store.get_memory(&mem_id).unwrap().unwrap();
+        assert_eq!(updated.text, "The API uses OAuth2");
+        assert_eq!(updated.importance, 0.9);
+
+        // Delete
+        store.delete_memory(&mem_id).unwrap();
+        let memories = store.list_active_memories(&session_id, None).unwrap();
+        assert_eq!(memories.len(), 0);
+    }
+
+    #[test]
+    fn prompt_recording_works() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("contynu.db");
+        let store = MetadataStore::open(&db).unwrap();
+        let session_id = SessionId::new();
+        store.register_session(&SessionRecord {
+            session_id: session_id.clone(),
+            project_id: None, status: "active".into(),
+            cli_name: None, cli_version: None, model_name: None,
+            cwd: None, repo_root: None, host_fingerprint: None,
+            started_at: chrono::Utc::now(), ended_at: None,
+        }).unwrap();
+
+        store.insert_prompt(&PromptRecord {
+            prompt_id: "pmt_test1".into(),
+            session_id: session_id.clone(),
+            verbatim: "proceed".into(),
+            interpretation: Some("Continue with Bug 2 reproduction".into()),
+            interpretation_confidence: Some(0.9),
+            source_model: Some("claude-opus-4-6".into()),
+            created_at: chrono::Utc::now(),
+        }).unwrap();
+
+        let prompts = store.list_recent_prompts(&session_id, 10).unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].verbatim, "proceed");
+    }
+
+    #[test]
+    fn memory_search_and_query_work() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("contynu.db");
+        let store = MetadataStore::open(&db).unwrap();
+        let session_id = SessionId::new();
+        store.register_session(&SessionRecord {
+            session_id: session_id.clone(),
+            project_id: None, status: "active".into(),
+            cli_name: None, cli_version: None, model_name: None,
+            cwd: None, repo_root: None, host_fingerprint: None,
+            started_at: chrono::Utc::now(), ended_at: None,
+        }).unwrap();
+
+        for (kind, scope, text, importance) in [
+            (MemoryObjectKind::Fact, MemoryScope::Project, "JWT authentication is used", 0.8),
+            (MemoryObjectKind::UserFact, MemoryScope::User, "Udonna created Contynu", 0.9),
+            (MemoryObjectKind::Constraint, MemoryScope::Project, "Must support backward compat", 0.95),
+        ] {
+            store.insert_memory_object(&MemoryObject {
+                memory_id: MemoryId::new(),
                 session_id: session_id.clone(),
-                workspace_relative_path: "src/main.rs".into(),
-                kind: "source_text".into(),
-                last_known_sha256: Some("sha256:one".into()),
-                last_snapshot_event_id: None,
-                last_diff_event_id: None,
-                observed_at: chrono::Utc::now(),
-                is_generated: false,
-            })
-            .unwrap();
-        store
-            .register_file(&crate::store::FileRecord {
-                file_id: crate::ids::FileId::new(),
-                session_id: session_id.clone(),
-                workspace_relative_path: "src/main.rs".into(),
-                kind: "source_deleted".into(),
-                last_known_sha256: None,
-                last_snapshot_event_id: None,
-                last_diff_event_id: None,
-                observed_at: chrono::Utc::now(),
-                is_generated: false,
-            })
-            .unwrap();
+                kind, scope, status: "active".into(),
+                text: text.into(), importance,
+                reason: None, source_model: None, superseded_by: None,
+                created_at: chrono::Utc::now(), updated_at: None,
+                access_count: 0, last_accessed_at: None,
+            }).unwrap();
+        }
 
-        let current_files = store.list_current_files(&session_id).unwrap();
-        assert_eq!(current_files.len(), 1);
-        assert_eq!(current_files[0].workspace_relative_path, "src/main.rs");
+        // Search by text
+        let results = store.search_memory("JWT").unwrap();
+        assert_eq!(results.len(), 1);
 
-        let memory_hits = store.search_memory("summary").unwrap();
-        assert_eq!(memory_hits.len(), 1);
-        assert_eq!(memory_hits[0].text, "current summary");
+        // Query by scope
+        let results = store.query_memories(&MemoryQuery {
+            session_id: Some(session_id.clone()),
+            scope: Some(MemoryScope::User),
+            ..Default::default()
+        }).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].text.contains("Udonna"));
     }
 }

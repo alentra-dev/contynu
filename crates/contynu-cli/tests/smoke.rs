@@ -88,23 +88,18 @@ fn project_is_created_and_reused_by_default() {
     let run_stderr = String::from_utf8_lossy(&run.stderr);
     assert!(run_stdout.contains("smoke"));
     assert!(run_stderr.contains("Let's contynu another time."));
-    assert!(run_stderr.contains("Saved turn trn_"));
+    assert!(run_stderr.contains("Project prj_"));
 
-    let inspect = Command::new(env!("CARGO_BIN_EXE_contynu"))
+    // Verify session exists via status command
+    let status = Command::new(env!("CARGO_BIN_EXE_contynu"))
         .arg("--state-dir")
         .arg(&state_dir)
-        .arg("inspect")
-        .arg("project")
+        .arg("status")
         .output()
         .unwrap();
-    assert!(
-        inspect.status.success(),
-        "inspect project failed: {}",
-        String::from_utf8_lossy(&inspect.stderr)
-    );
-    let inspect_stdout = String::from_utf8_lossy(&inspect.stdout);
-    assert!(inspect_stdout.contains(&project_id));
-    assert!(inspect_stdout.contains("session_resumed"));
+    assert!(status.status.success());
+    let status_stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(status_stdout.contains(&project_id));
 }
 
 #[test]
@@ -134,6 +129,7 @@ fn streamlined_launcher_reuses_primary_project() {
     let combined_path = format!("{}:{}", bin_dir.display(), path);
 
     let start = Command::new(env!("CARGO_BIN_EXE_contynu"))
+        .env("PATH", &combined_path)
         .arg("--state-dir")
         .arg(&state_dir)
         .arg("start-project")
@@ -169,16 +165,16 @@ fn streamlined_launcher_reuses_primary_project() {
     assert!(captured.contains("rehydration.txt"));
     assert!(!dir.path().join("AGENTS.md").exists());
 
-    let inspect = Command::new(env!("CARGO_BIN_EXE_contynu"))
+    // Verify project exists via status
+    let status = Command::new(env!("CARGO_BIN_EXE_contynu"))
         .arg("--state-dir")
         .arg(&state_dir)
-        .arg("inspect")
-        .arg("project")
+        .arg("status")
         .output()
         .unwrap();
-    assert!(inspect.status.success());
-    let inspect_stdout = String::from_utf8_lossy(&inspect.stdout);
-    assert!(inspect_stdout.contains(&project_id));
+    assert!(status.status.success());
+    let status_stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(status_stdout.contains(&project_id));
 }
 
 #[test]
@@ -212,7 +208,7 @@ fn direct_passthrough_launches_regular_commands() {
 }
 
 #[test]
-fn status_projects_recent_and_config_commands_work() {
+fn status_projects_and_config_commands_work() {
     let dir = tempdir().unwrap();
     let state_dir = dir.path().join(".contynu");
 
@@ -241,7 +237,7 @@ fn status_projects_recent_and_config_commands_work() {
     assert!(status.status.success());
     let status_stdout = String::from_utf8_lossy(&status.stdout);
     assert!(status_stdout.contains("Project status"));
-    assert!(status_stdout.contains("Counts"));
+    assert!(status_stdout.contains("Active memories"));
 
     let projects = Command::new(env!("CARGO_BIN_EXE_contynu"))
         .arg("--state-dir")
@@ -253,17 +249,6 @@ fn status_projects_recent_and_config_commands_work() {
     let projects_stdout = String::from_utf8_lossy(&projects.stdout);
     assert!(projects_stdout.contains("Projects"));
     assert!(projects_stdout.contains("primary"));
-
-    let recent = Command::new(env!("CARGO_BIN_EXE_contynu"))
-        .arg("--state-dir")
-        .arg(&state_dir)
-        .arg("recent")
-        .output()
-        .unwrap();
-    assert!(recent.status.success());
-    let recent_stdout = String::from_utf8_lossy(&recent.stdout);
-    assert!(recent_stdout.contains("Recent activity"));
-    assert!(recent_stdout.contains("latest turn:"));
 
     let config_validate = Command::new(env!("CARGO_BIN_EXE_contynu"))
         .arg("--state-dir")
@@ -330,16 +315,14 @@ fn new_flag_prompts_and_wipes_history_before_starting_fresh() {
     assert!(stderr.contains("permanently wipe the chat history"));
     assert!(stderr.contains("Type `yes` to continue"));
 
-    let inspect = Command::new(env!("CARGO_BIN_EXE_contynu"))
+    // Verify we can still run status after wipe (new project was created)
+    let status = Command::new(env!("CARGO_BIN_EXE_contynu"))
         .arg("--state-dir")
         .arg(&state_dir)
-        .arg("inspect")
-        .arg("project")
+        .arg("status")
         .output()
         .unwrap();
-    assert!(inspect.status.success());
-    let inspect_stdout = String::from_utf8_lossy(&inspect.stdout);
-    assert!(!inspect_stdout.contains("first"));
+    assert!(status.status.success());
 }
 
 #[test]

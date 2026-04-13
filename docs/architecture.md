@@ -2,139 +2,101 @@
 
 ## Purpose
 
-Contynu is a model-agnostic persistent memory layer for LLM workflows. Its purpose is to capture, persist, index, and rehydrate the full working state of AI-assisted work so that sessions can survive crashes, resume seamlessly, and transfer across models without loss of meaningful context.
+Contynu is a model-agnostic persistent memory layer for LLM workflows. Its purpose is to persist, index, and rehydrate structured project memory so that sessions can survive crashes, resume seamlessly, and transfer across models without loss of meaningful context.
 
-This document defines the production architecture for Contynu. It is intentionally optimized for durability, performance, auditability, and extensibility rather than short-term speed of implementation.
+This document defines the production architecture for Contynu as of the v0.5.0 model-driven memory rewrite.
 
 ---
 
 ## Product Principles
 
-1. **Durability first**
-   Every meaningful event must be persisted before it is considered committed.
+1. **Model-driven memory**
+   The model decides what is worth remembering. Contynu stores what the model writes, not what a heuristic guesses.
 
 2. **Model agnostic by default**
-   Contynu must not depend on any one vendor’s session semantics.
+   Contynu must not depend on any one vendor's session semantics.
 
-3. **Exact recall plus structured recall**
-   The system must support exact replay and higher-level structured memory. Semantic retrieval is an optional later layer, not the source of truth.
+3. **Structured recall**
+   The system supports structured memory retrieval. Memories are typed, scoped, and importance-ranked.
 
 4. **Local-first trust model**
-   The canonical state must be able to live entirely on the user’s machine.
+   The canonical state must be able to live entirely on the user's machine.
 
-5. **Append-only truth**
-   Raw history is immutable. Derived views are recomputed or updated from the canonical event log.
+5. **Lean execution path**
+   The hot path for memory persistence and retrieval must stay small, deterministic, and fast.
 
-6. **Lean execution path**
-   The hot path for capture and persistence must stay small, deterministic, and fast.
-
-7. **Explicit rehydration**
+6. **Explicit rehydration**
    A resumed model should receive an authoritative state packet, not an ad hoc dump.
+
+7. **Prompts always recorded**
+   User prompts are recorded verbatim and never filtered or summarized away.
 
 ---
 
 ## System Overview
 
-Contynu has five core subsystems:
+Contynu has four core subsystems:
 
-1. **Capture Runtime**
-   Intercepts user input, assistant output, tool activity, file activity, and artifacts.
+1. **MCP Memory Interface**
+   Exposes tools for models to write, update, delete, and query memories, and to record user prompts.
 
-2. **Canonical Event Store**
-   Stores the immutable append-only journal of all session events.
+2. **Metadata Store**
+   SQLite-backed storage for sessions, memory objects, prompts, checkpoints, and schema metadata.
 
-3. **Derived Memory Engine**
-   Builds structured memory products from the journal: summaries, decisions, constraints, artifacts, open loops, and file notes.
+3. **Rehydration Engine**
+   Produces a deterministic state packet from model-written memories for resume, handoff, or model switch.
 
-4. **Rehydration Engine**
-   Produces a deterministic state packet for resume, handoff, or model switch.
-
-5. **Adapter Layer**
-   Normalizes integration with different CLIs, agents, and tool ecosystems through an explicit launcher config plus normalized runtime events.
+4. **Adapter Layer**
+   Normalizes integration with different CLIs, agents, and tool ecosystems through launcher config and runtime materialization.
 
 ---
 
 ## High-Level Architecture
 
 ```text
-User ↔ Contynu Runtime Wrapper ↔ Target LLM CLI / Agent
-                │
-                ├── Event Journal (append-only)
-                ├── Metadata Store (SQLite)
-                ├── Blob Store (content-addressed)
-                ├── Derived Memory Indexes
-                └── Rehydration Packet Generator
+User <-> Contynu Runtime Wrapper <-> Target LLM CLI / Agent
+                |
+                +-- MCP Server (write_memory, update_memory, delete_memory,
+                |                record_prompt, search_memory, list_memories)
+                +-- Metadata Store (SQLite)
+                +-- Blob Store (content-addressed)
+                +-- Rehydration Packet Generator
 ```
 
-The Contynu runtime sits between the user and the target LLM environment. It records the interaction stream, file/artifact changes, execution metadata, and rehydration context into durable local storage.
+The Contynu runtime sits between the user and the target LLM environment. Models write structured memories via MCP tools. User prompts are recorded verbatim. Rehydration packets are assembled from the accumulated memory store.
 
 ---
 
-## Canonical Storage Design
+## Storage Design
 
-### 1. Event Journal
+### 1. Metadata Store
 
-The journal is the source of truth.
+A local SQLite database is the primary structured store.
 
-Properties:
-- append-only
-- ordered
-- immutable
-- checksummed
-- session-aware
-- replayable
-
-Recommended format:
-- newline-delimited JSON (`jsonl`) for the canonical raw stream
-- one event per line
-- monotonic sequence IDs per session
-
-Example event categories:
-- `session_started`
-- `message_input`
-- `message_output`
-- `tool_call`
-- `tool_result`
-- `file_snapshot`
-- `file_diff`
-- `artifact_created`
-- `artifact_read`
-- `checkpoint_created`
-- `session_interrupted`
-- `session_resumed`
-
-### 2. Metadata Store
-
-A local SQLite database indexes and relates the journal content.
-
-Responsibilities:
-- session metadata
-- turn metadata
-- event pointers
-- artifact registry
-- file registry
-- checkpoint registry
-- retrieval indexes
-- structured memory objects
+Core tables (schema v5):
+- `sessions` — session metadata
+- `memory_objects` — model-written memories with kind, scope, importance
+- `prompts` — user prompts recorded verbatim with optional model interpretation
+- `blobs` — blob metadata registry
+- `checkpoints` — checkpoint manifests and rehydration references
+- `schema_meta` — schema version tracking
 
 SQLite is preferred for:
 - low operational overhead
 - transactional guarantees
-- high enough performance for local-first single-user and small-team scenarios
+- high enough performance for local-first single-user scenarios
 - portability
 
-### 3. Blob Store
+### 2. Blob Store
 
 Large or binary assets are stored separately in a content-addressed blob store.
 
 Examples:
-- uploaded PDFs
-- generated DOCX/PDF/PPTX/XLSX files
-- images
-- binary outputs
-- large file snapshots
+- rehydration packets
+- uploaded files
+- generated outputs
 
-Blobs are keyed by cryptographic digest.
+Blobs are keyed by SHA-256 digest.
 
 ---
 
@@ -156,88 +118,60 @@ Fields:
 - `repo_root`
 - `host_fingerprint`
 
-### Turn
-Represents one command or interaction slice inside the long-lived project timeline.
-
-Fields:
-- `turn_id`
-- `session_id`
-- `started_at`
-- `completed_at`
-- `status`
-- `summary_ref`
-
-### Event
-Represents one atomic captured action or state transition.
-
-Fields:
-- `event_id`
-- `session_id`
-- `turn_id`
-- `seq`
-- `ts`
-- `actor`
-- `event_type`
-- `payload`
-- `checksum`
-- `parent_event_id`
-
-### Artifact
-Represents an external or generated file.
-
-Fields:
-- `artifact_id`
-- `path`
-- `mime_type`
-- `sha256`
-- `kind`
-- `source_event_id`
-- `created_at`
-
 ### Memory Object
-Represents a derived reusable memory unit.
+Represents a model-written reusable memory unit.
 
-Kinds:
-- `fact`
-- `constraint`
-- `decision`
-- `todo`
-- `summary`
-- `entity`
-- `file_note`
+Fields:
+- `memory_id`
+- `session_id`
+- `kind` — fact, constraint, decision, todo, user_fact, project_knowledge
+- `scope` — user, project, session
+- `status` — active or superseded
+- `text`
+- `importance` — 0.0 to 1.0
+- `reason` — why the memory is worth storing
+- `source_model`
+- `superseded_by`
+- `created_at`
+- `updated_at`
+
+### Prompt Record
+Represents a user prompt recorded verbatim.
+
+Fields:
+- `prompt_id`
+- `session_id`
+- `verbatim` — the exact user input
+- `interpretation` — model's interpretation if the prompt was ambiguous
+- `interpretation_confidence`
+- `source_model`
+- `created_at`
 
 ---
 
-## Capture Runtime Design
+## MCP Memory Interface
 
-### Runtime Role
-The runtime is responsible for capturing and normalizing inputs from heterogeneous environments.
+Models interact with Contynu's memory through six MCP tools:
 
-### Capture Sources
-1. Standard input/output stream capture
-2. In-process pseudo-terminal capture for interactive CLIs on Unix
-3. Tool invocation capture where available
-4. File scan and diff capture inside the working directory
-5. Attachment and artifact capture
-6. Environment and launcher metadata capture
+### Write Tools
+- `write_memory` — create a new memory with kind, scope, importance, and reason
+- `update_memory` — update an existing memory's text, importance, or reason
+- `delete_memory` — remove a memory that is no longer relevant
+- `record_prompt` — record the user's prompt verbatim with optional interpretation
 
-### Design Requirement
-The runtime must not block the target CLI unnecessarily. The hot path should:
-1. normalize the event
-2. durably append it
-3. index it into SQLite
-4. keep expensive enrichment off the append path
+### Read Tools
+- `search_memory` — text search with kind, scope, time window, sort, and pagination
+- `list_memories` — browse all memories with filtering and sorting
 
-### Performance Goal
-The persistence path must be optimized for small deterministic writes. Expensive enrichment belongs after the event is durably recorded.
+This replaces the previous heuristic-based memory derivation system. The model decides what matters; Contynu stores it faithfully and delivers it back on rehydration.
 
 ---
 
 ## Rehydration Design
 
-Rehydration is one of Contynu’s defining capabilities.
+Rehydration is one of Contynu's defining capabilities.
 
-A fresh model or resumed process should not need the full raw transcript injected directly. Instead, it should receive an authoritative rehydration packet with references back to exact history.
+A fresh model or resumed process receives an authoritative rehydration packet assembled from model-written memories.
 
 ### Rehydration Packet Sections
 1. Mission / project purpose
@@ -246,118 +180,77 @@ A fresh model or resumed process should not need the full raw transcript injecte
 4. Decision log
 5. Current state summary
 6. Open loops / pending tasks
-7. Relevant artifacts and files
-8. Recent verbatim interaction window
-9. Retrieval instructions / memory query interface
+7. Recent prompts
+8. Retrieval instructions / memory query interface
 
 ### Rehydration Modes
 - **Resume**: continue the same session after interruption
 - **Handoff**: move to a different model or provider
-- **Review**: reconstruct state for human review
-- **Checkpoint Restore**: recover to a known saved point
+
+### Model Instructions in Rehydration
+Rehydration packets include explicit instructions telling the model how to use the MCP tools (write_memory, update_memory, delete_memory, record_prompt). These instructions are rendered in the model's preferred format (XML for Claude, Markdown for Codex, StructuredText for Gemini).
 
 ---
 
 ## Retrieval Design
 
-Contynu should support three retrieval modes:
+Contynu supports structured retrieval through the MCP interface:
 
-### 1. Exact Retrieval
-Use when fidelity matters.
-- by session ID
-- by turn ID
-- by event ID
-- by file path
-- by artifact ID
-- by time range
+### Structured Retrieval
+- by memory kind (fact, decision, constraint, todo, user_fact, project_knowledge)
+- by scope (user, project, session)
+- by time window
+- by text search
+- sorted by importance or recency
 
-### 2. Structured Retrieval
-Use the derived memory store.
-- decisions
-- constraints
-- open tasks
-- summaries
-- artifacts
-
-### 3. Semantic Retrieval
-Use embeddings and ranking for fuzzy recall.
-- similar past problem
-- related prior file changes
-- relevant earlier discussion
-
-The system must never rely on embeddings alone for authoritative recovery.
+Semantic retrieval via embeddings remains intentionally deferred.
 
 ---
 
 ## Adapter Architecture
 
-Adapters translate tool-specific behavior into Contynu’s normalized event model.
+Adapters translate tool-specific behavior into Contynu's normalized integration surface.
 
 ### Adapter Tiers
 1. **Generic PTY Adapter**
    Works with most CLIs via terminal capture.
 
-2. **Native Session Adapter**
-   Ingests a tool’s own transcripts, logs, or checkpoints when available.
-
-3. **Deep Integration Adapter**
-   Uses vendor-specific APIs or hooks when justified.
+2. **Known LLM Adapter**
+   Detects Claude, Codex, Gemini and delivers rehydration in each model's preferred format.
 
 ### Adapter Contract
 Each adapter must define:
 - detection
 - launch behavior
-- input normalization
-- output normalization
-- session metadata extraction
-- optional native import
-
----
-
-## File and Artifact Strategy
-
-Contynu must distinguish between:
-- files that existed
-- files the model saw
-- files the model modified
-- files produced as outputs
-
-### Storage Strategy
-- store metadata and hash for every relevant file reference
-- store full content for small files
-- store diff plus periodic snapshot for evolving text files
-- store binary artifacts in blob store
-
-### Ignore Policy
-The system must support configurable ignore patterns for:
-- build outputs
-- caches
-- virtual environments
-- package directories
-- generated noise
+- rehydration delivery format
+- MCP server registration
 
 ---
 
 ## Checkpoint Strategy
 
-Checkpoints are lightweight deterministic snapshots of working state.
+Checkpoints are lightweight deterministic snapshots of project memory state.
 
 Trigger points:
-- after a completed turn
-- before risky operations
 - before model handoff
-- after substantial file changes
+- after substantial memory changes
 - at periodic intervals during long-running sessions
 
 Checkpoint contents:
 - checkpoint ID
-- latest event sequence
-- summary snapshot
-- decision snapshot
-- open tasks
-- artifact registry slice
-- recent files
+- memory snapshot
 - rehydration packet
+
+---
+
+## Legacy Data Cleanup
+
+On startup, Contynu detects and removes legacy storage artifacts from the v0.4.0 journal-based architecture:
+- `journal/` directory
+- `runtime/` directory
+- Legacy DB tables (events, turns, files, artifacts)
+
+This ensures a clean transition to the model-driven memory architecture.
 
 ---
 
@@ -367,92 +260,48 @@ Checkpoint contents:
 - local-first by default
 - no mandatory cloud dependency
 - encryption at rest support
-- secret redaction pipeline
 - configurable retention policies
 - per-project isolation
 
-### Future Enterprise Controls
-- role-based access controls
-- audit export
-- workspace policy engine
-- managed sync
-- central key management
-
 ---
 
-## Recommended Implementation Stack
+## Implementation Stack
 
 ### Core Runtime Language
-**Rust** is the preferred long-term implementation language for the capture runtime and hot path because of:
-- performance
-- correctness
-- memory safety
-- strong CLI/system programming support
-
-### Practical Development Strategy
-Use a **hybrid approach**:
-- Rust for runtime, persistence hot path, file watcher, and adapter host
-- Python only for optional analysis or experimental retrieval tooling if needed
+**Rust** for the capture runtime, storage, MCP server, and CLI.
 
 ### Storage
-- JSONL journal for raw canonical log
-- SQLite for metadata and structured memory
-- content-addressed local blob store for artifacts
-
-### Indexing
-- start with deterministic metadata indexes
-- add embedding index only after core exact/structured retrieval is stable
-
----
-
-## Non-Goals for the Core
-
-The following should not drive the initial architecture:
-- hosted SaaS first
-- multi-tenant cloud-first design
-- heavy GUI before core durability is proven
-- overfitting to one LLM vendor
-- embedding-first memory without exact replay support
+- SQLite for metadata, memories, prompts, and checkpoints
+- Content-addressed local blob store for large content
 
 ---
 
 ## Build Order
 
-### Foundation Phase
-1. Canonical event model
-2. Journal writer and recovery logic
-3. SQLite metadata schema
-4. Blob store
-5. Checkpoint format
-6. Rehydration packet generator
+### Foundation (completed)
+1. SQLite metadata schema (v5)
+2. Blob store
+3. Checkpoint and rehydration packet generator
+4. MCP server with memory write/read tools
 
-### Runtime Phase
-7. Generic PTY runtime wrapper
-8. File watcher and snapshot/diff engine
-9. Artifact capture
-10. Structured memory derivation
+### Runtime (completed)
+5. Generic PTY runtime wrapper
+6. Adapter detection and launcher integration
+7. Model-aware rendering (XML/Markdown/StructuredText)
 
-### Integration Phase
-11. Adapter SDK
-12. Native adapters for major CLIs
-13. Exact replay and search commands
-14. Semantic retrieval layer
-
-### Platform Phase
-15. Team sync and governance
-16. Hosted control plane
-17. Enterprise policy controls
+### Current Priorities
+8. Strengthen rehydration packet quality from model-written memories
+9. Expand MCP tool coverage
+10. Deeper adapter integrations
 
 ---
 
 ## Summary
 
-Contynu should be built as a lean but serious systems product:
-- append-only truth
+Contynu is built as a lean systems product:
+- model-driven memory (the model decides what matters)
 - deterministic recovery
 - model-agnostic integration
 - local-first trust
-- layered retrieval
+- structured retrieval
 - rehydration as a first-class primitive
-
-That combination gives it both technical credibility and product defensibility.

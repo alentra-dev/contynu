@@ -125,7 +125,16 @@ fn render_xml(packet: &RehydrationPacket, adapter_name: &str) -> String {
         out.push_str("  </guidance>\n");
     }
 
-    out.push_str("  <instruction>Carry this continuity forward naturally. If the user asks about prior work, answer from this memory instead of claiming there is no earlier context.</instruction>\n");
+    out.push_str("  <instruction>\n");
+    out.push_str("    You have Contynu MCP tools available. Use them to manage your memory:\n");
+    out.push_str("    - record_prompt: ALWAYS call this with the user's verbatim prompt at each generation stop. If the prompt is ambiguous, include your interpretation.\n");
+    out.push_str("    - write_memory: Write facts, decisions, constraints, or knowledge worth recalling in future sessions. You decide what is worth remembering from your own output. Kinds: fact, constraint, decision, todo, user_fact, project_knowledge. Scopes: user (follows the user everywhere), project (this project only), session (ephemeral).\n");
+    out.push_str("    - update_memory: Correct or refine an existing memory by its ID instead of creating duplicates.\n");
+    out.push_str("    - delete_memory: Remove a memory that is no longer relevant.\n");
+    out.push_str("    - search_memory: Search existing memories before writing to avoid duplicates.\n");
+    out.push_str("    - list_memories: Browse all active memories.\n");
+    out.push_str("    Carry this continuity forward naturally. If the user asks about prior work, answer from this memory instead of claiming there is no earlier context.\n");
+    out.push_str("  </instruction>\n");
     out.push_str("</contynu_memory>\n");
     out
 }
@@ -146,7 +155,7 @@ fn write_xml_section(
                 .iter()
                 .filter(|p| p.kind == item_tag || (item_tag == "todo" && p.kind == "todo") || (item_tag == "fact" && p.kind == "fact"))
                 .nth(i)
-                .and_then(|p| p.source_adapter.as_deref())
+                .and_then(|p| p.source_model.as_deref())
                 .unwrap_or("unknown");
             let _ = writeln!(
                 out,
@@ -247,7 +256,15 @@ fn render_markdown(packet: &RehydrationPacket, adapter_name: &str) -> String {
     write_md_section(&mut out, "Relevant Files", &packet.relevant_files);
     write_md_section(&mut out, "Retrieval Guidance", &packet.retrieval_guidance);
 
-    out.push_str("---\n*Carry this continuity forward naturally. If the user asks about prior work, answer from this memory instead of claiming there is no earlier context.*\n");
+    out.push_str("---\n\n## How to Use Contynu Memory\n\n");
+    out.push_str("You have Contynu MCP tools available. Use them to manage your memory:\n\n");
+    out.push_str("- **record_prompt**: ALWAYS call this with the user's verbatim prompt at each generation stop. If the prompt is ambiguous, include your interpretation.\n");
+    out.push_str("- **write_memory**: Write facts, decisions, constraints, or knowledge worth recalling in future sessions. You decide what is worth remembering from your own output. Kinds: `fact`, `constraint`, `decision`, `todo`, `user_fact`, `project_knowledge`. Scopes: `user` (follows the user everywhere), `project` (this project only), `session` (ephemeral).\n");
+    out.push_str("- **update_memory**: Correct or refine an existing memory by its ID instead of creating duplicates.\n");
+    out.push_str("- **delete_memory**: Remove a memory that is no longer relevant.\n");
+    out.push_str("- **search_memory**: Search existing memories before writing to avoid duplicates.\n");
+    out.push_str("- **list_memories**: Browse all active memories.\n\n");
+    out.push_str("*Carry this continuity forward naturally. If the user asks about prior work, answer from this memory instead of claiming there is no earlier context.*\n");
     out
 }
 
@@ -359,9 +376,15 @@ fn render_structured_text(packet: &RehydrationPacket, adapter_name: &str) -> Str
         &packet.retrieval_guidance,
     );
 
-    prompt.push_str(
-        "Carry this continuity forward naturally. If the user asks about prior work, answer from this memory instead of claiming there is no earlier context.\n",
-    );
+    prompt.push_str("HOW TO USE CONTYNU MEMORY\n\n");
+    prompt.push_str("You have Contynu MCP tools available. Use them to manage your memory:\n");
+    prompt.push_str("- record_prompt: ALWAYS call this with the user's verbatim prompt at each generation stop. If the prompt is ambiguous, include your interpretation.\n");
+    prompt.push_str("- write_memory: Write facts, decisions, constraints, or knowledge worth recalling in future sessions. You decide what is worth remembering from your own output. Kinds: fact, constraint, decision, todo, user_fact, project_knowledge. Scopes: user (follows the user everywhere), project (this project only), session (ephemeral).\n");
+    prompt.push_str("- update_memory: Correct or refine an existing memory by its ID instead of creating duplicates.\n");
+    prompt.push_str("- delete_memory: Remove a memory that is no longer relevant.\n");
+    prompt.push_str("- search_memory: Search existing memories before writing to avoid duplicates.\n");
+    prompt.push_str("- list_memories: Browse all active memories.\n\n");
+    prompt.push_str("Carry this continuity forward naturally. If the user asks about prior work, answer from this memory instead of claiming there is no earlier context.\n");
     prompt
 }
 

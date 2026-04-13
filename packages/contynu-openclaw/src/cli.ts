@@ -1,14 +1,29 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { IngestEvent, IngestOptions, ExportOptions } from './types';
+import type { MemoryWrite, PromptWrite, ExportOptions } from './types';
 
 const exec = promisify(execFile);
 
-const MAX_PAYLOAD_BYTES = 64 * 1024; // 64KB per event payload
+/**
+ * JSON-RPC request/response types for MCP communication.
+ */
+interface JsonRpcRequest {
+  jsonrpc: '2.0';
+  id: number;
+  method: string;
+  params: Record<string, unknown>;
+}
+
+interface JsonRpcResponse {
+  jsonrpc: string;
+  id: number | null;
+  result?: any;
+  error?: { code: number; message: string };
+}
 
 /**
  * Wrapper around the contynu CLI binary.
- * All operations are subprocess calls — no Rust FFI.
+ * Uses subprocess calls for CLI commands and MCP JSON-RPC for memory writes.
  */
 export class ContynuCli {
   private stateDir: string;
@@ -40,38 +55,35 @@ export class ContynuCli {
     return match[0];
   }
 
-  /** Ingest events into the journal for a given project. */
-  async ingest(projectId: string, events: IngestEvent[], opts: IngestOptions = {}): Promise<void> {
-    const args = [...this.baseArgs(), 'ingest', '--project', projectId];
-    if (opts.adapter) args.push('--adapter', opts.adapter);
-    if (opts.model) args.push('--model', opts.model);
-    if (opts.deriveMemory !== false) args.push('--derive-memory');
+  /**
+   * Write a memory via the MCP server.
+   * Spawns a short-lived MCP server session to execute the write.
+   */
+  async writeMemory(projectId: string, memory: MemoryWrite, model?: string): Promise<void> {
+    const args: Record<string, unknown> = {
+      kind: memory.kind,
+      scope: memory.scope,
+      text: memory.text,
+      importance: memory.importance,
+    };
+    if (memory.reason) args.reason = memory.reason;
 
-    // Truncate large payloads
-    const lines = events.map((e) => {
-      const json = JSON.stringify(e);
-      if (json.length > MAX_PAYLOAD_BYTES) {
-        const truncated = { ...e, payload: { text: '[truncated — payload exceeded 64KB]' } };
-        return JSON.stringify(truncated);
-      }
-      return json;
-    });
+    await this.mcpToolCall(projectId, 'write_memory', args, model);
+  }
 
-    const input = lines.join('\n') + '\n';
-    const child = require('node:child_process').execFile(
-      this.binary,
-      args,
-      { maxBuffer: 10 * 1024 * 1024 },
-      () => {} // errors handled below
-    );
-    child.stdin?.write(input);
-    child.stdin?.end();
-    await new Promise<void>((resolve, reject) => {
-      child.on('close', (code: number) => {
-        if (code === 0) resolve();
-        else reject(new Error(`contynu ingest exited with code ${code}`));
-      });
-    });
+  /**
+   * Record a user prompt via the MCP server.
+   */
+  async recordPrompt(projectId: string, prompt: PromptWrite, model?: string): Promise<void> {
+    const args: Record<string, unknown> = {
+      verbatim: prompt.verbatim,
+    };
+    if (prompt.interpretation) args.interpretation = prompt.interpretation;
+    if (prompt.interpretationConfidence != null) {
+      args.interpretation_confidence = prompt.interpretationConfidence;
+    }
+
+    await this.mcpToolCall(projectId, 'record_prompt', args, model);
   }
 
   /** Create a checkpoint for the given project. */
@@ -99,5 +111,64 @@ export class ContynuCli {
 
     const { stdout } = await exec(this.binary, args);
     return stdout;
+  }
+
+  /**
+   * Execute an MCP tool call by spawning a short-lived MCP server.
+   * Sends initialize → tools/call → exits.
+   */
+  private async mcpToolCall(
+    projectId: string,
+    toolName: string,
+    toolArgs: Record<string, unknown>,
+    model?: string,
+  ): Promise<JsonRpcResponse> {
+    const initRequest: JsonRpcRequest = {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-03-26',
+        capabilities: {},
+        clientInfo: { name: 'contynu-openclaw', version: '0.1.0' },
+      },
+    };
+
+    const toolRequest: JsonRpcRequest = {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: {
+        name: toolName,
+        arguments: toolArgs,
+      },
+    };
+
+    const input = JSON.stringify(initRequest) + '\n' + JSON.stringify(toolRequest) + '\n';
+
+    const env: Record<string, string> = {
+      ...process.env as Record<string, string>,
+      CONTYNU_STATE_DIR: this.stateDir,
+      CONTYNU_ACTIVE_PROJECT: projectId,
+    };
+
+    const { stdout } = await exec(this.binary, ['mcp-server'], {
+      env,
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 10_000,
+    });
+
+    // Parse the last JSON line (tool call response)
+    const lines = stdout.trim().split('\n').filter(l => l.trim());
+    if (lines.length < 2) {
+      throw new Error(`MCP server returned unexpected output: ${stdout}`);
+    }
+
+    const response: JsonRpcResponse = JSON.parse(lines[lines.length - 1]);
+    if (response.error) {
+      throw new Error(`MCP tool ${toolName} failed: ${response.error.message}`);
+    }
+
+    return response;
   }
 }

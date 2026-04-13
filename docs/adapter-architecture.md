@@ -1,6 +1,6 @@
 # Adapter Architecture
 
-Contynu is built around normalized events rather than one provider's native session format.
+Contynu is built around model-agnostic integration rather than one provider's native session format.
 
 ## Implemented Shape
 
@@ -10,20 +10,20 @@ Contynu is built around normalized events rather than one provider's native sess
   - Codex CLI
   - Claude CLI style tools
   - Gemini CLI style tools
-- runtime capture stays provider-neutral and emits normalized canonical events
+- runtime capture stays provider-neutral
 
 ## Current State
 
-This pass implements the generic terminal wrapper end to end and includes a first hydration delivery layer for known LLM launchers. Contynu now:
+This pass implements the generic terminal wrapper end to end and includes a hydration delivery layer for known LLM launchers. Contynu now:
 
 - detects known launcher commands
-- builds a normalized rehydration packet when continuing an existing project
-- materializes packet and prompt files under `.contynu/runtime/<project-id>/`
+- builds a normalized rehydration packet from model-written memories when continuing an existing project
 - can install a temporary provider-native workspace context file
-- passes those file paths through environment variables
+- passes file paths through environment variables
 - can prepend adapter-specific hydration arguments
 - can send a startup prelude on stdin
 - can switch configured launchers onto PTY transport when requested
+- registers the MCP server with each LLM CLI for memory write/read access
 
 ## Configurable Launchers
 
@@ -72,7 +72,7 @@ Configured launchers can also define `hydration_args`, which are prepended to th
 
 Future adapters should:
 
-1. normalize provider-native streams into canonical event types
-2. avoid bypassing the journal hot path
-3. keep raw vendor payloads as optional payload fields or artifact blobs, not as canonical schema drivers
-4. preserve deterministic replay and rehydration behavior
+1. register the MCP server with the target CLI for memory read/write access
+2. deliver rehydration packets in the model's preferred format
+3. preserve deterministic rehydration behavior
+4. stay vendor-neutral where possible

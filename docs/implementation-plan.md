@@ -1,19 +1,12 @@
-# Contynu Implementation Plan
+# Contynu Implementation Plan (Historical)
 
-## Audit Summary
+> **This document is historical.** It describes the original implementation plan for Contynu's v0.1.0-v0.4.0 journal-based architecture. That architecture has been superseded by the v0.5.0 model-driven memory rewrite.
 
-The current repository is a credible foundation but not yet a coherent tool. The main gaps found during audit:
+## Original Audit Summary
 
-- the Rust workspace compiles only partially and currently fails immediately
-- event envelope docs, JSON schema, SQLite schema, and Rust types drift from each other
-- identifier semantics are inconsistent, especially around turn IDs and checksum fields
-- the journal implementation is too thin for durable replay and tail repair
-- the SQLite layer is incomplete relative to the documented storage model
-- blob storage exists only as a minimal byte writer
-- checkpoint and rehydration types exist, but not a real pipeline
-- the CLI is still scaffold-grade rather than product-grade
+The original plan addressed gaps in the early codebase: partial compilation, schema drift, thin journal implementation, incomplete SQLite layer, minimal blob storage, scaffold-grade CLI.
 
-## Delivery Sequence
+## Original Delivery Sequence
 
 1. Normalize the workspace so `cargo test` runs cleanly.
 2. Stabilize core IDs, event envelope semantics, canonical serialization, and validation.
@@ -26,15 +19,10 @@ The current repository is a credible foundation but not yet a coherent tool. The
 9. Add unit and integration coverage for the hot path and recovery behavior.
 10. Update README and implementation docs to match reality.
 
-## Architectural Guardrails
+All items were completed through v0.4.0.
 
-- append-only JSONL journal remains the canonical truth
-- SQLite remains derived structured state
-- blob storage remains content-addressed and local-first
-- exact replay and deterministic rehydration come before semantic memory
-- adapters stay vendor-neutral and normalized
-- expensive enrichment stays off the hot path
+## What Changed in v0.5.0
 
-## Expected Outcome For This Pass
+The v0.5.0 rewrite removed the JSONL journal, event sourcing pipeline, heuristic memory derivation, file tracking, and artifact management. It replaced them with a model-driven memory architecture where models write memories directly via MCP tools.
 
-At the end of this pass the repository should compile, pass tests, provide a real `contynu run -- <command>` path, persist canonical events durably, recover from truncated tails, generate checkpoints and rehydration packets, and expose a coherent local-first CLI and docs baseline.
+See [`architecture.md`](architecture.md) for the current system design.

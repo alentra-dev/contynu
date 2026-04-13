@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, ContynuError>;
@@ -24,18 +22,12 @@ pub enum ContynuError {
     #[error("invalid state: {0}")]
     InvalidState(String),
 
-    #[error("checksum mismatch for event `{event_id}`")]
-    ChecksumMismatch { event_id: String },
-
-    #[error("corrupt journal at line {line}: {reason}")]
-    CorruptJournal { line: usize, reason: String },
-
-    #[error("journal not found at `{0}`")]
-    MissingJournal(PathBuf),
-
     #[error("command failed to start: {0}")]
     CommandStart(String),
 
     #[error("unsupported operation: {0}")]
     Unsupported(String),
+
+    #[error("memory not found: {0}")]
+    MemoryNotFound(String),
 }

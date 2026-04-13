@@ -3,13 +3,17 @@
 ## Architecture As Implemented
 
 - Rust workspace with `contynu-core` and `contynu-cli`
-- canonical append-only JSONL journal with checksum validation
-- SQLite metadata store with migrations and journal reconciliation
-- content-addressed blob store with deduplication and integrity verification
-- checkpoint manager with manifest and rehydration packet generation
-- config-authoritative launcher layer seeded with known LLM entries
-- runtime wrapper with adapter detection, PTY-or-pipe transport selection, provider-native workspace context injection, real-time stream capture, and post-turn memory derivation
-- one primary continuous project memory per state directory by default
+- Model-driven memory via MCP tools (write_memory, update_memory, delete_memory, record_prompt)
+- SQLite metadata store (schema v5) with sessions, memory_objects, prompts, checkpoints, blobs
+- Content-addressed blob store with deduplication and integrity verification
+- Checkpoint manager with manifest and rehydration packet generation
+- Config-authoritative launcher layer seeded with known LLM entries
+- Runtime wrapper with adapter detection, PTY-or-pipe transport selection, provider-native workspace context injection, and MCP server registration
+- One primary continuous project memory per state directory by default
+- Memory scopes (user, project, session) and 6 memory kinds
+- User prompts always recorded verbatim via record_prompt
+- Legacy data cleanup on startup (journal/, runtime/, old DB tables)
+- Multi-format rendering with model instructions (XML/Markdown/StructuredText)
 
 ## Commands Available
 
@@ -25,29 +29,24 @@
 - `contynu checkpoint [--project <id>]`
 - `contynu resume [--project <id>]`
 - `contynu handoff [--project <id>] --target-model <name>`
-- `contynu replay [--project <id>]`
 - `contynu inspect project [id]`
-- `contynu inspect event <id>`
-- `contynu search exact <query>`
 - `contynu search memory <query>`
-- `contynu artifacts list`
 - `contynu doctor`
 - `contynu config validate`
 - `contynu config show`
-- `contynu repair [--project <id>]`
+- `contynu mcp-server`
 
 ## Known Limitations
 
 - PTY transport is implemented in-process on Unix, but still needs deeper signal/process-group polish
-- interruption handling is best-effort rather than full signal choreography
-- structured memory derivation is heuristic and intentionally lightweight rather than model-assisted
-- checkpoint packets are deterministic but still heuristic in how mission and recent context are selected
-- provider-native rehydration currently targets workspace instruction files (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`) rather than deeper session-native APIs
-- exact search is implemented; semantic retrieval remains intentionally deferred
+- Interruption handling is best-effort rather than full signal choreography
+- Checkpoint packets are deterministic but still evolving in how mission and recent context are selected
+- Provider-native rehydration currently targets workspace instruction files (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`) rather than deeper session-native APIs
+- Semantic retrieval remains intentionally deferred
 
 ## Next Best Steps
 
-1. replace the `script`-based PTY path with a first-class PTY implementation and stronger stdin/signal choreography
-2. add native adapter event mapping for Codex, Claude-style, and Gemini-style tools
-3. evolve memory derivation from heuristics into richer deterministic extraction and supersession policies
-4. add more integration coverage around resume/handoff workflows and repair semantics
+1. Strengthen rehydration packet quality from model-written memories
+2. Expand MCP tool coverage for richer memory operations
+3. Add richer adapter integration for vendor-specific session APIs
+4. Add integration coverage around resume/handoff workflows

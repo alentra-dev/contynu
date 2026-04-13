@@ -1,8 +1,8 @@
 # Contynu
 
-**Memory that persists.** Model-agnostic persistent memory for LLM workflows.
+**Memory that persists.** Model-agnostic persistent memory for AI coding assistants.
 
-Contynu captures prompts, responses, tool activity, command output, artifacts, and execution metadata into a durable local continuity layer so work can resume cleanly across crashes, restarts, and model handoffs between Claude, Codex, Gemini, and any future LLM CLI.
+Contynu gives Claude, Codex, and Gemini persistent memory that transfers across sessions and models. AI models write their own memories via MCP tools — facts, decisions, constraints, and context — so the next model picks up exactly where the last one left off.
 
 **Website:** [contynu.com](https://contynu.com)
 
@@ -26,44 +26,35 @@ irm https://github.com/alentra-dev/contynu/releases/latest/download/install.ps1 
 cargo install --path crates/contynu-cli
 ```
 
-Prebuilt binaries are available for:
-- Linux (x86_64, aarch64)
-- macOS (x86_64, Apple Silicon)
-- Windows (x86_64, aarch64)
-
 ## Quick Start
 
 ```bash
-# Use with any LLM CLI — just prefix with contynu
+# Use with any AI coding tool — just prefix with contynu
 contynu claude     # wraps Claude Code with persistent memory
 contynu codex      # wraps Codex CLI — picks up where Claude left off
 contynu gemini     # wraps Gemini CLI — has full context from both
 ```
 
-That's it. No configuration needed. Contynu auto-detects the LLM, captures the session, and transfers memory on the next handoff.
-
-Existing Codex and Gemini conversation history is **auto-imported** on first launch — your prior work is immediately searchable.
+That's it. No configuration needed. Contynu auto-detects the AI tool, registers an MCP server, and delivers memory on the next session.
 
 ## How It Works
 
-1. **Capture** — Contynu wraps your LLM CLI and records every interaction to an append-only journal
-2. **Extract** — Facts, decisions, constraints, and context are extracted as structured memory objects with importance scoring
-3. **Transfer** — When you switch models, Contynu delivers the accumulated memory in the format each model understands best (XML for Claude, Markdown for Codex/GPT, structured text for Gemini)
-4. **Recall** — An MCP server lets any model search the full project history on demand
+1. **Launch** — Contynu wraps your AI tool and registers an MCP server for memory access
+2. **Write** — The AI model writes memories via MCP tools (`write_memory`, `record_prompt`) at each generation stop. The model decides what's worth remembering — no heuristics, no noise
+3. **Transfer** — When you switch models, Contynu delivers accumulated memory in each model's optimal format (XML for Claude, Markdown for Codex, structured text for Gemini)
+4. **Recall** — Models search and browse the full memory archive via `search_memory` and `list_memories` MCP tools
 
 ## Key Features
 
+- **Model-driven memory** — AI models write their own memories via MCP tools. The model decides what's worth remembering
 - **Cross-model memory transfer** — Facts from Claude are available in Codex and Gemini
-- **Importance-ranked memories** — Scored by importance, recency, and confidence so critical decisions always transfer
+- **Scoped memory system** — User scope (follows you everywhere), project scope (this codebase only), session scope (ephemeral)
+- **Six memory kinds** — fact, constraint, decision, todo, user_fact, project_knowledge
 - **Model-aware rendering** — Each model receives context in its optimal format
-- **Progressive loading** — L0 project identity (~50 tokens) + L1 compact brief (~500 tokens) always in context, with deep recall via MCP
-- **Temporal validity** — Memories track when facts become stale (valid_from/valid_to)
-- **MCP server** — LLMs query the full memory archive via `search_memory`, `list_memories`, and `search_events` with pagination
+- **MCP server** — 6 tools: `write_memory`, `update_memory`, `delete_memory`, `record_prompt`, `search_memory`, `list_memories`
 - **Auto-registration** — MCP server registers itself with each CLI automatically
-- **Auto-import** — Existing Codex and Gemini session histories are imported on first launch
-- **Conversation import** — Import from Claude JSONL, Codex rollout, Gemini sessions, and ChatGPT exports
-- **Indefinite memory** — Append-only JSONL journal with SHA-256 checksums; nothing is ever lost
-- **Local-first** — All data stays on your machine. SQLite + JSONL + content-addressed blobs
+- **Prompt recording** — Every user prompt recorded verbatim with optional model interpretation
+- **Local-first** — All data stays on your machine. SQLite + content-addressed blobs
 - **Zero config** — Replace `claude` with `contynu claude`. Works immediately
 
 ## OpenClaw Integration
@@ -82,12 +73,11 @@ npm install -g contynu-openclaw
 
 ### What It Does
 
-- **Captures every conversation turn** — via OpenClaw's `afterTurn()` lifecycle hook
+- **Per-agent memory isolation** — each agent gets its own Contynu project
 - **Protects against compaction loss** — checkpoints before compaction fires
 - **Writes back to MEMORY.md** — importance-ranked facts in OpenClaw's native format
-- **MCP tools for deep recall** — agents can search the full project history on demand
-- **Per-agent memory isolation** — each agent gets its own Contynu project
-- **Model-agnostic** — works with any model OpenClaw supports (Anthropic, OpenAI, Google, Llama, Mistral, DeepSeek, Ollama)
+- **MCP tools for deep recall** — agents can write, search, and update the full memory archive
+- **Model-agnostic** — works with any model OpenClaw supports
 
 ### OpenClaw Issues Addressed
 
@@ -96,28 +86,24 @@ npm install -g contynu-openclaw
 | #5429 | 45 hours lost to silent compaction | Pre-compaction checkpoint — nothing lost |
 | #7477 | Compaction fails silently | MEMORY.md + MCP ensure context always available |
 | #25947 | Safety constraints deleted | Constraints ranked highest, persist in MEMORY.md |
-| #31781 | No importance-based memory | Built-in importance scoring and budget management |
-| #39885 | No session memory | Persistent forever in append-only journal |
+| #31781 | No importance-based memory | Model-assigned importance scores |
+| #39885 | No session memory | Persistent forever in SQLite |
 
 See [`packages/contynu-openclaw/`](packages/contynu-openclaw/) for the plugin source.
 
 ## Architecture
 
-- **Canonical truth:** Append-only JSONL journal (one per project)
-- **Structured metadata:** SQLite with WAL mode (schema v3)
+- **Memory store:** SQLite with WAL mode (schema v5) — sessions, memory_objects, prompts, blobs, checkpoints
 - **Large content:** Content-addressed local blob store (SHA-256)
-- **Recovery:** Deterministic rehydration packets with budget-aware assembly
-- **Memory:** Typed objects (Fact, Constraint, Decision, Todo, Summary, Entity, FileNote) with importance scoring, temporal validity, and provenance tracking
-- **Progressive loading:** L0 identity + L1 compressed brief always in context; L2/L3 via MCP
-- **MCP:** Stdio JSON-RPC server with search, list, and event query tools
-- **Runtime:** Local CLI wrapper with PTY/pipe/script-based capture
+- **Recovery:** Deterministic rehydration packets from model-written memories
+- **Memory:** Model-driven with scoped kinds, importance ratings, and provenance
+- **MCP:** Stdio JSON-RPC server with read and write tools
+- **Runtime:** Local CLI wrapper with PTY/pipe transport
 
 ### Storage Layout
 
 ```text
 .contynu/
-  journal/
-    prj_<id>.jsonl
   sqlite/
     contynu.db
   blobs/
@@ -127,8 +113,7 @@ See [`packages/contynu-openclaw/`](packages/contynu-openclaw/) for the plugin so
       chk_<id>/
         manifest.json
         rehydration.json
-  imported-sessions.json      # tracks auto-imported session files
-  openclaw-agents.json        # agent-to-project mapping (OpenClaw)
+  config.json
 ```
 
 ## CLI Reference
@@ -151,21 +136,8 @@ contynu checkpoint                # Create manual checkpoint
 contynu resume                    # Build rehydration packet
 contynu handoff --target-model gpt-5.4  # Prepare for model switch
 contynu search memory "auth"      # Search memory objects
-contynu search exact "JWT"        # Search event payloads
+contynu export-memory             # Export as Markdown
 ```
-
-### Import & Ingest
-
-```bash
-contynu import session.jsonl      # Import Claude JSONL
-contynu import rollout-*.jsonl    # Import Codex sessions
-contynu import session-*.json     # Import Gemini sessions
-contynu import conversations.json # Import ChatGPT export
-contynu ingest --project prj_xxx  # Ingest JSONL events from stdin
-contynu export-memory --with-markers  # Export as Markdown with markers
-```
-
-Formats are auto-detected. Existing Codex and Gemini sessions are auto-imported on first launch.
 
 ### MCP Server
 
@@ -173,7 +145,7 @@ Formats are auto-detected. Existing Codex and Gemini sessions are auto-imported 
 contynu mcp-server                # Start stdio MCP server (used by LLM CLIs)
 ```
 
-The MCP server auto-registers with Claude (`.mcp.json`), Codex (`config.toml`), and Gemini (`gemini mcp add`) on first launch. LLMs can then call `search_memory`, `list_memories`, and `search_events` tools directly.
+The MCP server auto-registers with Claude (`.mcp.json`), Codex (`config.toml`), and Gemini (`gemini mcp add`) on first launch. Models can then call `write_memory`, `update_memory`, `delete_memory`, `record_prompt`, `search_memory`, and `list_memories` tools directly.
 
 ### OpenClaw Integration
 
@@ -187,13 +159,8 @@ contynu openclaw status           # Check integration health
 ```bash
 contynu init                      # Initialize state directory
 contynu projects                  # List all projects
-contynu recent                    # Recent activity
-contynu replay                    # Canonical event sequence
 contynu inspect project           # Inspect project details
-contynu inspect event evt_<id>    # Inspect specific event
-contynu artifacts list            # List tracked artifacts
 contynu doctor                    # Diagnostic info
-contynu repair                    # Fix corrupted journals
 contynu config validate           # Validate launcher config
 ```
 

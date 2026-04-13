@@ -2,37 +2,26 @@
 
 ## Canonical Recovery Rule
 
-The append-only JSONL journal is the source of truth. Recovery always begins there.
+SQLite with WAL (Write-Ahead Logging) mode is the primary durability mechanism. Recovery relies on SQLite's built-in crash safety guarantees.
 
-## Tail Repair
+## SQLite WAL Recovery
 
-When a journal is opened:
+SQLite's WAL mode provides automatic crash recovery:
 
-1. Contynu scans the file from the beginning.
-2. Each complete newline-terminated record is parsed and checksum-validated.
-3. If the final record is truncated or invalid, the journal is truncated back to the last valid byte offset.
-4. Valid prefix entries remain authoritative.
+1. Uncommitted transactions are rolled back automatically on next open.
+2. Committed data is always preserved.
+3. No manual repair is needed for standard crash scenarios.
 
-This makes truncated-tail crashes recoverable without rewriting valid history.
+## Legacy Data Cleanup
 
-## SQLite Reconciliation
+On startup, Contynu detects and removes legacy v0.4.0 storage artifacts:
+- `journal/` directory and JSONL files
+- `runtime/` directory
+- Legacy DB tables (events, turns, files, artifacts)
 
-SQLite is treated as derived structured state. If SQLite is incomplete or stale relative to the project journal:
-
-1. repair or verify the journal
-2. replay canonical events
-3. upsert indexed rows back into SQLite
-
-The `contynu repair --project <id>` command performs this recovery path. If no project is given, Contynu repairs the primary project.
-
-## Streaming Runtime Durability
-
-For wrapped command execution, Contynu persists captured stream output as the process runs rather than only after exit. This reduces the amount of volatile work that can be lost if the runtime itself crashes mid-command.
-
-For PTY-backed launchers, the merged PTY stream is captured incrementally through the same canonical event path.
+This is a one-time cleanup that happens automatically.
 
 ## Current Limitations
 
-- Mid-file corruption is surfaced as an error rather than silently repaired.
-- Recovery events are not yet emitted automatically as separate canonical records.
 - PTY interruption handling is improved but still not a complete process-group choreography layer for every edge case.
+- If the process crashes during an MCP tool call, the in-flight memory write may be lost, but all previously committed memories are safe.

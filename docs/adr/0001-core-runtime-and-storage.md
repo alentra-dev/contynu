@@ -1,11 +1,11 @@
 # ADR 0001: Core Runtime and Storage Architecture
 
 ## Status
-Accepted
+Accepted (with amendment — see note on journal decision)
 
 ## Context
 
-Contynu is intended to be a high-trust, model-agnostic persistent memory layer for LLM workflows. The system must capture terminal interactions, file activity, artifacts, and execution metadata, then support deterministic recovery and cross-model handoff.
+Contynu is intended to be a high-trust, model-agnostic persistent memory layer for LLM workflows. The system must support persistent memory, deterministic recovery, and cross-model handoff.
 
 The core architectural choices must prioritize:
 - durability
@@ -32,14 +32,9 @@ Rust is selected for the core runtime because it offers:
 - safe systems-level programming
 - excellent support for CLI, PTY, filesystem, and concurrency primitives
 
-### 2. Canonical Event Store
-The canonical history will be stored as an **append-only JSONL journal**.
+### 2. ~~Canonical Event Store~~ (Superseded)
 
-Rationale:
-- simple and inspectable
-- durable and replayable
-- easy to debug and export
-- stable source of truth independent of internal database evolution
+> **Amendment (April 2026):** The JSONL journal was removed in the v0.5.0 architecture rewrite. The original rationale for an append-only journal assumed that Contynu would derive memories by mining raw event streams. In practice, heuristic derivation from transcripts produced mostly noise (22/30 memories were process narration, not knowledge). The architecture now uses **model-driven memory** — AI models write memories directly via MCP tools. SQLite is the sole data store. The raw event stream was never consumed by any downstream system after derivation was removed, making the journal an artifact of a design assumption that no longer holds.
 
 ### 3. Metadata and Structured Memory
 Structured metadata will be stored in **SQLite**.
@@ -51,6 +46,8 @@ Rationale:
 - operationally light
 - supports indexing and relational queries
 
+In the current architecture, SQLite is the **primary and only data store** for memories, prompts, sessions, and checkpoints.
+
 ### 4. Blob Store
 Binary assets and large snapshots will be stored in a **content-addressed local blob store**.
 
@@ -61,14 +58,11 @@ Rationale:
 
 ### 5. Retrieval Strategy
 Contynu will implement retrieval in layers:
-1. exact replay
-2. structured memory lookup
-3. semantic retrieval
-
-Semantic retrieval is an enhancement layer, not the source of truth.
+1. structured memory lookup (model-written memories with importance scoring)
+2. semantic retrieval (future enhancement)
 
 ### 6. Rehydration Strategy
-Rehydration will use a structured, deterministic packet generated from the canonical state and recent context.
+Rehydration will use a structured, deterministic packet generated from model-written memories and recorded prompts.
 
 The system will not depend on injecting the full raw transcript into every resumed model.
 
@@ -78,15 +72,15 @@ The system will not depend on injecting the full raw transcript into every resum
 
 ### Positive
 - Strong performance and correctness foundation
-- Clean separation between immutable truth and derived state
+- Model-driven memory eliminates heuristic noise
 - Low operational complexity for local-first deployments
-- Easier debugging and forensic traceability
 - Better long-term extensibility across vendors and interfaces
+- Single data store (SQLite) simplifies operations
 
 ### Negative
 - More engineering complexity at the beginning than a pure scripting approach
 - Rust raises the implementation bar relative to a Python-first prototype
-- Multiple storage layers require disciplined schema and compatibility design
+- Memory quality depends on model compliance with the MCP write contract
 
 ---
 
@@ -95,25 +89,24 @@ The system will not depend on injecting the full raw transcript into every resum
 ### Python-only runtime
 Rejected because it is faster to start but less ideal for a long-term runtime that must manage PTYs, filesystem activity, concurrency, and durable hot-path performance.
 
-### SQLite-only canonical storage
-Rejected because SQLite is useful for structured metadata but is less ideal as the sole canonical raw event log. A raw append-only journal remains simpler, more transparent, and easier to replay or export.
+### JSONL journal as canonical storage (originally accepted, later reversed)
+Originally accepted for simplicity and auditability. Reversed because the journal's primary consumer (the heuristic derivation engine) was removed when the architecture moved to model-driven memory. Without a consumer, the journal added I/O overhead and complexity with no value.
 
 ### Document database or cloud-first backend
 Rejected because it adds operational weight and weakens local-first trust, which is central to the product.
 
 ### Embedding-first memory architecture
-Rejected because semantic similarity alone is not sufficient for exact recovery, legal defensibility, or reproducible rehydration.
+Rejected because semantic similarity alone is not sufficient for exact recovery or reproducible rehydration. May be added as an enhancement layer.
 
 ---
 
 ## Implementation Notes
 
 The codebase should reflect the architectural boundary explicitly:
-- `runtime` for capture and orchestration
-- `journal` for immutable event writing and replay
-- `store` for SQLite metadata and memory objects
-- `blobs` for content-addressed artifact storage
-- `rehydration` for packet generation
+- `runtime` for process execution and hydration delivery
+- `store` for SQLite metadata, memories, prompts, and sessions
+- `mcp` for the MCP server with read and write tools
+- `blobs` for content-addressed storage
+- `checkpoint` for rehydration packet generation
+- `rendering` for multi-format prompt rendering
 - `adapters` for CLI-specific normalization
-
-Future language bindings and optional analysis utilities may be layered around the Rust core without changing the canonical storage model.

@@ -12,9 +12,16 @@ Use this checklist before cutting a serious Contynu release.
 ## Storage and Recovery
 
 - `cargo test` is green
-- journal replay and tail repair tests are green
+- SQLite WAL recovery is verified for crash scenarios
 - checkpoint generation tests are green
-- repair and reconciliation commands are verified manually
+- legacy data cleanup runs correctly on first launch after upgrade
+
+## MCP Server
+
+- All 6 MCP tools respond correctly (write_memory, update_memory, delete_memory, record_prompt, search_memory, list_memories)
+- Memory writes via MCP are persisted and searchable
+- Prompt recording works with and without interpretation
+- MCP server auto-registration works for Claude, Codex, and Gemini
 
 ## Launcher Layer
 
@@ -23,13 +30,18 @@ Use this checklist before cutting a serious Contynu release.
 - known launchers (`codex`, `claude`, `gemini`) have documented defaults
 - launcher override behavior is covered by smoke tests
 
+## Rehydration
+
+- Rehydration packets include model instructions for MCP tool usage
+- Packets render correctly in XML (Claude), Markdown (Codex), and StructuredText (Gemini)
+- Budget-aware memory selection works for large memory stores
+
 ## Product Surface
 
 - `contynu status`
 - `contynu projects`
 - `contynu recent`
 - `contynu doctor`
-- `contynu repair`
 - `contynu checkpoint`
 - `contynu resume`
 - `contynu handoff`
@@ -47,7 +59,7 @@ All should be exercised against a real local state directory before release.
 
 - README reflects actual behavior
 - CLI doc reflects actual commands
-- crash recovery doc reflects actual repair semantics
+- crash recovery doc reflects actual recovery semantics
 - rehydration doc reflects actual packet construction rules
 - adapter architecture doc reflects actual launcher config behavior
 

@@ -1,16 +1,17 @@
-/** Event format for contynu ingest (JSONL). */
-export interface IngestEvent {
-  event_type: string;
-  actor: string;
-  payload: Record<string, unknown>;
-  ts?: string;
+/** Memory write request for the new model-driven architecture. */
+export interface MemoryWrite {
+  kind: 'fact' | 'constraint' | 'decision' | 'todo' | 'user_fact' | 'project_knowledge';
+  scope: 'user' | 'project' | 'session';
+  text: string;
+  importance: number;
+  reason?: string;
 }
 
-/** Options for the contynu CLI ingest command. */
-export interface IngestOptions {
-  adapter?: string;
-  model?: string;
-  deriveMemory?: boolean;
+/** Prompt record for the new architecture. */
+export interface PromptWrite {
+  verbatim: string;
+  interpretation?: string;
+  interpretationConfidence?: number;
 }
 
 /** Options for the contynu CLI export-memory command. */
@@ -40,5 +41,4 @@ export interface ModelSpec {
 export interface ContynuPluginConfig {
   stateDir?: string;
   maxMemoryChars?: number;
-  deriveMemory?: boolean;
 }

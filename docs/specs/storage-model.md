@@ -2,9 +2,9 @@
 
 ## Purpose
 
-This document defines the canonical storage architecture for Contynu, including raw event persistence, structured metadata, blob handling, checkpoint materialization, and compatibility expectations.
+This document defines the canonical storage architecture for Contynu, including structured metadata, blob handling, checkpoint materialization, and compatibility expectations.
 
-Contynu’s storage model is designed to satisfy five requirements simultaneously:
+Contynu's storage model is designed to satisfy five requirements simultaneously:
 - durability
 - inspectability
 - performance
@@ -15,84 +15,30 @@ Contynu’s storage model is designed to satisfy five requirements simultaneousl
 
 ## Storage Layers
 
-Contynu uses four storage layers:
+Contynu uses three storage layers:
 
-1. **Journal Layer**
-   Immutable append-only event log.
+1. **Metadata Layer**
+   SQLite-backed structured store for sessions, memories, prompts, and checkpoints.
 
-2. **Metadata Layer**
-   SQLite-backed relational index and structured memory registry.
+2. **Blob Layer**
+   Content-addressed storage for binary assets and large content.
 
-3. **Blob Layer**
-   Content-addressed storage for binary assets and large text snapshots.
-
-4. **Checkpoint Layer**
-   Materialized recovery bundles derived from journal + metadata.
-
-These layers have different roles and must not be collapsed into one opaque store.
+3. **Checkpoint Layer**
+   Materialized recovery bundles derived from metadata.
 
 ---
 
-## 1. Journal Layer
+## 1. Metadata Layer
 
 ### Role
-The journal is the canonical source of truth.
-
-### Format
-- newline-delimited JSON (`.jsonl`)
-- one canonical event per line
-- append-only
-- durable write semantics
-
-### File Layout
-Recommended root path:
-
-```text
-.contynu/
-  journal/
-    2026/
-      04/
-        03/
-          ses_01J...jsonl
-```
-
-Alternative segmenting strategies may be supported later, but the initial layout should remain simple and debuggable.
-
-### Write Rules
-- sequence number assigned at commit time
-- checksum computed after final canonical serialization
-- fsync or equivalent durability boundary before acknowledging commit success
-- partial trailing lines after crash must be detected and handled safely during recovery
-
-### Recovery Rules
-On recovery:
-1. scan journal tail
-2. detect truncated or corrupt trailing entry
-3. preserve valid prefix
-4. record recovery event if repair occurred
-
-### Journal Invariants
-- immutable once committed
-- per-session sequence strictly increasing
-- checksummed
-- replay order determined by `seq`
-
----
-
-## 2. Metadata Layer
-
-### Role
-SQLite stores structured state derived from or linked to the journal.
+SQLite is the primary structured store and source of truth for all project state.
 
 ### Responsibilities
 - session registry
-- turn registry
-- event index
-- file registry
-- artifact registry
+- memory object registry (model-written)
+- prompt registry (user prompts recorded verbatim)
 - checkpoint registry
-- memory object registry
-- retrieval indexes
+- blob metadata
 - schema/version metadata
 
 ### Database Location
@@ -100,18 +46,18 @@ SQLite stores structured state derived from or linked to the journal.
 .contynu/sqlite/contynu.db
 ```
 
-### Core Tables
+### Core Tables (Schema v5)
 
 #### `schema_meta`
 Tracks database schema and compatibility state.
 
-Suggested columns:
+Columns:
 - `key`
 - `value`
 - `updated_at`
 
 #### `sessions`
-Suggested columns:
+Columns:
 - `session_id`
 - `project_id`
 - `status`
@@ -124,112 +70,48 @@ Suggested columns:
 - `repo_root`
 - `host_fingerprint`
 
-#### `turns`
-Suggested columns:
-- `turn_id`
-- `session_id`
-- `status`
-- `started_at`
-- `completed_at`
-- `summary_memory_id`
-
-#### `events`
-Suggested columns:
-- `event_id`
-- `session_id`
-- `turn_id`
-- `seq`
-- `ts`
-- `actor`
-- `event_type`
-- `payload_version`
-- `journal_path`
-- `journal_byte_offset`
-- `checksum`
-- `correlation_id`
-- `causation_id`
-
-#### `artifacts`
-Suggested columns:
-- `artifact_id`
-- `session_id`
-- `path`
-- `kind`
-- `mime_type`
-- `sha256`
-- `blob_id`
-- `created_at`
-- `deleted_at`
-
-#### `files`
-Suggested columns:
-- `file_id`
-- `session_id`
-- `workspace_relative_path`
-- `last_known_sha256`
-- `last_snapshot_event_id`
-- `last_diff_event_id`
-- `observed_at`
-
-#### `checkpoints`
-Suggested columns:
-- `checkpoint_id`
-- `session_id`
-- `created_at`
-- `reason`
-- `last_seq`
-- `rehydration_blob_id`
-
 #### `memory_objects`
-Suggested columns:
+Model-written structured memories.
+
+Columns:
 - `memory_id`
 - `session_id`
-- `kind`
-- `status`
+- `kind` — fact, constraint, decision, todo, user_fact, project_knowledge
+- `scope` — user, project, session
+- `status` — active or superseded
 - `text`
-- `confidence`
-- `source_event_ids_json`
-- `created_at`
+- `importance` — 0.0 to 1.0
+- `reason` — why the memory is worth storing
+- `source_model`
 - `superseded_by`
+- `created_at`
+- `updated_at`
+- `access_count`
+- `last_accessed_at`
 
-### Indexing Guidance
-At minimum:
-- `events(session_id, seq)` unique
-- `events(event_id)` unique
-- `turns(session_id, started_at)`
-- `artifacts(session_id, created_at)`
-- `memory_objects(session_id, kind, created_at)`
+#### `prompts`
+User prompts recorded verbatim.
 
----
+Columns:
+- `prompt_id`
+- `session_id`
+- `verbatim`
+- `interpretation`
+- `interpretation_confidence`
+- `source_model`
+- `created_at`
 
-## 3. Blob Layer
+#### `checkpoints`
+Columns:
+- `checkpoint_id`
+- `session_id`
+- `reason`
+- `rehydration_sha256`
+- `manifest_json`
+- `created_at`
 
-### Role
-Stores large or binary content outside SQLite and the raw journal.
-
-### Use Cases
-- uploaded files
-- generated outputs
-- file snapshots
-- diffs
-- terminal output captures beyond inline threshold
-- rehydration packets
-
-### Addressing Model
-Content-addressed by digest.
-
-Recommended primary key:
-- `sha256`
-
-Optional internal blob ID may also be maintained.
-
-### File Layout
-```text
-.contynu/blobs/sha256/ab/cd/abcdef...
-```
-
-### Blob Metadata
-Blob metadata may be stored in SQLite with fields such as:
+#### `blobs`
+Columns:
 - `blob_id`
 - `sha256`
 - `size_bytes`
@@ -237,12 +119,40 @@ Blob metadata may be stored in SQLite with fields such as:
 - `storage_path`
 - `created_at`
 
-### Deduplication Rule
-If a blob with the same digest already exists, the store must reuse it rather than writing duplicate content.
+### Indexing
+
+- `memory_objects(session_id, kind, created_at)`
+- `memory_objects(session_id, status, importance DESC, created_at DESC)`
+- `memory_objects(scope, status, importance DESC)`
+- `prompts(session_id, created_at DESC)`
+- `checkpoints(session_id, created_at)`
 
 ---
 
-## 4. Checkpoint Layer
+## 2. Blob Layer
+
+### Role
+Stores large or binary content outside SQLite.
+
+### Use Cases
+- rehydration packets
+- uploaded files
+- generated outputs
+
+### Addressing Model
+Content-addressed by SHA-256 digest.
+
+### File Layout
+```text
+.contynu/blobs/sha256/ab/cd/abcdef...
+```
+
+### Deduplication Rule
+If a blob with the same digest already exists, the store reuses it rather than writing duplicate content.
+
+---
+
+## 3. Checkpoint Layer
 
 ### Role
 Materialized recovery artifacts for resume and handoff.
@@ -250,50 +160,47 @@ Materialized recovery artifacts for resume and handoff.
 ### File Layout
 ```text
 .contynu/checkpoints/
-  ses_01J.../
-    chk_01J.../
+  prj_<id>/
+    chk_<id>/
       manifest.json
       rehydration.json
-      summary.md
 ```
 
 ### Contents
-A checkpoint should include:
+A checkpoint includes:
 - checkpoint manifest
-- last committed event sequence
-- current state summary
-- decision and constraint slices
-- open loops
-- relevant artifact references
-- recent context window
-- deterministic rehydration payload
+- memory snapshot
+- rehydration payload
 
 ### Checkpoint Principle
-A checkpoint is not a new source of truth. It is a derived materialization of truth from the journal and metadata layers.
+A checkpoint is a derived materialization from the metadata layer.
 
 ---
 
-## Inline vs Blob Thresholds
+## Overall File Layout
 
-To keep the journal lean, payloads may inline small content and externalize large content.
-
-Recommended rule:
-- small structured text may be inlined directly in event payload
-- large text or binary data should move to blob store and be referenced by ID
-
-Threshold values should be configurable, but the default should favor journal readability without bloating it.
+```text
+.contynu/
+  sqlite/
+    contynu.db
+  blobs/
+    sha256/ab/cd/<digest>
+  checkpoints/
+    prj_<id>/
+      chk_<id>/
+        manifest.json
+        rehydration.json
+  config.json
+```
 
 ---
 
 ## Versioning and Compatibility
 
-### Journal Compatibility
-- journal entries are governed by `schema_version` and `payload_version`
-- readers must preserve compatibility with prior supported versions
-
 ### SQLite Schema Compatibility
 - managed via explicit migrations
-- migration history must be tracked in `schema_meta`
+- migration history tracked in `schema_meta`
+- current schema version: v5
 
 ### Blob Compatibility
 - blob storage is content-addressed and largely schema-independent
@@ -301,56 +208,33 @@ Threshold values should be configurable, but the default should favor journal re
 
 ### Checkpoint Compatibility
 - checkpoints may become stale when newer rehydration logic is introduced
-- old checkpoints may be re-materialized from journal + metadata rather than migrated directly
+- old checkpoints may be re-materialized from metadata rather than migrated directly
+
+---
+
+## Legacy Data Cleanup
+
+On startup, Contynu detects and removes legacy v0.4.0 storage artifacts:
+- `journal/` directory and JSONL files
+- `runtime/` directory
+- Legacy DB tables: events, turns, files, artifacts
+
+This ensures a clean transition to the model-driven architecture.
 
 ---
 
 ## Durability Guarantees
 
-The system should provide these guarantees:
-
-1. If an event commit returns success, it must survive process crash.
-2. Metadata updates associated with a committed event must be recoverable to a consistent state.
-3. Recovery must never silently skip corrupt data; it must either repair deterministically or surface the fault.
-4. Blob writes must be verified by digest before registration.
-
----
-
-## Failure Model
-
-### Possible Failures
-- process crash during journal append
-- crash between journal append and metadata update
-- partial blob write
-- checkpoint generation interruption
-- disk full or I/O error
-
-### Recovery Strategy
-- journal is repaired first
-- metadata is reconciled from journal if needed
-- orphan blobs may be garbage-collected later
-- incomplete checkpoints are discarded or rebuilt
-
----
-
-## Garbage Collection
-
-Initial Contynu should favor correctness over aggressive cleanup.
-
-Safe cleanup candidates:
-- orphan temporary files
-- incomplete checkpoint directories
-- unreferenced blobs after reconciliation
-
-Canonical journal events must never be garbage-collected by default.
+1. SQLite WAL mode ensures crash safety for metadata writes.
+2. Blob writes are verified by digest before registration.
+3. Recovery never silently skips corrupt data.
 
 ---
 
 ## Summary
 
-Contynu’s storage model is intentionally layered:
-- journal for immutable truth
-- SQLite for queryable structure
+Contynu's storage model is intentionally simple:
+- SQLite for structured state (memories, prompts, sessions, checkpoints)
 - blob store for heavy content
 - checkpoints for derived recovery bundles
 

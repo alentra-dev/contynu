@@ -6,9 +6,10 @@ Permanent memory for [OpenClaw](https://github.com/openclaw/openclaw) agents pow
 
 When OpenClaw agents switch models or when context gets compacted, they lose everything. This plugin gives them permanent memory that survives compaction, model switches, and session boundaries.
 
-- **Captures every conversation turn** — via OpenClaw's `afterTurn()` lifecycle hook
+- **Records every user prompt** — verbatim via OpenClaw's `afterTurn()` lifecycle hook
+- **Writes meaningful memories** — assistant content stored as project knowledge via MCP tools
 - **Protects against compaction loss** — checkpoints before compaction fires, writes importance-ranked facts back to MEMORY.md
-- **MCP tools for deep recall** — agents can search the full project history on demand via `search_memory`, `list_memories`, and `search_events`
+- **MCP tools for memory management** — agents can write, search, update, and delete memories via `write_memory`, `search_memory`, `update_memory`, `delete_memory`, `list_memories`, and `record_prompt`
 - **Per-agent memory isolation** — each agent gets its own memory store
 - **Works with any model** — Anthropic, OpenAI, Google, Llama, Mistral, DeepSeek, Ollama
 
@@ -37,9 +38,9 @@ Restart OpenClaw. Every agent gets permanent memory automatically.
 
 ## How It Works
 
-1. **afterTurn()** — After each conversation turn, the plugin pipes the messages to `contynu ingest`, which stores them in the append-only journal and derives structured memories (facts, decisions, constraints)
+1. **afterTurn()** — After each conversation turn, the plugin records user prompts verbatim and writes assistant content as project knowledge via Contynu's MCP tools
 2. **session:compact:before** — Before OpenClaw compacts the context window, the plugin creates a Contynu checkpoint and writes the most important memories back to `MEMORY.md` using marker-delimited sections
-3. **MCP server** — Registered automatically in OpenClaw's config. Agents can call `search_memory("authentication")` to recall any fact from the full project history
+3. **MCP server** — Registered automatically in OpenClaw's config. Agents can call `write_memory`, `search_memory`, `update_memory`, `delete_memory`, and `list_memories` to manage their own memory directly
 
 ## Configuration
 
@@ -63,8 +64,7 @@ Optional plugin config:
         "enabled": true,
         "config": {
           "stateDir": ".contynu",
-          "maxMemoryChars": 18000,
-          "deriveMemory": true
+          "maxMemoryChars": 18000
         }
       }
     }

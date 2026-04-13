@@ -1,6 +1,6 @@
 # Rehydration Semantics
 
-Contynu does not treat raw transcript dumping as resume logic. Resume and handoff use a deterministic rehydration packet derived from canonical and structured project state.
+Contynu does not treat raw transcript dumping as resume logic. Resume and handoff use a deterministic rehydration packet assembled from model-written memories and recorded prompts.
 
 ## Packet Sections
 
@@ -10,16 +10,14 @@ Contynu does not treat raw transcript dumping as resume logic. Resume and handof
 - decisions
 - current state
 - open loops
-- relevant artifacts
-- relevant files
-- recent verbatim context
+- recent prompts
 - retrieval guidance
 
 ## Sources
 
-- journal-backed event index for exact recent context
-- structured memory objects for stable facts, constraints, decisions, and todos
-- artifact registry for file outputs and binary references
+- memory objects written by models via MCP tools
+- recorded user prompts
+- session metadata
 
 ## Modes
 
@@ -28,9 +26,25 @@ Contynu does not treat raw transcript dumping as resume logic. Resume and handof
 
 ## Current Behavior
 
-In this pass, packets are derived from:
+Packets are assembled from:
 
-- the earliest captured user message for mission inference
-- active memory objects in SQLite for reusable state
-- recent message and IO events for verbatim context
-- tracked artifacts and the structured current-file index for relevant references
+- active memory objects in SQLite, ranked by importance
+- recorded user prompts for recent context
+- session metadata for project identity
+
+## Model Instructions
+
+Rehydration packets include explicit instructions telling the model how to use Contynu's MCP tools:
+- `write_memory` for recording new facts, decisions, constraints, and todos
+- `update_memory` for correcting existing memories
+- `delete_memory` for removing stale information
+- `record_prompt` for recording user prompts at every stop point
+
+These instructions are rendered in the model's preferred format:
+- **XML** for Claude (via `--append-system-prompt`)
+- **Markdown** for Codex (via `AGENTS.md`)
+- **StructuredText** for Gemini (via `GEMINI.md`)
+
+## Philosophy
+
+The old system derived memories heuristically from captured output. The new system relies on models to write memories directly. This means rehydration packets contain exactly what models decided was worth remembering, not what a parser guessed might be important.

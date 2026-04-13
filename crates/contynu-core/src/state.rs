@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::ids::{CheckpointId, ProjectId, SessionId};
+use crate::ids::{CheckpointId, ProjectId};
 
 #[derive(Debug, Clone)]
 pub struct StatePaths {
@@ -18,15 +18,10 @@ impl StatePaths {
     }
 
     pub fn ensure_layout(&self) -> std::io::Result<()> {
-        fs::create_dir_all(self.journal_root())?;
         fs::create_dir_all(self.sqlite_root())?;
         fs::create_dir_all(self.blobs_root())?;
         fs::create_dir_all(self.checkpoints_root())?;
         Ok(())
-    }
-
-    pub fn journal_root(&self) -> PathBuf {
-        self.root.join("journal")
     }
 
     pub fn sqlite_root(&self) -> PathBuf {
@@ -53,29 +48,36 @@ impl StatePaths {
         self.root.join("checkpoints")
     }
 
-    pub fn journal_path_for_session(&self, session_id: &SessionId) -> PathBuf {
-        self.journal_root().join(format!("{session_id}.jsonl"))
-    }
-
-    pub fn journal_path_for_project(&self, project_id: &ProjectId) -> PathBuf {
-        self.journal_path_for_session(project_id)
-    }
-
-    pub fn checkpoint_dir(&self, session_id: &SessionId, checkpoint_id: &CheckpointId) -> PathBuf {
+    pub fn checkpoint_dir(&self, project_id: &ProjectId, checkpoint_id: &CheckpointId) -> PathBuf {
         self.checkpoints_root()
-            .join(session_id.as_str())
+            .join(project_id.as_str())
             .join(checkpoint_id.as_str())
-    }
-
-    pub fn project_checkpoint_dir(
-        &self,
-        project_id: &ProjectId,
-        checkpoint_id: &CheckpointId,
-    ) -> PathBuf {
-        self.checkpoint_dir(project_id, checkpoint_id)
     }
 
     pub fn project_runtime_dir(&self, project_id: &ProjectId) -> PathBuf {
         self.runtime_root().join(project_id.as_str())
+    }
+
+    /// Check for and remove old architecture artifacts (journal/, events, turns tables, etc.)
+    pub fn cleanup_old_architecture(&self) -> std::io::Result<()> {
+        // Remove journal directory if it exists
+        let journal_dir = self.root.join("journal");
+        if journal_dir.exists() {
+            fs::remove_dir_all(&journal_dir)?;
+        }
+
+        // Remove runtime directory (old transcript reconciliation files)
+        let runtime_dir = self.runtime_root();
+        if runtime_dir.exists() {
+            fs::remove_dir_all(&runtime_dir)?;
+        }
+
+        // Remove imported-sessions.json
+        let imported = self.root.join("imported-sessions.json");
+        if imported.exists() {
+            fs::remove_file(&imported)?;
+        }
+
+        Ok(())
     }
 }

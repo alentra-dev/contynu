@@ -1,11 +1,9 @@
 import type { ContynuCli } from './cli';
 import type { AgentMapping } from './agent-mapping';
-import type { IngestEvent } from './types';
 import { parseModelSpec } from './model-detection';
 
 /**
  * Message structure from OpenClaw's afterTurn context.
- * Simplified — real OpenClaw messages may have richer tool_use content.
  */
 interface TurnMessage {
   role: 'user' | 'assistant' | 'tool';
@@ -22,7 +20,13 @@ interface TurnContext {
 }
 
 /**
- * Handle the afterTurn lifecycle hook: capture conversation to Contynu.
+ * Handle the afterTurn lifecycle hook.
+ *
+ * Records user prompts and writes meaningful memories from assistant output.
+ * The model's content is analyzed for fact-like statements — but since we're
+ * in a plugin (not the model itself), we record the user prompt verbatim and
+ * write assistant facts as project_knowledge.
+ *
  * Errors are caught and logged — never thrown to avoid crashing the gateway.
  */
 export async function handleAfterTurn(
@@ -34,49 +38,38 @@ export async function handleAfterTurn(
     const projectId = await mapping.resolveProject(ctx.agentId, cli);
     const { model } = parseModelSpec(ctx.agent.config.model.primary);
 
-    const events: IngestEvent[] = [];
-
+    // Record every user prompt verbatim
     for (const msg of ctx.turn.messages) {
       if (msg.role === 'user' && msg.content) {
-        events.push({
-          event_type: 'message_input',
-          actor: 'user',
-          payload: { content: [{ type: 'text', text: msg.content }] },
-        });
-      } else if (msg.role === 'assistant' && msg.content) {
-        events.push({
-          event_type: 'message_output',
-          actor: 'assistant',
-          payload: { content: [{ type: 'text', text: msg.content }] },
-        });
-      } else if (msg.role === 'assistant' && msg.tool_use) {
-        events.push({
-          event_type: 'tool_call',
-          actor: 'assistant',
-          payload: {
-            tool_name: msg.tool_use.name,
-            arguments: msg.tool_use.input,
-          },
-        });
-      } else if (msg.role === 'tool' && msg.tool_result) {
-        events.push({
-          event_type: 'tool_result',
-          actor: 'tool',
-          payload: {
-            status: msg.tool_result.status,
-            output: msg.tool_result.output ?? '',
-          },
-        });
+        await cli.recordPrompt(projectId, {
+          verbatim: msg.content,
+        }, model);
       }
     }
 
-    if (events.length === 0) return;
+    // Extract and write assistant content as project knowledge.
+    // We write the substantive assistant content — the model in the next
+    // session can refine these via update_memory/delete_memory.
+    const assistantContent = ctx.turn.messages
+      .filter(m => m.role === 'assistant' && m.content)
+      .map(m => m.content!)
+      .join('\n');
 
-    await cli.ingest(projectId, events, {
-      adapter: 'openclaw',
-      model,
-      deriveMemory: true,
-    });
+    if (assistantContent.length > 50) {
+      // Write a concise summary as project knowledge
+      // Truncate to a reasonable size — the model can refine later
+      const text = assistantContent.length > 2000
+        ? assistantContent.substring(0, 2000)
+        : assistantContent;
+
+      await cli.writeMemory(projectId, {
+        kind: 'project_knowledge',
+        scope: 'project',
+        text,
+        importance: 0.6,
+        reason: `Captured from ${model} turn via OpenClaw plugin`,
+      }, model);
+    }
   } catch (err) {
     console.error(
       `[contynu-openclaw] afterTurn failed: ${err instanceof Error ? err.message : err}`

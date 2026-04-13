@@ -8,10 +8,9 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
 use contynu_core::{
-    BlobStore, CheckpointManager, ContynuConfig, EventDraft, EventId, EventType, Journal,
-    MetadataStore, ProjectId, RunConfig, RunOutcome, RuntimeEngine, StatePaths,
+    BlobStore, CheckpointManager, ContynuConfig, MetadataStore, ProjectId, RunConfig, RunOutcome,
+    RuntimeEngine, StatePaths,
 };
-use serde_json::Value;
 
 #[derive(Debug, Parser)]
 #[command(name = "contynu")]
@@ -42,10 +41,6 @@ enum Command {
         project: Option<String>,
     },
     Projects,
-    Recent {
-        #[arg(long, default_value_t = 10)]
-        limit: usize,
-    },
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -68,49 +63,9 @@ enum Command {
         #[arg(long)]
         target_model: String,
     },
-    Replay {
-        #[arg(long, alias = "session")]
-        project: Option<String>,
-    },
-    Inspect {
-        #[command(subcommand)]
-        command: InspectCommand,
-    },
     Search {
         #[command(subcommand)]
         command: SearchCommand,
-    },
-    Artifacts {
-        #[command(subcommand)]
-        command: ArtifactsCommand,
-    },
-    Doctor,
-    Repair {
-        #[arg(long, alias = "session")]
-        project: Option<String>,
-    },
-    /// Ingest events from stdin (JSONL) into the project journal
-    Ingest {
-        #[arg(long, alias = "session")]
-        project: Option<String>,
-        #[arg(long)]
-        adapter: Option<String>,
-        #[arg(long)]
-        model: Option<String>,
-        #[arg(long, default_value_t = true)]
-        derive_memory: bool,
-    },
-    /// Import conversations from Claude JSONL, ChatGPT JSON, or plain text
-    Import {
-        /// Path to conversation file(s)
-        #[arg(required = true)]
-        files: Vec<std::path::PathBuf>,
-        #[arg(long, default_value = "auto")]
-        format: String,
-        #[arg(long, alias = "session")]
-        project: Option<String>,
-        #[arg(long)]
-        adapter: Option<String>,
     },
     /// Export importance-ranked memories as Markdown
     #[command(name = "export-memory")]
@@ -128,6 +83,7 @@ enum Command {
         #[command(subcommand)]
         command: OpenClawCommand,
     },
+    Doctor,
     /// Start the Contynu MCP server (stdio transport)
     #[command(name = "mcp-server")]
     McpServer {
@@ -180,28 +136,8 @@ enum OpenClawCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum InspectCommand {
-    #[command(name = "project", visible_alias = "session")]
-    Project {
-        id: Option<String>,
-    },
-    Event {
-        id: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
 enum SearchCommand {
-    Exact { query: String },
     Memory { query: String },
-}
-
-#[derive(Debug, Subcommand)]
-enum ArtifactsCommand {
-    List {
-        #[arg(long, alias = "session")]
-        project: Option<String>,
-    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -223,7 +159,6 @@ fn main() -> Result<()> {
         Some(Command::Gemini(command)) => launch_llm(&state, &cli.cwd, "gemini", command),
         Some(Command::Status { project }) => status(&state, project.as_deref()),
         Some(Command::Projects) => projects(&state),
-        Some(Command::Recent { limit }) => recent(&state, limit),
         Some(Command::Config { command }) => config_command(&state, command),
         Some(Command::StartProject) => start_project(&state, &cli.cwd),
         Some(Command::Checkpoint { project, reason }) => {
@@ -234,22 +169,12 @@ fn main() -> Result<()> {
             project,
             target_model,
         }) => resume(&state, project.as_deref(), Some(target_model)),
-        Some(Command::Replay { project }) => replay(&state, project.as_deref()),
-        Some(Command::Inspect { command }) => inspect(&state, command),
         Some(Command::Search { command }) => search(&state, command),
-        Some(Command::Artifacts { command }) => artifacts(&state, command),
         Some(Command::Doctor) => doctor(&state),
         Some(Command::OpenClaw { command }) => openclaw_command(&state, &cli.cwd, command),
-        Some(Command::Import { files, format, project, adapter }) => {
-            import_conversations(&state, project.as_deref(), &files, &format, adapter.as_deref())
-        }
-        Some(Command::Ingest { project, adapter, model, derive_memory }) => {
-            ingest(&state, project.as_deref(), adapter.as_deref(), model.as_deref(), derive_memory)
-        }
         Some(Command::ExportMemory { project, max_chars, with_markers }) => {
             export_memory(&state, project.as_deref(), max_chars, with_markers)
         }
-        Some(Command::Repair { project }) => repair(&state, project.as_deref()),
         Some(Command::McpServer { state_dir: override_dir }) => {
             let dir = override_dir.unwrap_or_else(|| {
                 std::env::var("CONTYNU_STATE_DIR")
@@ -325,7 +250,10 @@ fn init(state: &StatePaths) -> Result<()> {
 fn ensure_state(state: &StatePaths) -> Result<()> {
     state.ensure_layout()?;
     ContynuConfig::ensure_exists(&state.config_path())?;
-    let _ = MetadataStore::open(state.sqlite_db())?;
+    let store = MetadataStore::open(state.sqlite_db())?;
+    // Purge any old architecture data on first access
+    let _ = store.purge_old_data();
+    let _ = state.cleanup_old_architecture();
     let _ = BlobStore::new(state.blobs_root());
     Ok(())
 }
@@ -353,28 +281,11 @@ fn start_project(state: &StatePaths, cwd: &PathBuf) -> Result<()> {
         ended_at: None,
     })?;
     store.set_primary_project_id(&project_id)?;
-    let journal = Journal::open(state.journal_path_for_project(&project_id))?;
-    let (event, append) = journal.append(EventDraft::new(
-        project_id.clone(),
-        None,
-        contynu_core::Actor::System,
-        EventType::SessionStarted,
-        serde_json::json!({
-            "cwd": cwd.display().to_string(),
-            "adapter_kind": "manual",
-            "continued": false,
-        }),
-    ))?;
-    store.record_event(&event, &journal.path().display().to_string(), append)?;
     println!("Started a new primary project: {project_id}");
     Ok(())
 }
 
 fn run(state: &StatePaths, cwd: &PathBuf, command: RunCommand) -> Result<()> {
-    // Auto-import existing sessions
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let _ = auto_import_sessions(state, &home);
-
     let outcome = RuntimeEngine::run(RunConfig {
         state_dir: state.root().to_path_buf(),
         cwd: cwd.clone(),
@@ -393,16 +304,9 @@ fn launch_llm(
     executable: &str,
     command: LlmCommand,
 ) -> Result<()> {
-    // Auto-discover and import existing LLM sessions (fast — skips if nothing new)
-    {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        if let Err(e) = auto_import_sessions(state, &home) {
-            eprintln!("Note: session auto-import: {e}");
-        }
-    }
-
     // Resolve project ID for MCP registration
     let project_id_for_mcp = {
+        ensure_state(state)?;
         let store = MetadataStore::open(state.sqlite_db())?;
         command
             .project
@@ -451,11 +355,10 @@ fn passthrough(state: &StatePaths, cwd: &PathBuf, command: Vec<OsString>) -> Res
 fn checkpoint(state: &StatePaths, project: Option<&str>, reason: &str) -> Result<()> {
     ensure_state(state)?;
     let project_id = resolve_project_id(state, project)?;
-    let journal = Journal::open(state.journal_path_for_project(&project_id))?;
     let store = MetadataStore::open(state.sqlite_db())?;
     let blobs = BlobStore::new(state.blobs_root());
     let manager = CheckpointManager::new(state, &store, &blobs);
-    let (manifest, packet) = manager.create_checkpoint(&journal, &project_id, reason, None)?;
+    let (manifest, packet) = manager.create_checkpoint(&project_id, reason, None)?;
     print_checkpoint_result(&manifest, &packet)
 }
 
@@ -476,122 +379,9 @@ fn resume(state: &StatePaths, project: Option<&str>, target_model: Option<String
     )
 }
 
-fn replay(state: &StatePaths, project: Option<&str>) -> Result<()> {
-    let project_id = resolve_project_id(state, project)?;
-    let journal = Journal::open(state.journal_path_for_project(&project_id))?;
-    let replay = journal.replay()?;
-    println!("Replay for project {project_id}");
-    println!();
-    if replay.is_empty() {
-        println!("No canonical events have been recorded yet.");
-        return Ok(());
-    }
-    for item in replay {
-        println!(
-            "#{:04}  {}  {} / {}{}",
-            item.event.seq,
-            item.event.ts,
-            item.event.actor.as_str(),
-            item.event.event_type.as_str(),
-            format_turn_suffix(item.event.turn_id.as_ref())
-        );
-    }
-    Ok(())
-}
-
-fn inspect(state: &StatePaths, command: InspectCommand) -> Result<()> {
-    let store = MetadataStore::open(state.sqlite_db())?;
-    match command {
-        InspectCommand::Project { id } => {
-            let project_id = match id {
-                Some(id) => ProjectId::parse(id)?,
-                None => resolve_primary_project(&store)?,
-            };
-            let session = store
-                .get_session(&project_id)?
-                .ok_or_else(|| anyhow!("project not found"))?;
-            let turns = store.list_turns_for_session(&project_id)?;
-            let events = store.list_events_for_session(&project_id)?;
-            println!("Project {}", project_id);
-            println!();
-            print_kv("Status", &session.status);
-            print_optional_kv("Launcher", session.cli_name.as_deref());
-            print_optional_kv("Working directory", session.cwd.as_deref());
-            print_kv("Started", &session.started_at.to_rfc3339());
-            print_kv("Turns", &turns.len().to_string());
-            print_kv("Events", &events.len().to_string());
-            if let Some(turn) = turns.first() {
-                print_kv("Latest turn", turn.turn_id.as_str());
-                print_kv("Latest turn status", &turn.status);
-            }
-            println!();
-            println!("Recent events");
-            println!();
-            for event in events
-                .iter()
-                .rev()
-                .take(12)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-            {
-                println!(
-                    "- #{:04} {} {} / {}{}",
-                    event.seq,
-                    event.ts,
-                    event.actor,
-                    event.event_type,
-                    format_turn_suffix(event.turn_id.as_ref())
-                );
-            }
-            Ok(())
-        }
-        InspectCommand::Event { id } => {
-            let event_id = EventId::parse(id)?;
-            let event = store
-                .get_event(&event_id)?
-                .ok_or_else(|| anyhow!("event not found"))?;
-            println!("Event {}", event.event_id);
-            println!();
-            print_kv("Project", event.session_id.as_str());
-            print_optional_kv("Turn", event.turn_id.as_ref().map(|value| value.as_str()));
-            print_kv("Sequence", &event.seq.to_string());
-            print_kv("Time", &event.ts.to_rfc3339());
-            print_kv("Actor", &event.actor);
-            print_kv("Type", &event.event_type);
-            print_kv("Checksum", &event.checksum);
-            println!();
-            println!("Payload");
-            println!();
-            print_pretty_json_value(&event.payload_json)?;
-            Ok(())
-        }
-    }
-}
-
 fn search(state: &StatePaths, command: SearchCommand) -> Result<()> {
     let store = MetadataStore::open(state.sqlite_db())?;
     match command {
-        SearchCommand::Exact { query } => {
-            let results = store.search_exact(&query)?;
-            println!("Exact search for \"{}\"", query);
-            println!();
-            if results.is_empty() {
-                println!("No exact matches were found.");
-                return Ok(());
-            }
-            for event in results {
-                println!(
-                    "- #{:04} {} / {}{}",
-                    event.seq,
-                    event.actor,
-                    event.event_type,
-                    format_turn_suffix(event.turn_id.as_ref())
-                );
-                println!("  {}", summarize_json(&event.payload_json));
-            }
-            Ok(())
-        }
         SearchCommand::Memory { query } => {
             let results = store.search_memory(&query)?;
             println!("Memory search for \"{}\"", query);
@@ -602,33 +392,11 @@ fn search(state: &StatePaths, command: SearchCommand) -> Result<()> {
             }
             for memory in results {
                 println!(
-                    "- {} [{}] {}",
+                    "- [{}] [{}] {} (importance: {:.2})",
                     memory.kind.as_str(),
-                    memory.status,
-                    memory.text
-                );
-            }
-            Ok(())
-        }
-    }
-}
-
-fn artifacts(state: &StatePaths, command: ArtifactsCommand) -> Result<()> {
-    let store = MetadataStore::open(state.sqlite_db())?;
-    match command {
-        ArtifactsCommand::List { project } => {
-            let project = project.map(ProjectId::parse).transpose()?;
-            let artifacts = store.list_artifacts(project.as_ref())?;
-            println!("Artifacts");
-            println!();
-            if artifacts.is_empty() {
-                println!("No artifacts have been recorded yet.");
-                return Ok(());
-            }
-            for artifact in artifacts {
-                println!(
-                    "- {}  {} bytes  {}",
-                    artifact.kind, artifact.size_bytes, artifact.sha256
+                    memory.scope.as_str(),
+                    memory.text,
+                    memory.importance,
                 );
             }
             Ok(())
@@ -643,24 +411,7 @@ fn status(state: &StatePaths, project: Option<&str>) -> Result<()> {
     let session = store
         .get_session(&project_id)?
         .ok_or_else(|| anyhow!("project not found"))?;
-    let turns = store.list_turns_for_session(&project_id)?;
-    let artifacts = store.list_artifacts(Some(&project_id))?;
-    let files = store.list_current_files(&project_id)?;
-    let memory = store.list_memory_objects(&project_id, None)?;
-    let events = store.list_events_for_session(&project_id)?;
-    let latest_turn = turns.first().cloned();
-    let recent_events = events
-        .iter()
-        .rev()
-        .take(5)
-        .map(|event| {
-            serde_json::json!({
-                "seq": event.seq,
-                "event_type": event.event_type,
-                "ts": event.ts,
-            })
-        })
-        .collect::<Vec<_>>();
+    let memory_count = store.count_active_memories(&project_id, None)?;
     println!("Project status");
     println!();
     print_kv("Project", project_id.as_str());
@@ -668,30 +419,7 @@ fn status(state: &StatePaths, project: Option<&str>) -> Result<()> {
     print_optional_kv("Launcher", session.cli_name.as_deref());
     print_optional_kv("Working directory", session.cwd.as_deref());
     print_kv("Started", &session.started_at.to_rfc3339());
-    if let Some(turn) = latest_turn {
-        print_kv("Latest turn", turn.turn_id.as_str());
-        print_kv("Latest turn status", &turn.status);
-        print_kv("Latest turn started", &turn.started_at.to_rfc3339());
-    }
-    println!();
-    println!("Counts");
-    println!();
-    print_kv("Turns", &turns.len().to_string());
-    print_kv("Events", &events.len().to_string());
-    print_kv("Artifacts", &artifacts.len().to_string());
-    print_kv("Tracked files", &files.len().to_string());
-    print_kv("Memory objects", &memory.len().to_string());
-    println!();
-    println!("Recent events");
-    println!();
-    for event in recent_events {
-        println!(
-            "- #{}  {}  {}",
-            event["seq"].as_u64().unwrap_or_default(),
-            event["ts"].as_str().unwrap_or(""),
-            event["event_type"].as_str().unwrap_or("")
-        );
-    }
+    print_kv("Active memories", &memory_count.to_string());
     Ok(())
 }
 
@@ -721,42 +449,6 @@ fn projects(state: &StatePaths) -> Result<()> {
             println!("  cwd: {}", cwd);
         }
         println!("  started: {}", session.started_at.to_rfc3339());
-    }
-    Ok(())
-}
-
-fn recent(state: &StatePaths, limit: usize) -> Result<()> {
-    ensure_state(state)?;
-    let store = MetadataStore::open(state.sqlite_db())?;
-    let sessions = store.list_sessions()?;
-    println!("Recent activity");
-    println!();
-    let mut any = false;
-    for session in sessions.into_iter().take(limit) {
-        let turns = store.list_turns_for_session(&session.session_id)?;
-        let latest_turn = turns.first().cloned();
-        any = true;
-        println!("- {}", session.session_id);
-        println!("  status: {}", session.status);
-        if let Some(cli_name) = session.cli_name.as_deref() {
-            println!("  launcher: {}", cli_name);
-        }
-        if let Some(cwd) = session.cwd.as_deref() {
-            println!("  cwd: {}", cwd);
-        }
-        println!("  started: {}", session.started_at.to_rfc3339());
-        if let Some(turn) = latest_turn {
-            println!(
-                "  latest turn: {} ({})",
-                turn.turn_id,
-                turn.started_at.to_rfc3339()
-            );
-        } else {
-            println!("  latest turn: none yet");
-        }
-    }
-    if !any {
-        println!("No recent activity yet.");
     }
     Ok(())
 }
@@ -806,7 +498,6 @@ fn doctor(state: &StatePaths) -> Result<()> {
     print_kv("State root", &state.root().display().to_string());
     print_kv("Config", &state.config_path().display().to_string());
     print_kv("SQLite", &state.sqlite_db().display().to_string());
-    print_kv("Journal root", &state.journal_root().display().to_string());
     print_kv("Runtime root", &state.runtime_root().display().to_string());
     print_kv(
         "Checkpoints",
@@ -817,7 +508,10 @@ fn doctor(state: &StatePaths) -> Result<()> {
         primary_project.as_ref().map(|value| value.as_str()),
     );
     print_kv("Projects", &sessions.len().to_string());
-    print_kv("Artifacts", &store.list_artifacts(None)?.len().to_string());
+    if let Some(ref pid) = primary_project {
+        let mem_count = store.count_active_memories(pid, None)?;
+        print_kv("Active memories", &mem_count.to_string());
+    }
     print_kv(
         "Configured launchers",
         &config.llm_launchers.len().to_string(),
@@ -825,26 +519,142 @@ fn doctor(state: &StatePaths) -> Result<()> {
     Ok(())
 }
 
-fn repair(state: &StatePaths, project: Option<&str>) -> Result<()> {
+fn export_memory(
+    state: &StatePaths,
+    project: Option<&str>,
+    max_chars: usize,
+    with_markers: bool,
+) -> Result<()> {
     ensure_state(state)?;
-    match project {
-        Some(project) => {
-            let project_id = ProjectId::parse(project.to_string())?;
-            let journal = Journal::open(state.journal_path_for_project(&project_id))?;
-            let repair = journal.repair_truncated_tail()?;
-            let store = MetadataStore::open(state.sqlite_db())?;
-            store.reconcile_session(&journal, &project_id)?;
-            print_repair_result(&project_id, repair)
-        }
-        None => {
-            let project_id = resolve_project_id(state, None)?;
-            let journal = Journal::open(state.journal_path_for_project(&project_id))?;
-            let repair = journal.repair_truncated_tail()?;
-            let store = MetadataStore::open(state.sqlite_db())?;
-            store.reconcile_session(&journal, &project_id)?;
-            print_repair_result(&project_id, repair)
-        }
+    let project_id = resolve_project_id(state, project)?;
+    let store = MetadataStore::open(state.sqlite_db())?;
+    let memories = store.list_active_memories(&project_id, None)?;
+
+    let output = contynu_core::rendering::render_memory_export(&memories, max_chars, with_markers);
+    print!("{output}");
+    Ok(())
+}
+
+fn openclaw_command(
+    state: &StatePaths,
+    cwd: &std::path::PathBuf,
+    command: OpenClawCommand,
+) -> Result<()> {
+    match command {
+        OpenClawCommand::Setup { openclaw_config } => openclaw_setup(state, cwd, openclaw_config),
+        OpenClawCommand::Status => openclaw_status(state),
     }
+}
+
+fn openclaw_setup(
+    state: &StatePaths,
+    _cwd: &std::path::PathBuf,
+    openclaw_config: Option<std::path::PathBuf>,
+) -> Result<()> {
+    state.ensure_layout()?;
+    contynu_core::ContynuConfig::ensure_exists(&state.root().join("config.json"))?;
+
+    let store = MetadataStore::open(state.sqlite_db())?;
+    let project_id = match store.primary_project_id()? {
+        Some(id) => id,
+        None => {
+            let id = contynu_core::ProjectId::new();
+            store.register_session(&contynu_core::SessionRecord {
+                session_id: id.clone(),
+                project_id: None,
+                status: "active".into(),
+                cli_name: Some("openclaw".into()),
+                cli_version: None,
+                model_name: None,
+                cwd: None,
+                repo_root: None,
+                host_fingerprint: None,
+                started_at: chrono::Utc::now(),
+                ended_at: None,
+            })?;
+            store.set_primary_project_id(&id)?;
+            id
+        }
+    };
+
+    let oc_config = openclaw_config.unwrap_or_else(|| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        std::path::PathBuf::from(home)
+            .join(".openclaw")
+            .join("openclaw.json")
+    });
+    if let Err(e) =
+        mcp_registration::ensure_mcp_registered("openclaw", state.root(), &oc_config, project_id.as_str())
+    {
+        eprintln!("Warning: Could not register MCP server in OpenClaw config: {e}");
+    }
+
+    let mapping_path = state.root().join("openclaw-agents.json");
+    if !mapping_path.exists() {
+        std::fs::write(&mapping_path, "{}")?;
+    }
+
+    println!("Contynu + OpenClaw integration ready.\n");
+    println!("  State directory:  {}", state.root().display());
+    println!("  Primary project:  {}", project_id);
+    println!("  Agent mapping:    {}", mapping_path.display());
+    println!();
+    println!("Install the plugin:");
+    println!("  npm install -g contynu-openclaw");
+    println!();
+    println!("Add to your OpenClaw config ({}):", oc_config.display());
+    println!("  {{");
+    println!("    \"plugins\": {{");
+    println!("      \"contynu-openclaw\": {{ \"enabled\": true }}");
+    println!("    }}");
+    println!("  }}");
+    println!();
+    println!("Then restart OpenClaw. Every agent gets permanent memory automatically.");
+
+    Ok(())
+}
+
+fn openclaw_status(state: &StatePaths) -> Result<()> {
+    ensure_state(state)?;
+    let store = MetadataStore::open(state.sqlite_db())?;
+
+    println!("Contynu + OpenClaw integration status\n");
+    println!("  State directory:  {}", state.root().display());
+
+    match store.primary_project_id()? {
+        Some(id) => {
+            println!("  Primary project:  {}", id);
+            let total = store.count_active_memories(&id, None)?;
+            println!("  Active memories:  {}", total);
+        }
+        None => println!("  Primary project:  (none)"),
+    }
+
+    let mapping_path = state.root().join("openclaw-agents.json");
+    if mapping_path.exists() {
+        let content = std::fs::read_to_string(&mapping_path)?;
+        let map: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
+        let count = map.as_object().map_or(0, |m| m.len());
+        println!("  Mapped agents:    {}", count);
+    } else {
+        println!("  Agent mapping:    (not created)");
+    }
+
+    let oc_config_path = std::env::var("HOME")
+        .map(|h| std::path::PathBuf::from(h).join(".openclaw").join("openclaw.json"))
+        .unwrap_or_default();
+    if oc_config_path.exists() {
+        let content = std::fs::read_to_string(&oc_config_path).unwrap_or_default();
+        if content.contains("contynu") {
+            println!("  MCP server:       registered");
+        } else {
+            println!("  MCP server:       not registered (run `contynu openclaw setup`)");
+        }
+    } else {
+        println!("  OpenClaw config:  not found");
+    }
+
+    Ok(())
 }
 
 fn resolve_project_id(state: &StatePaths, explicit: Option<&str>) -> Result<ProjectId> {
@@ -868,8 +678,7 @@ fn print_run_footer(outcome: &RunOutcome) {
         vec![
             "Contynu paused here.".to_string(),
             format!(
-                "Saved turn {} in project {}.",
-                short_id(outcome.turn_id.as_str()),
+                "Project {}.",
                 short_id(outcome.project_id.as_str())
             ),
         ]
@@ -877,8 +686,7 @@ fn print_run_footer(outcome: &RunOutcome) {
         vec![
             "Let's contynu another time. Goodbye for now.".to_string(),
             format!(
-                "Saved turn {} in project {}.",
-                short_id(outcome.turn_id.as_str()),
+                "Project {}.",
                 short_id(outcome.project_id.as_str())
             ),
         ]
@@ -918,7 +726,6 @@ fn print_checkpoint_result(
     print_kv("Checkpoint", manifest.checkpoint_id.as_str());
     print_kv("Reason", &manifest.reason);
     print_kv("Created", &manifest.created_at.to_rfc3339());
-    print_kv("Last sequence", &manifest.last_seq.to_string());
     print_optional_kv("Rehydration blob", manifest.rehydration_blob_sha.as_deref());
     print_kv("Checkpoint directory", &manifest.checkpoint_dir);
     println!();
@@ -938,721 +745,8 @@ fn print_rehydration_packet(title: &str, packet: &contynu_core::RehydrationPacke
     print_section("Constraints", &packet.constraints);
     print_section("Decisions", &packet.decisions);
     print_section("Open loops", &packet.open_loops);
-    print_section("Relevant files", &packet.relevant_files);
-    let artifacts = packet
-        .relevant_artifacts
-        .iter()
-        .map(|artifact| format!("{}  {}  {}", artifact.kind, artifact.path, artifact.sha256))
-        .collect::<Vec<_>>();
-    print_section("Relevant artifacts", &artifacts);
     print_section("Recent context", &packet.recent_verbatim_context);
     print_section("Retrieval guidance", &packet.retrieval_guidance);
-    Ok(())
-}
-
-fn openclaw_command(
-    state: &StatePaths,
-    cwd: &std::path::PathBuf,
-    command: OpenClawCommand,
-) -> Result<()> {
-    match command {
-        OpenClawCommand::Setup { openclaw_config } => openclaw_setup(state, cwd, openclaw_config),
-        OpenClawCommand::Status => openclaw_status(state),
-    }
-}
-
-fn openclaw_setup(
-    state: &StatePaths,
-    _cwd: &std::path::PathBuf,
-    openclaw_config: Option<std::path::PathBuf>,
-) -> Result<()> {
-    // Initialize Contynu state
-    state.ensure_layout()?;
-    contynu_core::ContynuConfig::ensure_exists(&state.root().join("config.json"))?;
-
-    // Ensure primary project exists
-    let store = MetadataStore::open(state.sqlite_db())?;
-    let project_id = match store.primary_project_id()? {
-        Some(id) => id,
-        None => {
-            let id = contynu_core::ProjectId::new();
-            store.register_session(&contynu_core::SessionRecord {
-                session_id: id.clone(),
-                project_id: None,
-                status: "active".into(),
-                cli_name: Some("openclaw".into()),
-                cli_version: None,
-                model_name: None,
-                cwd: None,
-                repo_root: None,
-                host_fingerprint: None,
-                started_at: chrono::Utc::now(),
-                ended_at: None,
-            })?;
-            store.set_primary_project_id(&id)?;
-            id
-        }
-    };
-
-    // Register MCP server in OpenClaw config
-    let oc_config = openclaw_config.unwrap_or_else(|| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        std::path::PathBuf::from(home)
-            .join(".openclaw")
-            .join("openclaw.json")
-    });
-    if let Err(e) =
-        mcp_registration::ensure_mcp_registered("openclaw", state.root(), &oc_config, project_id.as_str())
-    {
-        eprintln!("Warning: Could not register MCP server in OpenClaw config: {e}");
-    }
-
-    // Create agent mapping file
-    let mapping_path = state.root().join("openclaw-agents.json");
-    if !mapping_path.exists() {
-        std::fs::write(&mapping_path, "{}")?;
-    }
-
-    println!("Contynu + OpenClaw integration ready.\n");
-    println!("  State directory:  {}", state.root().display());
-    println!("  Primary project:  {}", project_id);
-    println!("  Agent mapping:    {}", mapping_path.display());
-    println!();
-    println!("Install the plugin:");
-    println!("  npm install -g contynu-openclaw");
-    println!();
-    println!("Add to your OpenClaw config ({}):", oc_config.display());
-    println!("  {{");
-    println!("    \"plugins\": {{");
-    println!("      \"contynu-openclaw\": {{ \"enabled\": true }}");
-    println!("    }}");
-    println!("  }}");
-    println!();
-    println!("Then restart OpenClaw. Every agent gets permanent memory automatically.");
-
-    Ok(())
-}
-
-fn openclaw_status(state: &StatePaths) -> Result<()> {
-    ensure_state(state)?;
-    let store = MetadataStore::open(state.sqlite_db())?;
-
-    println!("Contynu + OpenClaw integration status\n");
-
-    // State dir
-    println!("  State directory:  {}", state.root().display());
-
-    // Primary project
-    match store.primary_project_id()? {
-        Some(id) => println!("  Primary project:  {}", id),
-        None => println!("  Primary project:  (none)"),
-    }
-
-    // Agent mapping
-    let mapping_path = state.root().join("openclaw-agents.json");
-    if mapping_path.exists() {
-        let content = std::fs::read_to_string(&mapping_path)?;
-        let map: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
-        let count = map.as_object().map_or(0, |m| m.len());
-        println!("  Mapped agents:    {}", count);
-    } else {
-        println!("  Agent mapping:    (not created)");
-    }
-
-    // Memory counts
-    if let Some(id) = store.primary_project_id()? {
-        let total = store.count_active_memories(&id, None)?;
-        println!("  Active memories:  {}", total);
-    }
-
-    // MCP server check
-    let oc_config_path = std::env::var("HOME")
-        .map(|h| std::path::PathBuf::from(h).join(".openclaw").join("openclaw.json"))
-        .unwrap_or_default();
-    if oc_config_path.exists() {
-        let content = std::fs::read_to_string(&oc_config_path).unwrap_or_default();
-        if content.contains("contynu") {
-            println!("  MCP server:       registered");
-        } else {
-            println!("  MCP server:       not registered (run `contynu openclaw setup`)");
-        }
-    } else {
-        println!("  OpenClaw config:  not found");
-    }
-
-    Ok(())
-}
-
-/// Auto-discover and import existing LLM session files that haven't been imported yet.
-fn auto_import_sessions(state: &StatePaths, home_dir: &str) -> Result<()> {
-    let tracking_path = state.root().join("imported-sessions.json");
-    let mut imported: std::collections::HashSet<String> = if tracking_path.exists() {
-        let content = std::fs::read_to_string(&tracking_path)?;
-        serde_json::from_str(&content).unwrap_or_default()
-    } else {
-        std::collections::HashSet::new()
-    };
-
-    let home = std::path::Path::new(home_dir);
-    let mut new_files: Vec<(std::path::PathBuf, &str)> = Vec::new();
-    // Cap total new files to import per launch for speed
-    let max_new_per_launch = 20;
-
-    // Codex rollout files
-    let codex_dir = home.join(".codex").join("sessions");
-    if codex_dir.exists() {
-        if let Ok(walker) = glob_files(&codex_dir, "rollout-*.jsonl") {
-            for path in walker {
-                let key = path.display().to_string();
-                if !imported.contains(&key) {
-                    new_files.push((path, "codex-jsonl"));
-                }
-            }
-        }
-    }
-
-    // Gemini session files
-    let gemini_dir = home.join(".gemini").join("tmp");
-    if gemini_dir.exists() {
-        if let Ok(walker) = glob_files(&gemini_dir, "session-*.json") {
-            for path in walker {
-                let key = path.display().to_string();
-                if !imported.contains(&key) {
-                    new_files.push((path, "gemini"));
-                }
-            }
-        }
-    }
-
-    // Claude Code session files
-    let claude_dir = home.join(".claude").join("projects");
-    if claude_dir.exists() {
-        if let Ok(walker) = glob_files(&claude_dir, "*.jsonl") {
-            for path in walker {
-                // Skip subagent files
-                if path.to_string_lossy().contains("subagents") { continue; }
-                let key = path.display().to_string();
-                if !imported.contains(&key) {
-                    new_files.push((path, "claude-session"));
-                }
-            }
-        }
-    }
-
-    if new_files.is_empty() {
-        return Ok(());
-    }
-    // Cap per launch for speed
-    new_files.truncate(max_new_per_launch);
-
-    // Import new files
-    let store = MetadataStore::open(state.sqlite_db())?;
-    let project_id = match store.primary_project_id()? {
-        Some(id) => id,
-        None => return Ok(()), // no project yet
-    };
-    let journal = contynu_core::Journal::open(state.journal_path_for_project(&project_id))?;
-
-    let mut total_imported = 0usize;
-    for (path, format) in &new_files {
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        if content.len() < 50 { continue; } // skip tiny/empty files
-
-        let turn_id = contynu_core::TurnId::new();
-        store.register_turn(&contynu_core::TurnRecord {
-            turn_id: turn_id.clone(),
-            session_id: project_id.clone(),
-            status: "started".into(),
-            started_at: chrono::Utc::now(),
-            completed_at: None,
-            summary_memory_id: None,
-        })?;
-
-        let mut event_count = 0usize;
-        match *format {
-            "gemini" => {
-                if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(messages) = data.get("messages").and_then(|m| m.as_array()) {
-                        for msg in messages {
-                            let msg_type = msg.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                            let text = msg.get("content").and_then(|c| c.as_array())
-                                .map(|parts| parts.iter().filter_map(|p| p.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join("\n"))
-                                .unwrap_or_default();
-                            if text.is_empty() || text.len() < 5 { continue; }
-                            let (et, actor) = match msg_type {
-                                "user" => ("message_input", "user"),
-                                "model" => ("message_output", "assistant"),
-                                _ => continue,
-                            };
-                            if let Ok(il) = serde_json::from_value::<contynu_core::event::IngestLine>(serde_json::json!({"event_type": et, "actor": actor, "payload": {"content": [{"type": "text", "text": text}]}})) {
-                                let draft = il.into_draft(project_id.clone(), Some(turn_id.clone()));
-                                if let Ok((event, append)) = journal.append(draft) {
-                                    let _ = store.record_event(&event, &journal.path().display().to_string(), append);
-                                    event_count += 1;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            "codex-jsonl" => {
-                for line in content.lines() {
-                    let line = line.trim();
-                    if line.is_empty() { continue; }
-                    if let Ok(obj) = serde_json::from_str::<serde_json::Value>(line) {
-                        if obj.get("type").and_then(|t| t.as_str()) != Some("response_item") { continue; }
-                        if let Some(payload) = obj.get("payload") {
-                            let role = payload.get("role").and_then(|r| r.as_str()).unwrap_or("");
-                            let text = payload.get("content").and_then(|c| c.as_array())
-                                .map(|parts| parts.iter().filter_map(|p| p.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join("\n"))
-                                .unwrap_or_default();
-                            if text.is_empty() || text.len() < 5 { continue; }
-                            let (et, actor) = match role {
-                                "user" => ("message_input", "user"),
-                                "assistant" => ("message_output", "assistant"),
-                                _ => continue,
-                            };
-                            if let Ok(il) = serde_json::from_value::<contynu_core::event::IngestLine>(serde_json::json!({"event_type": et, "actor": actor, "payload": {"content": [{"type": "text", "text": text}]}})) {
-                                let draft = il.into_draft(project_id.clone(), Some(turn_id.clone()));
-                                if let Ok((event, append)) = journal.append(draft) {
-                                    let _ = store.record_event(&event, &journal.path().display().to_string(), append);
-                                    event_count += 1;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            "claude-session" => {
-                // Claude Code session JSONL: type=user/assistant with message.content
-                for line in content.lines() {
-                    let line = line.trim();
-                    if line.is_empty() { continue; }
-                    if let Ok(obj) = serde_json::from_str::<serde_json::Value>(line) {
-                        let msg_type = obj.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                        match msg_type {
-                            "user" => {
-                                let text = obj.get("message").and_then(|m| m.get("content"))
-                                    .and_then(|c| c.as_str())
-                                    .unwrap_or("");
-                                if text.len() < 5 { continue; }
-                                if let Ok(il) = serde_json::from_value::<contynu_core::event::IngestLine>(
-                                    serde_json::json!({"event_type": "message_input", "actor": "user", "payload": {"content": [{"type": "text", "text": text}]}})
-                                ) {
-                                    let draft = il.into_draft(project_id.clone(), Some(turn_id.clone()));
-                                    if let Ok((event, append)) = journal.append(draft) {
-                                        let _ = store.record_event(&event, &journal.path().display().to_string(), append);
-                                        event_count += 1;
-                                    }
-                                }
-                            }
-                            "assistant" => {
-                                let text = obj.get("message").and_then(|m| m.get("content"))
-                                    .and_then(|c| c.as_array())
-                                    .map(|parts| parts.iter()
-                                        .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
-                                        .collect::<Vec<_>>().join("\n"))
-                                    .unwrap_or_default();
-                                if text.len() < 5 { continue; }
-                                if let Ok(il) = serde_json::from_value::<contynu_core::event::IngestLine>(
-                                    serde_json::json!({"event_type": "message_output", "actor": "assistant", "payload": {"content": [{"type": "text", "text": text}]}})
-                                ) {
-                                    let draft = il.into_draft(project_id.clone(), Some(turn_id.clone()));
-                                    if let Ok((event, append)) = journal.append(draft) {
-                                        let _ = store.record_event(&event, &journal.path().display().to_string(), append);
-                                        event_count += 1;
-                                    }
-                                }
-                            }
-                            _ => continue,
-                        }
-                    }
-                }
-            }
-            _ => continue,
-        }
-
-        if event_count > 0 {
-            let _ = contynu_core::derive_memory_from_ingested_events(
-                &journal, &store, &project_id, &turn_id,
-                Some(format.to_string()), None,
-            );
-            total_imported += 1;
-        }
-        store.update_turn_status(&turn_id, "completed", Some(chrono::Utc::now()))?;
-        imported.insert(path.display().to_string());
-    }
-
-    // Save tracking file
-    std::fs::write(&tracking_path, serde_json::to_string_pretty(&imported)?)?;
-
-    if total_imported > 0 {
-        eprintln!(
-            "Auto-imported {} session file(s) from Claude/Codex/Gemini history",
-            total_imported
-        );
-    }
-    Ok(())
-}
-
-/// Walk a directory recursively and find files matching a pattern.
-fn glob_files(dir: &std::path::Path, pattern: &str) -> Result<Vec<std::path::PathBuf>> {
-    let mut results = Vec::new();
-    for entry in walkdir::WalkDir::new(dir)
-        .max_depth(4)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if entry.file_type().is_file() {
-            if let Some(name) = entry.file_name().to_str() {
-                if matches_simple_glob(name, pattern) {
-                    // Skip files over 5MB to avoid ingesting huge sessions
-                    if entry.metadata().map_or(false, |m| m.len() < 5_000_000) {
-                        results.push(entry.into_path());
-                    }
-                }
-            }
-        }
-        // Cap at 100 files to avoid scanning forever
-        if results.len() >= 100 {
-            break;
-        }
-    }
-    Ok(results)
-}
-
-fn matches_simple_glob(name: &str, pattern: &str) -> bool {
-    if let Some(suffix) = pattern.strip_prefix('*') {
-        name.ends_with(suffix)
-    } else if let Some((prefix, suffix)) = pattern.split_once('*') {
-        name.starts_with(prefix) && name.ends_with(suffix)
-    } else {
-        name == pattern
-    }
-}
-
-fn import_conversations(
-    state: &StatePaths,
-    project: Option<&str>,
-    files: &[std::path::PathBuf],
-    format: &str,
-    adapter: Option<&str>,
-) -> Result<()> {
-    ensure_state(state)?;
-    let project_id = resolve_project_id(state, project)?;
-    let journal = contynu_core::Journal::open(state.journal_path_for_project(&project_id))?;
-    let store = MetadataStore::open(state.sqlite_db())?;
-
-    let mut total_events = 0usize;
-    let mut total_memories = 0usize;
-
-    for file_path in files {
-        let content = std::fs::read_to_string(file_path)
-            .map_err(|e| anyhow!("Failed to read {}: {e}", file_path.display()))?;
-
-        let detected_format = if format == "auto" {
-            if file_path.extension().map_or(false, |ext| ext == "jsonl") {
-                // Check if it's Codex rollout (has "type":"session_meta") or Claude JSONL
-                if content.contains("session_meta") || content.contains("response_item") {
-                    "codex-jsonl"
-                } else {
-                    "claude-jsonl"
-                }
-            } else if content.contains("\"sessionId\"") && content.contains("\"messages\"") {
-                "gemini"
-            } else if content.contains("\"mapping\"") && content.contains("\"message\"") {
-                "chatgpt"
-            } else if content.trim_start().starts_with('[') || content.trim_start().starts_with('{') {
-                "chatgpt"
-            } else {
-                "text"
-            }
-        } else {
-            format
-        };
-
-        let turn_id = contynu_core::TurnId::new();
-        store.register_turn(&contynu_core::TurnRecord {
-            turn_id: turn_id.clone(),
-            session_id: project_id.clone(),
-            status: "started".into(),
-            started_at: chrono::Utc::now(),
-            completed_at: None,
-            summary_memory_id: None,
-        })?;
-
-        let adapter_name = adapter.unwrap_or(detected_format);
-        let mut event_count = 0usize;
-
-        match detected_format {
-            "claude-jsonl" => {
-                // Claude Code JSONL: one JSON object per line with role + content
-                for line in content.lines() {
-                    let line = line.trim();
-                    if line.is_empty() { continue; }
-                    if let Ok(obj) = serde_json::from_str::<serde_json::Value>(line) {
-                        let role = obj.get("role").and_then(|v| v.as_str()).unwrap_or("system");
-                        let text = obj.get("content").and_then(|v| v.as_str())
-                            .or_else(|| obj.get("text").and_then(|v| v.as_str()))
-                            .unwrap_or("");
-                        if text.is_empty() { continue; }
-                        let (event_type, actor) = match role {
-                            "user" | "human" => ("message_input", "user"),
-                            "assistant" => ("message_output", "assistant"),
-                            _ => ("message_output", "system"),
-                        };
-                        let ingest_line = contynu_core::IngestLine {
-                            event_type: serde_json::from_value(serde_json::json!(event_type))?,
-                            actor: serde_json::from_value(serde_json::json!(actor))?,
-                            payload: serde_json::json!({"content": [{"type": "text", "text": text}]}),
-                            ts: None,
-                        };
-                        let draft = ingest_line.into_draft(project_id.clone(), Some(turn_id.clone()));
-                        let (event, append) = journal.append(draft)?;
-                        store.record_event(&event, &journal.path().display().to_string(), append)?;
-                        event_count += 1;
-                    }
-                }
-            }
-            "chatgpt" => {
-                // ChatGPT conversations.json export
-                let data: serde_json::Value = serde_json::from_str(&content)
-                    .map_err(|e| anyhow!("Failed to parse ChatGPT JSON: {e}"))?;
-                let conversations = if data.is_array() { data.as_array().cloned().unwrap_or_default() } else { vec![data] };
-                for convo in conversations {
-                    let mapping = convo.get("mapping").and_then(|m| m.as_object());
-                    if let Some(mapping) = mapping {
-                        for (_id, node) in mapping {
-                            let msg = node.get("message");
-                            if let Some(msg) = msg {
-                                let role = msg.get("author").and_then(|a| a.get("role")).and_then(|r| r.as_str()).unwrap_or("system");
-                                let parts = msg.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array());
-                                let text = parts.map(|ps| ps.iter().filter_map(|p| p.as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default();
-                                if text.is_empty() { continue; }
-                                let (event_type, actor) = match role {
-                                    "user" => ("message_input", "user"),
-                                    "assistant" => ("message_output", "assistant"),
-                                    _ => continue,
-                                };
-                                let ingest_line = contynu_core::IngestLine {
-                                    event_type: serde_json::from_value(serde_json::json!(event_type))?,
-                                    actor: serde_json::from_value(serde_json::json!(actor))?,
-                                    payload: serde_json::json!({"content": [{"type": "text", "text": text}]}),
-                                    ts: msg.get("create_time").and_then(|t| t.as_f64()).map(|ts| {
-                                        chrono::DateTime::from_timestamp(ts as i64, 0).map(|dt| dt.to_utc())
-                                    }).flatten(),
-                                };
-                                let draft = ingest_line.into_draft(project_id.clone(), Some(turn_id.clone()));
-                                let (event, append) = journal.append(draft)?;
-                                store.record_event(&event, &journal.path().display().to_string(), append)?;
-                                event_count += 1;
-                            }
-                        }
-                    }
-                }
-            }
-            "gemini" => {
-                // Gemini CLI session JSON: {"sessionId", "messages": [{"type": "user"|"model", "content": [{"text"}]}]}
-                let data: serde_json::Value = serde_json::from_str(&content)
-                    .map_err(|e| anyhow!("Failed to parse Gemini JSON: {e}"))?;
-                let messages = data.get("messages").and_then(|m| m.as_array());
-                if let Some(messages) = messages {
-                    for msg in messages {
-                        let msg_type = msg.get("type").and_then(|t| t.as_str()).unwrap_or("system");
-                        let text = msg.get("content")
-                            .and_then(|c| c.as_array())
-                            .map(|parts| parts.iter().filter_map(|p| p.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join("\n"))
-                            .unwrap_or_default();
-                        if text.is_empty() { continue; }
-                        let (event_type, actor) = match msg_type {
-                            "user" => ("message_input", "user"),
-                            "model" => ("message_output", "assistant"),
-                            _ => continue,
-                        };
-                        let ts = msg.get("timestamp").and_then(|t| t.as_str())
-                            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                            .map(|dt| dt.with_timezone(&chrono::Utc));
-                        let ingest_line = contynu_core::IngestLine {
-                            event_type: serde_json::from_value(serde_json::json!(event_type))?,
-                            actor: serde_json::from_value(serde_json::json!(actor))?,
-                            payload: serde_json::json!({"content": [{"type": "text", "text": text}]}),
-                            ts,
-                        };
-                        let draft = ingest_line.into_draft(project_id.clone(), Some(turn_id.clone()));
-                        let (event, append) = journal.append(draft)?;
-                        store.record_event(&event, &journal.path().display().to_string(), append)?;
-                        event_count += 1;
-                    }
-                }
-            }
-            "codex-jsonl" => {
-                // Codex CLI rollout JSONL: {"type":"response_item","payload":{"type":"message","role":"user"|"assistant","content":[{"text"}]}}
-                for line in content.lines() {
-                    let line = line.trim();
-                    if line.is_empty() { continue; }
-                    if let Ok(obj) = serde_json::from_str::<serde_json::Value>(line) {
-                        let item_type = obj.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                        if item_type != "response_item" { continue; }
-                        let payload = match obj.get("payload") { Some(p) => p, None => continue };
-                        let role = payload.get("role").and_then(|r| r.as_str()).unwrap_or("");
-                        let text = payload.get("content")
-                            .and_then(|c| c.as_array())
-                            .map(|parts| parts.iter()
-                                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
-                                .collect::<Vec<_>>().join("\n"))
-                            .unwrap_or_default();
-                        if text.is_empty() || text.len() < 5 { continue; }
-                        let (event_type, actor) = match role {
-                            "user" => ("message_input", "user"),
-                            "assistant" => ("message_output", "assistant"),
-                            _ => continue,
-                        };
-                        let ingest_line = contynu_core::IngestLine {
-                            event_type: serde_json::from_value(serde_json::json!(event_type))?,
-                            actor: serde_json::from_value(serde_json::json!(actor))?,
-                            payload: serde_json::json!({"content": [{"type": "text", "text": text}]}),
-                            ts: obj.get("timestamp").and_then(|t| t.as_str())
-                                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                                .map(|dt| dt.with_timezone(&chrono::Utc)),
-                        };
-                        let draft = ingest_line.into_draft(project_id.clone(), Some(turn_id.clone()));
-                        let (event, append) = journal.append(draft)?;
-                        store.record_event(&event, &journal.path().display().to_string(), append)?;
-                        event_count += 1;
-                    }
-                }
-            }
-            _ => {
-                // Plain text: treat entire file as one message
-                let ingest_line = contynu_core::IngestLine {
-                    event_type: serde_json::from_value(serde_json::json!("message_output"))?,
-                    actor: serde_json::from_value(serde_json::json!("assistant"))?,
-                    payload: serde_json::json!({"content": [{"type": "text", "text": content}]}),
-                    ts: None,
-                };
-                let draft = ingest_line.into_draft(project_id.clone(), Some(turn_id.clone()));
-                let (event, append) = journal.append(draft)?;
-                store.record_event(&event, &journal.path().display().to_string(), append)?;
-                event_count += 1;
-            }
-        }
-
-        let memory_count = if event_count > 0 {
-            contynu_core::derive_memory_from_ingested_events(
-                &journal, &store, &project_id, &turn_id,
-                Some(adapter_name.to_string()), None,
-            )?
-        } else {
-            0
-        };
-
-        store.update_turn_status(&turn_id, "completed", Some(chrono::Utc::now()))?;
-        total_events += event_count;
-        total_memories += memory_count;
-        eprintln!(
-            "Imported {} ({} format): {} events, {} memories",
-            file_path.display(), detected_format, event_count, memory_count
-        );
-    }
-
-    eprintln!(
-        "Total: {} events, {} memories imported into project {}",
-        total_events, total_memories, project_id
-    );
-    Ok(())
-}
-
-fn ingest(
-    state: &StatePaths,
-    project: Option<&str>,
-    adapter: Option<&str>,
-    model: Option<&str>,
-    derive_memory: bool,
-) -> Result<()> {
-    ensure_state(state)?;
-    let project_id = resolve_project_id(state, project)?;
-    let journal = contynu_core::Journal::open(state.journal_path_for_project(&project_id))?;
-    let store = MetadataStore::open(state.sqlite_db())?;
-    let turn_id = contynu_core::TurnId::new();
-
-    // Register turn
-    store.register_turn(&contynu_core::TurnRecord {
-        turn_id: turn_id.clone(),
-        session_id: project_id.clone(),
-        status: "started".into(),
-        started_at: chrono::Utc::now(),
-        completed_at: None,
-        summary_memory_id: None,
-    })?;
-
-    let stdin = std::io::stdin().lock();
-    let mut event_count = 0usize;
-
-    for line in std::io::BufRead::lines(stdin) {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let ingest_line: contynu_core::IngestLine = serde_json::from_str(&line)
-            .map_err(|e| anyhow!("Failed to parse ingest line: {e}\nLine: {line}"))?;
-        let draft = ingest_line.into_draft(project_id.clone(), Some(turn_id.clone()));
-        let (event, append) = journal.append(draft)?;
-        store.record_event(&event, &journal.path().display().to_string(), append)?;
-        event_count += 1;
-    }
-
-    let memory_count = if derive_memory && event_count > 0 {
-        contynu_core::derive_memory_from_ingested_events(
-            &journal,
-            &store,
-            &project_id,
-            &turn_id,
-            adapter.map(String::from),
-            model.map(String::from),
-        )?
-    } else {
-        0
-    };
-
-    store.update_turn_status(&turn_id, "completed", Some(chrono::Utc::now()))?;
-    eprintln!(
-        "Ingested {} events, derived {} memory objects for project {}",
-        event_count, memory_count, project_id
-    );
-    Ok(())
-}
-
-fn export_memory(
-    state: &StatePaths,
-    project: Option<&str>,
-    max_chars: usize,
-    with_markers: bool,
-) -> Result<()> {
-    ensure_state(state)?;
-    let project_id = resolve_project_id(state, project)?;
-    let store = MetadataStore::open(state.sqlite_db())?;
-    let memories = store.list_active_memory_objects(&project_id, None)?;
-
-    let output = contynu_core::rendering::render_memory_export(&memories, max_chars, with_markers);
-    print!("{output}");
-    Ok(())
-}
-
-fn print_repair_result(project_id: &ProjectId, repair: contynu_core::JournalRepair) -> Result<()> {
-    println!("Repair complete");
-    println!();
-    print_kv("Project", project_id.as_str());
-    print_kv("Tail repaired", yes_no(repair.repaired));
-    print_kv("Truncated at byte", &repair.truncated_at.to_string());
-    Ok(())
-}
-
-fn print_pretty_json_value(value: &Value) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }
 
@@ -1681,21 +775,6 @@ fn print_section(title: &str, items: &[String]) {
 
 fn one_line(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn summarize_json(value: &Value) -> String {
-    let rendered = value.to_string();
-    if rendered.len() > 160 {
-        format!("{}...", &rendered[..160])
-    } else {
-        rendered
-    }
-}
-
-fn format_turn_suffix(turn_id: Option<&contynu_core::TurnId>) -> String {
-    turn_id
-        .map(|turn| format!("  [{}]", turn))
-        .unwrap_or_default()
 }
 
 fn yes_no(value: bool) -> &'static str {
