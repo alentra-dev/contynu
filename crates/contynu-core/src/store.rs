@@ -75,6 +75,21 @@ impl MemoryObjectKind {
             _ => None,
         }
     }
+
+    pub fn from_legacy_compatible_str(s: &str) -> Self {
+        match s {
+            "summary" | "knowledge" | "note" => Self::ProjectKnowledge,
+            "project_fact" => Self::Fact,
+            "task" => Self::Todo,
+            "user_preference" | "user-preference" | "preference" => Self::UserFact,
+            other => Self::from_str(other).unwrap_or_else(|| {
+                eprintln!(
+                    "[contynu] Warning: unknown legacy memory kind `{other}`; treating it as project_knowledge"
+                );
+                Self::ProjectKnowledge
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -100,6 +115,18 @@ impl MemoryScope {
             "project" => Some(Self::Project),
             "session" => Some(Self::Session),
             _ => None,
+        }
+    }
+
+    pub fn from_legacy_compatible_str(s: &str) -> Self {
+        match s {
+            "global" => Self::User,
+            other => Self::from_str(other).unwrap_or_else(|| {
+                eprintln!(
+                    "[contynu] Warning: unknown legacy memory scope `{other}`; treating it as project"
+                );
+                Self::Project
+            }),
         }
     }
 }
@@ -1156,10 +1183,8 @@ const MEMORY_COLUMNS: &str = r#"
 "#;
 
 fn map_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryObject> {
-    let kind = MemoryObjectKind::from_str(&row.get::<_, String>(2)?)
-        .ok_or_else(|| into_sql_error(ContynuError::Validation("unknown memory kind".into())))?;
-    let scope = MemoryScope::from_str(&row.get::<_, String>(3)?)
-        .ok_or_else(|| into_sql_error(ContynuError::Validation("unknown memory scope".into())))?;
+    let kind = MemoryObjectKind::from_legacy_compatible_str(&row.get::<_, String>(2)?);
+    let scope = MemoryScope::from_legacy_compatible_str(&row.get::<_, String>(3)?);
 
     Ok(MemoryObject {
         memory_id: MemoryId::parse(row.get::<_, String>(0)?).map_err(into_sql_error)?,
@@ -1276,9 +1301,25 @@ mod tests {
                 "SELECT scope FROM memory_objects WHERE memory_id = 'mem_test'",
                 [],
                 |row| row.get(0),
-            )
-            .unwrap();
+        )
+        .unwrap();
         assert_eq!(scope, "project");
+    }
+
+    #[test]
+    fn legacy_summary_kind_is_mapped_to_project_knowledge() {
+        assert_eq!(
+            MemoryObjectKind::from_legacy_compatible_str("summary"),
+            MemoryObjectKind::ProjectKnowledge
+        );
+    }
+
+    #[test]
+    fn unknown_legacy_kind_falls_back_to_project_knowledge() {
+        assert_eq!(
+            MemoryObjectKind::from_legacy_compatible_str("mystery_kind"),
+            MemoryObjectKind::ProjectKnowledge
+        );
     }
 
     #[test]

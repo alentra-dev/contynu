@@ -27,8 +27,8 @@ contynu doctor
 
 ```bash
 cargo build --release -p contynu-cli
-git tag v0.5.2
-git push origin v0.5.2
+git tag v0.5.3
+git push origin v0.5.3
 ```
 
 Tagged releases publish prebuilt binaries and the user-facing installer scripts through the GitHub Actions release workflow.

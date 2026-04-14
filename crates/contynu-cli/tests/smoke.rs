@@ -132,7 +132,7 @@ fn version_flag_reports_current_release() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("contynu 0.5.2"));
+    assert!(stdout.contains(&format!("contynu {}", env!("CARGO_PKG_VERSION"))));
 }
 
 #[test]
