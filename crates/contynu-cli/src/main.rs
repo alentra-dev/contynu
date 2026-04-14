@@ -16,6 +16,7 @@ use contynu_core::{
 #[derive(Debug, Parser)]
 #[command(name = "contynu")]
 #[command(about = "Local-first continuity engine for LLM workflows")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 struct Cli {
     #[arg(long, global = true, default_value = ".contynu")]
     state_dir: PathBuf,

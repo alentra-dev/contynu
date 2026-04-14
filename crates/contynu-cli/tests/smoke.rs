@@ -124,6 +124,18 @@ fn init_and_doctor_work() {
 }
 
 #[test]
+fn version_flag_reports_current_release() {
+    let output = contynu_cmd().arg("--version").output().unwrap();
+    assert!(
+        output.status.success(),
+        "--version failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("contynu 0.5.2"));
+}
+
+#[test]
 fn project_is_created_and_reused_by_default() {
     let dir = tempdir().unwrap();
     let state_dir = dir.path().join(".contynu");
