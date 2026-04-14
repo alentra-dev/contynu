@@ -1,6 +1,6 @@
 # Contynu — Complete Technical Overview
 
-**Version:** 0.5.1+ | **Created:** April 2026 | **Language:** Rust + TypeScript (OpenClaw plugin)
+**Version:** 0.5.2+ | **Created:** April 2026 | **Language:** Rust + TypeScript (OpenClaw plugin)
 **Creators:** Udonna Eke-Okoro & Kelenna Eke-Okoro
 **License:** Mozilla Public License 2.0
 **Website:** [contynu.com](https://contynu.com) | **Source:** [github.com/alentra-dev/contynu](https://github.com/alentra-dev/contynu)

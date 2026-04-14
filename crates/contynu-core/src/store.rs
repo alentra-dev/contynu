@@ -346,6 +346,7 @@ impl MetadataStore {
 
             if has_v5_memories {
                 eprintln!("[contynu] Warning: skipping migration drop — memory_objects has active data despite schema_version < 5");
+                self.normalize_preserved_live_schema()?;
             } else {
                 eprintln!(
                     "[contynu] Migrating from v{current_version} to v5: dropping legacy tables"
@@ -408,6 +409,65 @@ impl MetadataStore {
             params!["schema_version", "8", Utc::now().to_rfc3339()],
         )?;
 
+        Ok(())
+    }
+
+    fn normalize_preserved_live_schema(&self) -> Result<()> {
+        if self.table_exists("memory_objects")? {
+            self.ensure_column(
+                "memory_objects",
+                "scope",
+                "TEXT NOT NULL DEFAULT 'project'",
+            )?;
+            self.ensure_column("memory_objects", "reason", "TEXT")?;
+            self.ensure_column("memory_objects", "source_model", "TEXT")?;
+            self.ensure_column("memory_objects", "superseded_by", "TEXT")?;
+            self.ensure_column("memory_objects", "updated_at", "TEXT")?;
+            self.ensure_column("memory_objects", "access_count", "INTEGER DEFAULT 0")?;
+            self.ensure_column("memory_objects", "last_accessed_at", "TEXT")?;
+        }
+
+        if self.table_exists("prompts")? {
+            self.ensure_column("prompts", "interpretation", "TEXT")?;
+            self.ensure_column("prompts", "interpretation_confidence", "REAL")?;
+            self.ensure_column("prompts", "source_model", "TEXT")?;
+        }
+
+        Ok(())
+    }
+
+    fn table_exists(&self, table: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                [table],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            > 0)
+    }
+
+    fn column_exists(&self, table: &str, column: &str) -> Result<bool> {
+        let pragma = format!("PRAGMA table_info({table})");
+        let mut stmt = self.conn.prepare(&pragma)?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        for existing in rows {
+            if existing? == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn ensure_column(&self, table: &str, column: &str, definition: &str) -> Result<()> {
+        if self.column_exists(table, column)? {
+            return Ok(());
+        }
+        self.conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+            [],
+        )?;
         Ok(())
     }
 
@@ -1176,6 +1236,49 @@ mod tests {
             .unwrap();
         store.set_primary_project_id(&session_id).unwrap();
         assert_eq!(store.primary_project_id().unwrap().unwrap(), session_id);
+    }
+
+    #[test]
+    fn preserved_live_memory_objects_gain_missing_scope_column() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("contynu.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE memory_objects (
+              memory_id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              status TEXT NOT NULL,
+              text TEXT NOT NULL,
+              importance REAL NOT NULL DEFAULT 0.5,
+              created_at TEXT NOT NULL
+            );
+            INSERT INTO memory_objects (memory_id, session_id, kind, status, text, importance, created_at)
+            VALUES ('mem_test', 'prj_test', 'fact', 'active', 'Legacy memory', 0.8, '2026-04-13T00:00:00Z');
+            CREATE TABLE schema_meta (
+              key TEXT PRIMARY KEY,
+              value TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            INSERT INTO schema_meta (key, value, updated_at)
+            VALUES ('schema_version', '4', '2026-04-13T00:00:00Z');
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = MetadataStore::open(&db).unwrap();
+        assert!(store.column_exists("memory_objects", "scope").unwrap());
+        let scope: String = store
+            .conn
+            .query_row(
+                "SELECT scope FROM memory_objects WHERE memory_id = 'mem_test'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(scope, "project");
     }
 
     #[test]
