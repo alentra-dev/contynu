@@ -6,6 +6,12 @@ Cargo.lock
 # Local state
 .contynu/
 
+# Contynu runtime artifacts in the working tree
+.mcp.json
+.*.contynu-backup
+# Stray terminal-session dump from `script`
+/typescript
+
 # Editors and OS
 .DS_Store
 .idea/

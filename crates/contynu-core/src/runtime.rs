@@ -130,6 +130,11 @@ impl RuntimeEngine {
         let store = MetadataStore::open(state.sqlite_db())?;
         let config_file = ContynuConfig::load(&state.config_path())?;
         let blob_store = BlobStore::new(state.blobs_root());
+
+        // If a previous run crashed before restoring the user's files, put
+        // them back before we write our merged copies. Keeps the working tree
+        // clean across model swaps even when something went wrong last time.
+        let _ = reconcile_orphan_context_backups(&state, &config.cwd);
         let resolved_project = config.project_id.clone().or(store.primary_project_id()?);
         let continuing_session = resolved_project.is_some();
         let session_id = match resolved_project {
@@ -192,7 +197,7 @@ impl RuntimeEngine {
 
         // Write context files for adapters that read project instructions from files.
         let context_file = if let Some(ref hydration) = hydration {
-            write_context_file(&config.cwd, &adapter, &hydration.prompt_text)?
+            write_context_file(&state, &config.cwd, &adapter, &hydration.prompt_text)?
         } else {
             None
         };
@@ -211,7 +216,7 @@ impl RuntimeEngine {
 
         // Restore original context file after execution.
         if let Some(ref path) = context_file {
-            cleanup_context_file(path);
+            cleanup_context_file(&state, path);
         }
 
         store.update_session_status(
@@ -292,7 +297,7 @@ impl RuntimeEngine {
 
         let mut child = command
             .spawn()
-            .map_err(|error| ContynuError::CommandStart(error.to_string()))?;
+            .map_err(classify_spawn_error)?;
 
         if let Some(mut stdin) = child.stdin.take() {
             if let Some(stdin_prelude) = &launch_plan.stdin_prelude {
@@ -355,7 +360,7 @@ impl RuntimeEngine {
 
         let child = command
             .spawn()
-            .map_err(|error| ContynuError::CommandStart(error.to_string()))?;
+            .map_err(classify_spawn_error)?;
 
         let child = Arc::new(Mutex::new(child));
         install_ctrlc_handler(Arc::clone(&child), interrupted);
@@ -482,7 +487,7 @@ impl RuntimeEngine {
 
         let mut child = command
             .spawn()
-            .map_err(|error| ContynuError::CommandStart(error.to_string()))?;
+            .map_err(classify_spawn_error)?;
 
         let stdout = child
             .stdout
@@ -556,61 +561,145 @@ impl RuntimeEngine {
     }
 }
 
-/// Write a context file (AGENTS.md, GEMINI.md) in the working directory so that
-/// LLM CLIs pick up the rehydration context automatically.
+/// Filename + marker-name for each adapter that uses a working-directory
+/// context file (Codex/Claude/Gemini auto-read these). The marker keeps our
+/// injected block identifiable across model swaps so we can merge / unmerge
+/// without touching the user's own content.
+const CONTEXT_FILES: &[(crate::AdapterKind, &str, &str)] = &[
+    (crate::AdapterKind::CodexCli, "AGENTS.md", "codex"),
+    (crate::AdapterKind::ClaudeCli, "CLAUDE.md", "claude"),
+    (crate::AdapterKind::GeminiCli, "GEMINI.md", "gemini"),
+];
+
+fn context_file_spec(kind: crate::AdapterKind) -> Option<(&'static str, &'static str)> {
+    CONTEXT_FILES
+        .iter()
+        .find(|(k, _, _)| *k == kind)
+        .map(|(_, filename, marker)| (*filename, *marker))
+}
+
+fn context_backup_root(state: &StatePaths) -> std::path::PathBuf {
+    // Kept outside `runtime/` on purpose: `cleanup_old_architecture` wipes
+    // `runtime/` on every run, and losing a crash-recovery backup would
+    // permanently clobber the user's original file.
+    state.root().join("context-backups")
+}
+
+fn backup_paths(state: &StatePaths, filename: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = context_backup_root(state);
+    (
+        dir.join(format!("{filename}.backup")),
+        dir.join(format!("{filename}.no-original")),
+    )
+}
+
+fn merged_context(prompt_text: &str, marker: &str, existing: &str) -> String {
+    format!(
+        "<!-- contynu:{marker}:start -->\n{prompt_text}\n<!-- contynu:{marker}:end -->\n\n## Repository Instructions\n\nFollow the repository instructions below together with the carried-forward working state above.\n\n{existing}"
+    )
+}
+
+fn standalone_context(prompt_text: &str, marker: &str) -> String {
+    format!("<!-- contynu:{marker}:start -->\n{prompt_text}\n<!-- contynu:{marker}:end -->\n")
+}
+
+/// Write a context file (AGENTS.md, CLAUDE.md, GEMINI.md) in the working
+/// directory so LLM CLIs pick up continuity automatically. The user's
+/// original file — if any — is copied into the state dir so crashes never
+/// pollute the working tree.
 fn write_context_file(
+    state: &StatePaths,
     cwd: &std::path::Path,
     adapter: &AdapterSpec,
     prompt_text: &str,
 ) -> crate::error::Result<Option<std::path::PathBuf>> {
-    let filename = match adapter.kind() {
-        crate::AdapterKind::CodexCli => "AGENTS.md",
-        crate::AdapterKind::GeminiCli => "GEMINI.md",
-        _ => return Ok(None),
+    let Some((filename, marker)) = context_file_spec(adapter.kind()) else {
+        return Ok(None);
     };
 
     let path = cwd.join(filename);
-    let backup_path = cwd.join(format!(".{}.contynu-backup", filename));
+    let backup_dir = context_backup_root(state);
+    std::fs::create_dir_all(&backup_dir)?;
+    let (backup_path, no_original_path) = backup_paths(state, filename);
+
+    // Clear stale sentinels from a prior run before taking a new snapshot.
+    let _ = std::fs::remove_file(&backup_path);
+    let _ = std::fs::remove_file(&no_original_path);
+
     if path.exists() {
         std::fs::copy(&path, &backup_path)?;
         let existing = std::fs::read_to_string(&path).unwrap_or_default();
-        let merged = match adapter.kind() {
-            crate::AdapterKind::CodexCli => format!(
-                "<!-- contynu:codex:start -->\n{}\n<!-- contynu:codex:end -->\n\n## Repository Instructions\n\nFollow the repository instructions below together with the carried-forward working state above.\n\n{}",
-                prompt_text, existing
-            ),
-            _ => format!(
-                "{}\n\n---\n# Original {} content below\n---\n\n{}",
-                prompt_text, filename, existing
-            ),
-        };
-        std::fs::write(&path, merged)?;
+        std::fs::write(&path, merged_context(prompt_text, marker, &existing))?;
     } else {
-        let content = match adapter.kind() {
-            crate::AdapterKind::CodexCli => format!(
-                "<!-- contynu:codex:start -->\n{}\n<!-- contynu:codex:end -->\n",
-                prompt_text
-            ),
-            _ => prompt_text.to_string(),
-        };
-        std::fs::write(&path, content)?;
+        // Sentinel: we created the file, so restore means "delete it".
+        std::fs::write(&no_original_path, b"")?;
+        std::fs::write(&path, standalone_context(prompt_text, marker))?;
     }
 
     Ok(Some(path))
 }
 
-fn cleanup_context_file(path: &std::path::Path) {
-    let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
-    let backup = path
-        .parent()
-        .unwrap_or(path)
-        .join(format!(".{}.contynu-backup", filename));
+fn cleanup_context_file(state: &StatePaths, path: &std::path::Path) {
+    let Some(filename) = path.file_name().and_then(|f| f.to_str()) else {
+        return;
+    };
+    let (backup_path, no_original_path) = backup_paths(state, filename);
 
-    if backup.exists() {
-        let _ = std::fs::rename(&backup, path);
-    } else {
+    if no_original_path.exists() {
         let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(&no_original_path);
+    } else if backup_path.exists() {
+        let _ = std::fs::rename(&backup_path, path);
     }
+}
+
+/// If a previous run crashed before `cleanup_context_file` ran, the user is
+/// left with our merged file in the working tree and a sentinel in the state
+/// dir. On the next startup, undo the merge before doing anything else so the
+/// user never has to clean up after us.
+fn reconcile_orphan_context_backups(state: &StatePaths, cwd: &std::path::Path) {
+    for (_, filename, marker) in CONTEXT_FILES {
+        let path = cwd.join(filename);
+        let (backup_path, no_original_path) = backup_paths(state, filename);
+        let had_backup = backup_path.exists();
+        let had_no_original = no_original_path.exists();
+        if !had_backup && !had_no_original {
+            continue;
+        }
+
+        let current = std::fs::read_to_string(&path).unwrap_or_default();
+        let start_marker = format!("contynu:{marker}:start");
+
+        if current.contains(&start_marker) {
+            if had_no_original {
+                let _ = std::fs::remove_file(&path);
+            } else {
+                let _ = std::fs::rename(&backup_path, &path);
+            }
+        }
+
+        // Whether we restored or the user hand-fixed things, clear the
+        // sentinels so the next run starts from a clean slate.
+        let _ = std::fs::remove_file(&backup_path);
+        let _ = std::fs::remove_file(&no_original_path);
+    }
+}
+
+fn classify_spawn_error(error: std::io::Error) -> ContynuError {
+    // `ArgumentListTooLong` means argv+envp exceeded the OS ARG_MAX. We keep
+    // the injected prompt out of argv on purpose, but an adapter config or
+    // oversized env could still trip this. Surface a self-diagnosing message
+    // so continuity failures never look cryptic.
+    if error.kind() == std::io::ErrorKind::ArgumentListTooLong {
+        return ContynuError::CommandStart(
+            "rehydration context exceeded the OS argv/env limit. \
+             This should not happen with built-in launchers; if you have a \
+             custom launcher in config.json, move large context into a file \
+             via `{prompt_file}` instead of `{prompt_text}`."
+                .into(),
+        );
+    }
+    ContynuError::CommandStart(error.to_string())
 }
 
 fn resolve_transport(adapter: &AdapterSpec) -> ExecutionTransport {
@@ -831,8 +920,135 @@ fn install_pty_ctrlc_handler(child: &PtyChild, interrupted: Arc<AtomicBool>) {
 mod tests {
     use tempfile::tempdir;
 
-    use super::{RunConfig, RuntimeEngine};
+    use super::{
+        backup_paths, reconcile_orphan_context_backups, write_context_file, RunConfig,
+        RuntimeEngine,
+    };
+    use crate::adapters::AdapterSpec;
+    use crate::config::ContynuConfig;
     use crate::{MetadataStore, StatePaths};
+
+    #[test]
+    fn context_file_backs_up_into_state_dir_and_restores() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("cwd");
+        let state_dir = dir.path().join(".contynu");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let state = StatePaths::new(&state_dir);
+        state.ensure_layout().unwrap();
+        std::fs::write(cwd.join("CLAUDE.md"), "user's own guidance").unwrap();
+
+        let adapter = AdapterSpec::detect("claude", &ContynuConfig::default());
+        let path = write_context_file(&state, &cwd, &adapter, "CONTINUITY_BLOCK")
+            .unwrap()
+            .unwrap();
+
+        let merged = std::fs::read_to_string(&path).unwrap();
+        assert!(merged.contains("contynu:claude:start"));
+        assert!(merged.contains("CONTINUITY_BLOCK"));
+        assert!(merged.contains("user's own guidance"));
+        // Backup must not leak into the working tree.
+        assert!(!cwd.join(".CLAUDE.md.contynu-backup").exists());
+        let (backup, _) = backup_paths(&state, "CLAUDE.md");
+        assert!(backup.exists());
+
+        super::cleanup_context_file(&state, &path);
+        let restored = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(restored, "user's own guidance");
+        assert!(!backup.exists());
+    }
+
+    #[test]
+    fn context_file_without_original_is_removed_on_cleanup() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("cwd");
+        let state_dir = dir.path().join(".contynu");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let state = StatePaths::new(&state_dir);
+        state.ensure_layout().unwrap();
+
+        let adapter = AdapterSpec::detect("claude", &ContynuConfig::default());
+        let path = write_context_file(&state, &cwd, &adapter, "CONTINUITY_BLOCK")
+            .unwrap()
+            .unwrap();
+        assert!(path.exists());
+        let (_, no_original) = backup_paths(&state, "CLAUDE.md");
+        assert!(no_original.exists());
+
+        super::cleanup_context_file(&state, &path);
+        assert!(!path.exists());
+        assert!(!no_original.exists());
+    }
+
+    #[test]
+    fn reconcile_restores_orphan_backup_from_prior_crash() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("cwd");
+        let state_dir = dir.path().join(".contynu");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let state = StatePaths::new(&state_dir);
+        state.ensure_layout().unwrap();
+        std::fs::write(cwd.join("CLAUDE.md"), "user's own guidance").unwrap();
+
+        let adapter = AdapterSpec::detect("claude", &ContynuConfig::default());
+        let _ = write_context_file(&state, &cwd, &adapter, "CONTINUITY_BLOCK")
+            .unwrap()
+            .unwrap();
+        // Simulate a crash before cleanup ran: merged file + backup both exist.
+
+        reconcile_orphan_context_backups(&state, &cwd);
+
+        let restored = std::fs::read_to_string(cwd.join("CLAUDE.md")).unwrap();
+        assert_eq!(restored, "user's own guidance");
+        let (backup, no_original) = backup_paths(&state, "CLAUDE.md");
+        assert!(!backup.exists());
+        assert!(!no_original.exists());
+    }
+
+    #[test]
+    fn reconcile_removes_contynu_only_file_when_user_had_no_original() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("cwd");
+        let state_dir = dir.path().join(".contynu");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let state = StatePaths::new(&state_dir);
+        state.ensure_layout().unwrap();
+
+        let adapter = AdapterSpec::detect("claude", &ContynuConfig::default());
+        let _ = write_context_file(&state, &cwd, &adapter, "CONTINUITY_BLOCK")
+            .unwrap()
+            .unwrap();
+        // Simulated crash: CLAUDE.md + no-original sentinel both present.
+
+        reconcile_orphan_context_backups(&state, &cwd);
+        assert!(!cwd.join("CLAUDE.md").exists());
+    }
+
+    #[test]
+    fn reconcile_leaves_user_edited_file_alone() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().join("cwd");
+        let state_dir = dir.path().join(".contynu");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let state = StatePaths::new(&state_dir);
+        state.ensure_layout().unwrap();
+        std::fs::write(cwd.join("CLAUDE.md"), "user's own guidance").unwrap();
+
+        let adapter = AdapterSpec::detect("claude", &ContynuConfig::default());
+        let _ = write_context_file(&state, &cwd, &adapter, "CONTINUITY_BLOCK")
+            .unwrap()
+            .unwrap();
+        // User manually restored their file between the crash and next startup.
+        std::fs::write(cwd.join("CLAUDE.md"), "user hand-fixed it").unwrap();
+
+        reconcile_orphan_context_backups(&state, &cwd);
+
+        let content = std::fs::read_to_string(cwd.join("CLAUDE.md")).unwrap();
+        assert_eq!(content, "user hand-fixed it");
+        let (backup, no_original) = backup_paths(&state, "CLAUDE.md");
+        assert!(!backup.exists());
+        assert!(!no_original.exists());
+    }
 
     #[test]
     fn runtime_run_executes_process() {

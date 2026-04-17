@@ -16,17 +16,17 @@ pub struct ContynuConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PacketBudgetConfig {
-    #[serde(default = "default_4000")]
+    #[serde(default = "default_3600")]
     pub max_total_tokens: usize,
-    #[serde(default = "default_20")]
+    #[serde(default = "default_8")]
     pub max_per_category: usize,
 }
 
 impl Default for PacketBudgetConfig {
     fn default() -> Self {
         Self {
-            max_total_tokens: 4000,
-            max_per_category: 20,
+            max_total_tokens: 3600,
+            max_per_category: 8,
         }
     }
 }
@@ -41,11 +41,11 @@ impl PacketBudgetConfig {
     }
 }
 
-fn default_4000() -> usize {
-    4000
+fn default_3600() -> usize {
+    3600
 }
-fn default_20() -> usize {
-    20
+fn default_8() -> usize {
+    8
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -17,13 +17,20 @@ pub enum PromptFormat {
     StructuredText,
 }
 
+/// Hard ceiling on a rendered rehydration prompt, in bytes. Well under the
+/// Linux `MAX_ARG_STRLEN` (128 KiB) so a prompt can never blow up `execve`,
+/// and comfortable inside every current LLM context window. The packet budget
+/// keeps us far below this in normal operation; this is a last-line guard so
+/// a single oversized memory never silently breaks continuity.
+pub const MAX_RENDERED_PROMPT_BYTES: usize = 32 * 1024;
+
 /// Render a full rehydration prompt in the given format.
 pub fn render_rehydration(
     packet: &RehydrationPacket,
     format: PromptFormat,
     adapter_name: &str,
 ) -> String {
-    match format {
+    let rendered = match format {
         PromptFormat::Xml => render_xml(packet, adapter_name),
         PromptFormat::Markdown => {
             if adapter_name == "codex_cli" {
@@ -33,7 +40,19 @@ pub fn render_rehydration(
             }
         }
         PromptFormat::StructuredText => render_structured_text(packet, adapter_name),
+    };
+    cap_rendered_prompt(rendered, MAX_RENDERED_PROMPT_BYTES)
+}
+
+fn cap_rendered_prompt(rendered: String, max_bytes: usize) -> String {
+    if rendered.len() <= max_bytes {
+        return rendered;
     }
+    let trailer =
+        "\n\n[contynu: context truncated — call the `search_memory` MCP tool for more.]\n";
+    let budget = max_bytes.saturating_sub(trailer.len());
+    let clipped = crate::text::truncate_at_char_boundary(&rendered, budget);
+    format!("{clipped}{trailer}")
 }
 
 /// Render a compact launcher prompt in the given format.
@@ -645,7 +664,7 @@ pub fn render_memory_export(
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn one_line(text: &str) -> String {
+pub(crate) fn one_line(text: &str) -> String {
     text.lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
@@ -725,6 +744,27 @@ mod tests {
             first_run: false,
             memory_provenance: Vec::new(),
         }
+    }
+
+    #[test]
+    fn rendered_prompt_is_capped_and_points_to_mcp_fallback() {
+        let mut packet = test_packet();
+        // Inflate the packet past the hard ceiling so the cap must kick in.
+        packet.stable_facts = (0..5_000)
+            .map(|i| format!("Durable fact #{i}: the service remembers everything across runs."))
+            .collect();
+        let output = render_rehydration(&packet, PromptFormat::Xml, "claude_cli");
+        assert!(output.len() <= MAX_RENDERED_PROMPT_BYTES);
+        assert!(output.contains("contynu: context truncated"));
+        assert!(output.contains("search_memory"));
+    }
+
+    #[test]
+    fn rendered_prompt_is_unchanged_when_under_cap() {
+        let packet = test_packet();
+        let output = render_rehydration(&packet, PromptFormat::Xml, "claude_cli");
+        assert!(output.len() < MAX_RENDERED_PROMPT_BYTES);
+        assert!(!output.contains("contynu: context truncated"));
     }
 
     #[test]

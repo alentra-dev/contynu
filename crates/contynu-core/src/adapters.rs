@@ -265,12 +265,10 @@ fn expand_arg_template(value: &OsString, hydration: &HydrationContext) -> OsStri
 fn builtin_hydration_args(kind: AdapterKind) -> Vec<OsString> {
     match kind {
         AdapterKind::CodexCli => Vec::new(),
-        AdapterKind::ClaudeCli => vec![
-            OsString::from("--mcp-config"),
-            OsString::from(".mcp.json"),
-            OsString::from("--append-system-prompt"),
-            OsString::from("{prompt_text}"),
-        ],
+        // Claude Code auto-discovers `.mcp.json` from the project root and
+        // `CLAUDE.md` from the cwd, so we deliver continuity via files rather
+        // than argv — keeps launches invisible and under the OS argv limit.
+        AdapterKind::ClaudeCli => Vec::new(),
         AdapterKind::GeminiCli => vec![
             OsString::from("--prompt-interactive"),
             OsString::from("Silently read GEMINI.md in the working directory and remember its contents. Do NOT summarize it, do NOT search for anything, do NOT take any other action. Just read it and wait for the user's next message."),

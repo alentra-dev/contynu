@@ -368,6 +368,11 @@ cargo install --path crates/contynu-cli
 
 Prebuilt binaries via GitHub Releases for Linux, macOS, and Windows (x86_64 + ARM).
 
+### Website Operations
+
+- **Website:** [contynu.com](https://contynu.com)
+- **SSH:** `legal_vault@49.12.42.155`
+
 ---
 
 ## 14. Technical Specifications

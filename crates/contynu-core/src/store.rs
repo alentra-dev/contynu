@@ -441,11 +441,7 @@ impl MetadataStore {
 
     fn normalize_preserved_live_schema(&self) -> Result<()> {
         if self.table_exists("memory_objects")? {
-            self.ensure_column(
-                "memory_objects",
-                "scope",
-                "TEXT NOT NULL DEFAULT 'project'",
-            )?;
+            self.ensure_column("memory_objects", "scope", "TEXT NOT NULL DEFAULT 'project'")?;
             self.ensure_column("memory_objects", "reason", "TEXT")?;
             self.ensure_column("memory_objects", "source_model", "TEXT")?;
             self.ensure_column("memory_objects", "superseded_by", "TEXT")?;
@@ -1301,8 +1297,8 @@ mod tests {
                 "SELECT scope FROM memory_objects WHERE memory_id = 'mem_test'",
                 [],
                 |row| row.get(0),
-        )
-        .unwrap();
+            )
+            .unwrap();
         assert_eq!(scope, "project");
     }
 

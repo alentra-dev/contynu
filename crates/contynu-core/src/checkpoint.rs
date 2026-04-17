@@ -6,6 +6,7 @@ use crate::blobs::BlobStore;
 use crate::distiller;
 use crate::error::Result;
 use crate::ids::{CheckpointId, ProjectId, SessionId};
+use crate::rendering::one_line;
 use crate::state::StatePaths;
 use crate::store::{
     CheckpointRecord, MemoryObject, MemoryObjectKind, MetadataStore, WorkingSetEntry,
@@ -37,8 +38,8 @@ pub struct PacketBudget {
 impl Default for PacketBudget {
     fn default() -> Self {
         Self {
-            max_total_tokens: 4000,
-            max_per_category: 20,
+            max_total_tokens: 3600,
+            max_per_category: 8,
             min_per_category: 2,
         }
     }
@@ -259,29 +260,38 @@ impl<'a> CheckpointManager<'a> {
             &working_set_ids,
         );
 
-        let constraints = memories_to_texts(&constraint_memories);
-        let decisions = memories_to_texts(&decision_memories);
-        let open_loops = memories_to_texts(&open_loop_memories);
-        let stable_facts = memories_to_texts(
+        let constraints =
+            texts_from_memories_with_budget(&constraint_memories, slices.constraint_tokens, 90);
+        let decisions =
+            texts_from_memories_with_budget(&decision_memories, slices.decision_tokens, 90);
+        let open_loops =
+            texts_from_memories_with_budget(&open_loop_memories, slices.open_loop_tokens, 80);
+        let stable_facts = texts_from_memories_with_budget(
             &durable_memories
                 .iter()
                 .copied()
                 .filter(|m| m.kind == MemoryObjectKind::Fact)
                 .collect::<Vec<_>>(),
+            slices.durable_tokens / 2,
+            80,
         );
-        let user_facts = memories_to_texts(
+        let user_facts = texts_from_memories_with_budget(
             &durable_memories
                 .iter()
                 .copied()
                 .filter(|m| m.kind == MemoryObjectKind::UserFact)
                 .collect::<Vec<_>>(),
+            slices.durable_tokens / 4,
+            60,
         );
-        let project_knowledge = memories_to_texts(
+        let project_knowledge = texts_from_memories_with_budget(
             &durable_memories
                 .iter()
                 .copied()
                 .filter(|m| m.kind == MemoryObjectKind::ProjectKnowledge)
                 .collect::<Vec<_>>(),
+            slices.durable_tokens / 2,
+            80,
         );
 
         for selected in [
@@ -326,24 +336,23 @@ impl<'a> CheckpointManager<'a> {
         );
 
         // Recent verbatim context from recorded prompts
-        let recent_verbatim_context: Vec<String> = recent_prompts
-            .iter()
-            .rev()
-            .take(3)
-            .map(|p| {
-                if let Some(ref interp) = p.interpretation {
-                    format!("User: {} (interpreted as: {})", p.verbatim, interp)
-                } else {
-                    format!("User: {}", p.verbatim)
-                }
-            })
-            .collect();
+        let recent_verbatim_context =
+            budget_recent_dialogue(&recent_prompts, slices.recent_dialogue_tokens);
 
         let first_run = memory.is_empty() && recent_prompts.is_empty();
-        let recent_changes = build_recent_changes(&memory, &recent_prompts, prompt_query, now);
+        let recent_changes = build_recent_changes(
+            &memory,
+            &recent_prompts,
+            prompt_query,
+            now,
+            slices.recent_change_tokens,
+        );
 
         let current_state = if let Some(prompt) = recent_prompts.first() {
-            format!("The latest user request was: {}", prompt.verbatim)
+            format!(
+                "The latest user request was: {}",
+                clip_text_to_tokens(&one_line(&prompt.verbatim), slices.current_state_tokens)
+            )
         } else if first_run {
             "This project is starting fresh. No prior Contynu memory has been recorded yet.".into()
         } else {
@@ -365,8 +374,7 @@ impl<'a> CheckpointManager<'a> {
 
         // L1: Compact brief — selected memories only, ordered by relevance.
         let mut brief_lines = Vec::new();
-        let mut brief_chars = 0usize;
-        let max_brief_chars = 1200;
+        let mut brief_tokens = 0usize;
         let mut brief_memories = Vec::new();
         brief_memories.extend(decision_memories.iter().copied());
         brief_memories.extend(constraint_memories.iter().copied());
@@ -375,7 +383,7 @@ impl<'a> CheckpointManager<'a> {
         dedup_memories(&mut brief_memories);
 
         for m in brief_memories {
-            let text = m.text.trim();
+            let text = compact_memory_text(&m.text, 40);
             let kind_abbrev = match m.kind {
                 MemoryObjectKind::Fact => "F",
                 MemoryObjectKind::Decision => "D",
@@ -385,16 +393,18 @@ impl<'a> CheckpointManager<'a> {
                 MemoryObjectKind::ProjectKnowledge => "P",
             };
             let line = format!("{}: {}", kind_abbrev, text);
-            if brief_chars + line.len() > max_brief_chars {
+            let line_tokens = estimate_tokens(&line);
+            if !brief_lines.is_empty() && brief_tokens + line_tokens > slices.brief_tokens {
                 break;
             }
             brief_lines.push(line.clone());
-            brief_chars += line.len();
-            if brief_lines.len() >= 10 {
+            brief_tokens += line_tokens;
+            if brief_lines.len() >= 8 {
                 break;
             }
         }
         let compact_brief = brief_lines.join("\n");
+        let mission = clip_text_to_tokens(&one_line(&mission), slices.mission_tokens);
 
         // Retrieval guidance — tell models how to use Contynu MCP tools
         let retrieval_guidance = vec![
@@ -562,6 +572,11 @@ pub fn render_launcher_prompt(packet: &RehydrationPacket) -> String {
 }
 
 struct PacketSlices {
+    mission_tokens: usize,
+    current_state_tokens: usize,
+    recent_dialogue_tokens: usize,
+    recent_change_tokens: usize,
+    brief_tokens: usize,
     constraint_tokens: usize,
     decision_tokens: usize,
     open_loop_tokens: usize,
@@ -570,9 +585,24 @@ struct PacketSlices {
 
 impl PacketSlices {
     fn from_budget(budget: &PacketBudget) -> Self {
-        let total = budget.max_total_tokens.max(400);
-        let available = total.saturating_sub(220);
+        let total = budget.max_total_tokens.max(800);
+        let mission_tokens = ((total * 8) / 100).clamp(80, 220);
+        let current_state_tokens = ((total * 10) / 100).clamp(100, 260);
+        let recent_dialogue_tokens = ((total * 9) / 100).clamp(90, 260);
+        let recent_change_tokens = ((total * 10) / 100).clamp(100, 280);
+        let brief_tokens = ((total * 11) / 100).clamp(140, 320);
+        let reserved = mission_tokens
+            + current_state_tokens
+            + recent_dialogue_tokens
+            + recent_change_tokens
+            + brief_tokens;
+        let available = total.saturating_sub(reserved).max(320);
         Self {
+            mission_tokens,
+            current_state_tokens,
+            recent_dialogue_tokens,
+            recent_change_tokens,
+            brief_tokens,
             constraint_tokens: available * 18 / 100,
             decision_tokens: available * 18 / 100,
             open_loop_tokens: available * 18 / 100,
@@ -581,8 +611,33 @@ impl PacketSlices {
     }
 }
 
-fn memories_to_texts(memories: &[&MemoryObject]) -> Vec<String> {
-    memories.iter().map(|m| m.text.clone()).collect()
+fn compact_memory_text(text: &str, per_item_tokens: usize) -> String {
+    let one_line = one_line(text);
+    clip_text_to_tokens(&one_line, per_item_tokens)
+}
+
+fn texts_from_memories_with_budget(
+    memories: &[&MemoryObject],
+    total_tokens: usize,
+    per_item_tokens: usize,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut used_tokens = 0usize;
+
+    for memory in memories {
+        let text = compact_memory_text(&memory.text, per_item_tokens);
+        if text.is_empty() {
+            continue;
+        }
+        let tokens = estimate_tokens(&text);
+        if !out.is_empty() && used_tokens + tokens > total_tokens {
+            break;
+        }
+        out.push(text);
+        used_tokens += tokens;
+    }
+
+    out
 }
 
 fn dedup_memories(memories: &mut Vec<&MemoryObject>) {
@@ -615,12 +670,16 @@ fn select_ranked_memories<'a>(
     let mut selected = Vec::new();
     let mut used_tokens = 0usize;
     for memory in ranked {
-        let tokens = estimate_tokens(&memory.text);
+        let compact = compact_memory_text(&memory.text, 120);
+        let tokens = estimate_tokens(&compact);
+        if tokens > token_budget && !selected.is_empty() {
+            continue;
+        }
         if !selected.is_empty() && used_tokens + tokens > token_budget {
             continue;
         }
         selected.push(memory);
-        used_tokens += tokens;
+        used_tokens += tokens.min(token_budget);
         if selected.len() >= max_items {
             break;
         }
@@ -685,6 +744,21 @@ fn estimate_tokens(text: &str) -> usize {
     ((text.split_whitespace().count() as f64) * 1.3).ceil() as usize
 }
 
+fn clip_text_to_tokens(text: &str, max_tokens: usize) -> String {
+    if max_tokens == 0 {
+        return String::new();
+    }
+
+    let words = text.split_whitespace().collect::<Vec<_>>();
+    let max_words = ((max_tokens as f64) / 1.3).floor().max(1.0) as usize;
+    if words.len() <= max_words {
+        return text.trim().to_string();
+    }
+
+    let clipped = words[..max_words].join(" ");
+    format!("{}...", clipped.trim())
+}
+
 fn summarize_selected(memories: &[&MemoryObject]) -> Vec<serde_json::Value> {
     memories
         .iter()
@@ -700,12 +774,14 @@ fn summarize_selected(memories: &[&MemoryObject]) -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn one_line_preview(text: &str, max_chars: usize) -> String {
+fn one_line_preview(text: &str, max_bytes: usize) -> String {
     let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if one_line.len() <= max_chars {
+    if one_line.len() <= max_bytes {
         one_line
     } else {
-        format!("{}...", &one_line[..max_chars.saturating_sub(3)])
+        let truncated =
+            crate::text::truncate_at_char_boundary(&one_line, max_bytes.saturating_sub(3));
+        format!("{}...", truncated)
     }
 }
 
@@ -714,12 +790,19 @@ fn build_recent_changes(
     recent_prompts: &[crate::store::PromptRecord],
     prompt_query: &str,
     now: DateTime<Utc>,
+    total_tokens: usize,
 ) -> Vec<String> {
     let mut changes = Vec::new();
+    let mut used_tokens = 0usize;
     let empty_working_set = HashSet::new();
 
     if let Some(prompt) = recent_prompts.first() {
-        changes.push(format!("Latest user request: {}", prompt.verbatim.trim()));
+        let latest = format!(
+            "Latest user request: {}",
+            clip_text_to_tokens(&one_line(&prompt.verbatim), 80)
+        );
+        used_tokens += estimate_tokens(&latest);
+        changes.push(latest);
     }
 
     let mut recent_memories: Vec<&MemoryObject> = memories.iter().collect();
@@ -746,9 +829,14 @@ fn build_recent_changes(
             if text.is_empty() {
                 continue;
             }
-            let line = format!("{label}: {text}");
+            let line = format!("{label}: {}", compact_memory_text(text, 64));
+            let line_tokens = estimate_tokens(&line);
+            if !changes.is_empty() && used_tokens + line_tokens > total_tokens {
+                break;
+            }
             if !changes.contains(&line) {
                 changes.push(line);
+                used_tokens += line_tokens;
             }
         }
 
@@ -760,6 +848,33 @@ fn build_recent_changes(
     changes
 }
 
+fn budget_recent_dialogue(
+    recent_prompts: &[crate::store::PromptRecord],
+    total_tokens: usize,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut used_tokens = 0usize;
+
+    for prompt in recent_prompts.iter().rev().take(3) {
+        let mut line = format!(
+            "User: {}",
+            clip_text_to_tokens(&one_line(&prompt.verbatim), 70)
+        );
+        if let Some(ref interp) = prompt.interpretation {
+            let interp = clip_text_to_tokens(&one_line(interp), 30);
+            line.push_str(&format!(" (interpreted as: {interp})"));
+        }
+        let tokens = estimate_tokens(&line);
+        if !out.is_empty() && used_tokens + tokens > total_tokens {
+            break;
+        }
+        out.push(line);
+        used_tokens += tokens;
+    }
+
+    out
+}
+
 fn path_string(path: &Path) -> String {
     path.display().to_string()
 }
@@ -769,7 +884,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        render_launcher_prompt, sanitize_packet, CheckpointManager, PacketBudget, RehydrationPacket,
+        clip_text_to_tokens, one_line_preview, render_launcher_prompt, sanitize_packet,
+        CheckpointManager, PacketBudget, RehydrationPacket,
     };
     use crate::blobs::BlobStore;
     use crate::ids::{MemoryId, ProjectId, SessionId};
@@ -951,6 +1067,90 @@ mod tests {
                 .any(|line| line
                     .contains("Latest user request: what did you just say about the sky?"))
         );
+    }
+
+    #[test]
+    fn packet_budget_truncates_large_prompt_and_memory_payloads() {
+        let dir = tempdir().unwrap();
+        let state = StatePaths::new(dir.path().join(".contynu"));
+        state.ensure_layout().unwrap();
+
+        let store = MetadataStore::open(state.sqlite_db()).unwrap();
+        let blobs = BlobStore::new(state.blobs_root());
+        let session_id = SessionId::new();
+
+        store
+            .register_session(&SessionRecord {
+                session_id: session_id.clone(),
+                project_id: None,
+                status: "started".into(),
+                cli_name: Some("gemini".into()),
+                cli_version: None,
+                model_name: None,
+                cwd: None,
+                repo_root: None,
+                host_fingerprint: None,
+                started_at: chrono::Utc::now(),
+                ended_at: None,
+            })
+            .unwrap();
+
+        store
+            .insert_prompt(&PromptRecord {
+                prompt_id: "pmt_big".into(),
+                session_id: session_id.clone(),
+                verbatim: "this is a very long prompt ".repeat(500),
+                interpretation: Some("continue prior work".into()),
+                interpretation_confidence: Some(0.9),
+                source_model: None,
+                created_at: chrono::Utc::now(),
+            })
+            .unwrap();
+
+        let huge_memory = "operational context and prior transcript details ".repeat(700);
+        for kind in [
+            MemoryObjectKind::Constraint,
+            MemoryObjectKind::Decision,
+            MemoryObjectKind::ProjectKnowledge,
+        ] {
+            store
+                .insert_memory_object(&MemoryObject {
+                    memory_id: MemoryId::new(),
+                    session_id: session_id.clone(),
+                    kind,
+                    scope: MemoryScope::Project,
+                    status: "active".into(),
+                    text: huge_memory.clone(),
+                    importance: 0.9,
+                    reason: None,
+                    source_model: None,
+                    superseded_by: None,
+                    created_at: chrono::Utc::now(),
+                    updated_at: None,
+                    access_count: 0,
+                    last_accessed_at: None,
+                })
+                .unwrap();
+        }
+
+        let manager = CheckpointManager::new(&state, &store, &blobs);
+        let packet = manager
+            .build_packet_with_budget(&session_id, None, &PacketBudget::default())
+            .unwrap();
+
+        let packet_json = serde_json::to_string(&packet).unwrap();
+        assert!(
+            packet_json.len() < 40_000,
+            "packet too large: {}",
+            packet_json.len()
+        );
+        assert!(packet.mission.ends_with("..."));
+        assert!(packet
+            .constraints
+            .first()
+            .map(|line| line.ends_with("..."))
+            .unwrap_or(false));
+        assert!(packet.recent_verbatim_context.len() <= 3);
     }
 
     #[test]
@@ -1163,5 +1363,27 @@ mod tests {
         assert!(value.get("memory_provenance").is_none());
         let rendered = serde_json::to_string(&value).unwrap();
         assert!(!rendered.contains("source_model"));
+    }
+
+    #[test]
+    fn one_line_preview_handles_multibyte_boundary_safety() {
+        // '─' (U+2500) is 3 bytes in UTF-8.
+        // 116..119 is where it occupies.
+        // Truncating to 117 would panic if not handled.
+        let mut s = "a".repeat(116);
+        s.push('─');
+        s.push_str(" rest of text");
+
+        let preview = one_line_preview(&s, 120);
+        // Should not panic, should truncate to "a"*116 + "..."
+        assert!(preview.ends_with("..."));
+        assert_eq!(preview.len(), 116 + 3);
+    }
+
+    #[test]
+    fn clip_text_to_tokens_preserves_short_text_and_truncates_long_text() {
+        assert_eq!(clip_text_to_tokens("short text", 10), "short text");
+        let clipped = clip_text_to_tokens("one two three four five six seven eight", 3);
+        assert!(clipped.ends_with("..."));
     }
 }

@@ -878,17 +878,7 @@ fn resolve_primary_project(store: &MetadataStore) -> Result<ProjectId> {
 }
 
 fn print_run_footer(outcome: &RunOutcome) {
-    let lines = if outcome.interrupted {
-        vec![
-            "Contynu paused here.".to_string(),
-            format!("Project {}.", short_id(outcome.project_id.as_str())),
-        ]
-    } else {
-        vec![
-            "Let's contynu another time. Goodbye for now.".to_string(),
-            format!("Project {}.", short_id(outcome.project_id.as_str())),
-        ]
-    };
+    let lines = run_footer_lines(outcome);
 
     let width = lines
         .iter()
@@ -905,12 +895,63 @@ fn print_run_footer(outcome: &RunOutcome) {
     eprintln!();
 }
 
+fn run_footer_lines(outcome: &RunOutcome) -> Vec<String> {
+    if outcome.interrupted {
+        return vec![
+            "Contynu paused here.".to_string(),
+            format!("Project {}.", short_id(outcome.project_id.as_str())),
+        ];
+    }
+
+    if let Some(code) = outcome.exit_code.filter(|code| *code != 0) {
+        return vec![
+            "This Contynu run ended because the launched tool exited unexpectedly.".to_string(),
+            format!("Project {}.", short_id(outcome.project_id.as_str())),
+            format!("Child process exit code {}.", code),
+        ];
+    }
+
+    vec![
+        "Let's contynu another time. Goodbye for now.".to_string(),
+        format!("Project {}.", short_id(outcome.project_id.as_str())),
+    ]
+}
+
 fn short_id(value: &str) -> &str {
     let keep = 12;
     if value.len() <= keep {
         value
     } else {
         &value[..keep]
+    }
+}
+
+#[cfg(test)]
+mod footer_tests {
+    use super::run_footer_lines;
+    use contynu_core::{ProjectId, RunOutcome};
+
+    #[test]
+    fn footer_shows_clean_exit_message() {
+        let outcome = RunOutcome {
+            project_id: ProjectId::parse("prj_019d503680a475a3ae465200a90cd4fa").unwrap(),
+            exit_code: Some(0),
+            interrupted: false,
+        };
+        let lines = run_footer_lines(&outcome);
+        assert!(lines[0].contains("Let's contynu another time"));
+    }
+
+    #[test]
+    fn footer_surfaces_child_crash() {
+        let outcome = RunOutcome {
+            project_id: ProjectId::parse("prj_019d503680a475a3ae465200a90cd4fa").unwrap(),
+            exit_code: Some(134),
+            interrupted: false,
+        };
+        let lines = run_footer_lines(&outcome);
+        assert!(lines[0].contains("exited unexpectedly"));
+        assert!(lines.iter().any(|line| line.contains("134")));
     }
 }
 
