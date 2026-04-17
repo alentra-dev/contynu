@@ -12,6 +12,11 @@ Cargo.lock
 # Stray terminal-session dump from `script`
 /typescript
 
+# Session/memory files and internal docs — keep only READMEs on GitHub
+*.md
+!README.md
+!**/README.md
+
 # Editors and OS
 .DS_Store
 .idea/
